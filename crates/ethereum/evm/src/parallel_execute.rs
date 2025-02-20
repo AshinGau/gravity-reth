@@ -163,8 +163,9 @@ where
                 let mut seq_state =
                     State::builder().with_database_ref(&state.database).with_bundle_update().build();
                 seq_state.set_state_clear_flag(self.state_clear_flag);
-                seq_state.cache.accounts.extend(state.cache.accounts.clone());
-                seq_state.cache.contracts.extend(state.cache.contracts.clone());
+                let as_state = state.cache.as_cache_state();
+                seq_state.cache.accounts.extend(as_state.accounts);
+                seq_state.cache.contracts.extend(as_state.contracts);
                 seq_state.block_hashes.extend(state.block_hashes.clone());
                 {
                     let mut evm = EvmBuilder::default()
