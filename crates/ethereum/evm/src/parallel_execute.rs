@@ -193,10 +193,14 @@ where
             let parallel_output = executor.parallel_execute(None);
             let (parallel_results, parallel_state) = executor.take_result_and_state();
 
-            if parallel_output.is_err() || !crate::debug_ext::compare_transition_state(
+            let dump_block_number: Option<u64> = std::env::var("DUMP_BLOCK_NUMBER").map(|s| s.parse().unwrap()).ok();
+            let should_dump = dump_block_number.map(|number| number == block.number).unwrap_or(false);
+            let parallel_error = parallel_output.is_err() || !crate::debug_ext::compare_transition_state(
                 seq_state.0.as_ref().unwrap(),
                 parallel_state.transition_state.as_ref().unwrap(),
-            ) {
+            );
+
+            if should_dump || parallel_error {
                 crate::debug_ext::dump_transitions(
                     block.number,
                     seq_state.0.as_ref().unwrap(),
@@ -217,7 +221,11 @@ where
                     &seq_state.2,
                 )
                 .unwrap();
-                panic!("Transition state mismatch, block number: {}", block.number);
+                if parallel_error {
+                    panic!("Transition state mismatch, block number: {}", block.number);
+                } else {
+                    println!("Dump block number: {}", block.number);
+                }
             }
             parallel_output.map_err(|e| BlockExecutionError::msg(e))?;
             (parallel_results, parallel_state)
