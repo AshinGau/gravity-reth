@@ -97,7 +97,7 @@ where
 {
     /// Create a new instance of the executor
     pub fn new(chain_spec: Arc<ChainSpec>, evm_config: EvmConfig, database: DB) -> Self {
-        let state = ParallelState::new(database, true);
+        let state = ParallelState::new(database, true, DEBUG_EXT.update_db_metrics);
         Self { chain_spec, evm_config, state: Some(state), state_clear_flag: true }
     }
 }
@@ -162,7 +162,9 @@ where
             let seq_state = {
                 let mut seq_state =
                     State::builder().with_database_ref(&state.database).with_bundle_update().build();
-                seq_state.cache = state.cache.clone().into();
+                let as_state = state.cache.as_cache_state();
+                seq_state.cache.accounts.extend(as_state.accounts);
+                seq_state.cache.contracts.extend(as_state.contracts);
                 seq_state.block_hashes.extend(state.block_hashes.clone());
                 seq_state.set_state_clear_flag(self.state_clear_flag);
                 {
