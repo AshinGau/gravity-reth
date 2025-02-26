@@ -1,5 +1,6 @@
 //! Ethereum block executor using grevm.
 
+use std::collections::{BTreeMap, HashMap};
 use crate::{
     dao_fork::{DAO_HARDFORK_BENEFICIARY, DAO_HARDKFORK_ACCOUNTS},
     execute::EthExecuteOutput,
@@ -22,14 +23,9 @@ use reth_evm::{
 };
 use reth_execution_types::{BlockExecutionInput, BlockExecutionOutput, ExecutionOutcome};
 use reth_grevm::{ParallelBundleState, ParallelState, ParallelTakeBundle, Scheduler};
-use reth_primitives::{BlockNumber, BlockWithSenders, Header, Receipt};
+use reth_primitives::{Address, B256, BlockNumber, BlockWithSenders, Header, Receipt};
 use reth_prune_types::PruneModes;
-use reth_revm::{
-    batch::BlockBatchRecord,
-    db::{states::bundle_state::BundleRetention, State},
-    state_change::post_block_balance_increments,
-    DatabaseCommit, EvmBuilder, TransitionState,
-};
+use reth_revm::{batch::BlockBatchRecord, db::{states::bundle_state::BundleRetention, State}, state_change::post_block_balance_increments, DatabaseCommit, EvmBuilder, TransitionState, CacheState};
 use revm_primitives::{BlockEnv, CfgEnvWithHandlerCfg, EnvWithHandlerCfg, TxEnv, U256};
 
 /// Provides grevm executors to execute regular ethereum blocks
@@ -68,6 +64,7 @@ where
         GrevmBatchExecutor {
             executor: GrevmBlockExecutor::new(self.chain_spec.clone(), self.evm_config.clone(), db),
             batch_record: BlockBatchRecord::default(),
+            last_block: None,
         }
     }
 }
@@ -263,7 +260,7 @@ where
             let deposit_requests =
                 crate::eip6110::parse_deposits_from_receipts(&self.chain_spec, &receipts)?;
 
-            let mut evm = self.evm_config.evm_with_env(&mut state, env);
+            let mut evm = self.evm_config.evm_with_env(&mut state, env.clone());
 
             // Collect all EIP-7685 requests
             let withdrawal_requests =
@@ -280,7 +277,17 @@ where
         self.state = Some(state);
 
         // Apply post execution changes
-        self.post_execution(block, total_difficulty)?;
+        let post_rewards = self.post_execution(block, total_difficulty)?;
+        crate::debug_ext::dump_txs(
+            &env,
+            &txs.as_ref(),
+            &post_rewards).unwrap();
+        // increment balances
+        self.state
+            .as_mut()
+            .unwrap()
+            .increment_balances(post_rewards)
+            .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
 
         Ok(EthExecuteOutput { receipts, requests, gas_used: cumulative_gas_used })
     }
@@ -333,7 +340,7 @@ where
         &mut self,
         block: &BlockWithSenders,
         total_difficulty: U256,
-    ) -> Result<(), BlockExecutionError> {
+    ) -> Result<HashMap<Address, u128>, BlockExecutionError> {
         let mut balance_increments =
             post_block_balance_increments(self.chain_spec.as_ref(), block, total_difficulty);
 
@@ -352,13 +359,7 @@ where
             // return balance to DAO beneficiary.
             *balance_increments.entry(DAO_HARDFORK_BENEFICIARY).or_default() += drained_balance;
         }
-        // increment balances
-        self.state
-            .as_mut()
-            .unwrap()
-            .increment_balances(balance_increments)
-            .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
-        Ok(())
+        Ok(balance_increments)
     }
 }
 
@@ -376,6 +377,7 @@ where
     executor: GrevmBlockExecutor<EvmConfig, DB>,
     /// Keeps track of the batch and records receipts based on the configured prune mode
     batch_record: BlockBatchRecord,
+    last_block: Option<BlockNumber>,
 }
 
 impl<EvmConfig, DB> BatchExecutor<DB> for GrevmBatchExecutor<EvmConfig, DB>
@@ -404,25 +406,35 @@ where
             &requests,
         )?;
 
+        // store receipts in the set
+        self.batch_record.save_receipts(receipts)?;
+
+        // store requests in the set
+        self.batch_record.save_requests(requests);
+        self.last_block = Some(block.number);
+
+        Ok(())
+    }
+
+    fn finalize(mut self) -> Self::Output {
+        let first_block = self.batch_record.first_block().unwrap_or_default();
+        let last_block = self.last_block.unwrap_or_default();
+        tracing::info!(">>>>> Start to dump block env: {} -> {} <<<<<", first_block, last_block);
+        let as_state = self.executor.state.as_ref().unwrap().cache.as_cache_state();
+        let transition = self.executor.state.as_ref().unwrap().transition_state.as_ref().unwrap();
+        let mut block_hashes: BTreeMap<u64, B256> = BTreeMap::new();
+        block_hashes.extend(self.executor.state.as_ref().unwrap().block_hashes.clone());
+        crate::debug_ext::dump_pre_state(first_block, last_block, &as_state, transition, &block_hashes).unwrap();
+        tracing::info!(">>>>> Success to dump block env: {} -> {} <<<<<", first_block, last_block);
+
         // prepare the state according to the prune mode
-        let retention = self.batch_record.bundle_retention(block.number);
+        let retention = self.batch_record.bundle_retention(first_block);
         let state = self.executor.state.as_mut().unwrap();
         if let Some(transition_state) = state.transition_state.as_mut().map(TransitionState::take) {
             state
                 .bundle_state
                 .parallel_apply_transitions_and_create_reverts(transition_state, retention);
         }
-
-        // store receipts in the set
-        self.batch_record.save_receipts(receipts)?;
-
-        // store requests in the set
-        self.batch_record.save_requests(requests);
-
-        Ok(())
-    }
-
-    fn finalize(mut self) -> Self::Output {
         ExecutionOutcome::new(
             self.executor.state.as_mut().unwrap().take_bundle(),
             self.batch_record.take_receipts(),

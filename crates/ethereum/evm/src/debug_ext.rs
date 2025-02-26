@@ -10,6 +10,7 @@ use once_cell::sync::Lazy;
 use reth_primitives::{Address, Receipt, B256};
 use reth_revm::{db::PlainAccount, CacheState, TransitionState};
 use revm_primitives::{EnvWithHandlerCfg, TxEnv};
+use revm_primitives::alloy_primitives::BlockNumber;
 
 #[derive(Debug)]
 pub(crate) struct DebugExtArgs {
@@ -33,6 +34,83 @@ pub(crate) static DEBUG_EXT: Lazy<DebugExtArgs> = Lazy::new(|| DebugExtArgs {
     with_hints: std::env::var("WITH_HINTS").is_ok(),
     update_db_metrics: std::env::var("UPDATE_DB_METRICS").is_ok(),
 });
+
+pub(crate) fn dump_txs(env: &EnvWithHandlerCfg,
+                       txs: &[TxEnv],
+                       post_rewards: &HashMap<Address, u128>) -> Result<(), Box<dyn Error>> {
+    let path = format!("{}/{}", DEBUG_EXT.dump_path, env.block.number);
+    std::fs::create_dir_all(&path)?;
+
+    // Write env data to file
+    serde_json::to_writer(BufWriter::new(std::fs::File::create(format!("{path}/env.json"))?), env)?;
+
+    // Write txs data to file
+    serde_json::to_writer(BufWriter::new(std::fs::File::create(format!("{path}/txs.json"))?), txs)?;
+
+    serde_json::to_writer(BufWriter::new(std::fs::File::create(format!("{path}/post.json"))?), post_rewards)?;
+    Ok(())
+}
+
+pub(crate) fn dump_pre_state(
+    first_block: BlockNumber,
+    last_block: BlockNumber,
+    cache_state: &CacheState,
+    transition_state: &TransitionState,
+    block_hashes: &BTreeMap<u64, B256>,
+) -> Result<(), Box<dyn Error>> {
+    let path = format!("{}/{}_{}", DEBUG_EXT.dump_path, first_block, last_block);
+    std::fs::create_dir_all(&path)?;
+
+    // Write pre-state and bytecodes data to file
+    let mut pre_state: HashMap<Address, PlainAccount> =
+        HashMap::with_capacity(transition_state.transitions.len());
+    let mut bytecodes = cache_state.contracts.clone();
+    for (addr, account) in cache_state.accounts.iter() {
+        if let Some(transition_account) = transition_state.transitions.get(addr) {
+            // account has been modified by execution, use previous info
+            if let Some(info) = transition_account.previous_info.as_ref() {
+                let mut storage = if let Some(account) = account.account.as_ref() {
+                    account.storage.clone()
+                } else {
+                    HashMap::new()
+                };
+                storage.extend(
+                    transition_account.storage.iter().map(|(k, v)| (*k, v.original_value())),
+                );
+
+                let mut info = info.clone();
+                if let Some(code) = info.code.take() {
+                    bytecodes.entry(info.code_hash).or_insert_with(|| code);
+                }
+                pre_state.insert(*addr, PlainAccount { info, storage });
+            }
+        } else if let Some(account) = account.account.as_ref() {
+            // account has not been modified, use current info in cache
+            let mut account = account.clone();
+            if let Some(code) = account.info.code.take() {
+                bytecodes.entry(account.info.code_hash).or_insert_with(|| code);
+            }
+            pre_state.insert(*addr, account.clone());
+        }
+    }
+
+    serde_json::to_writer(
+        BufWriter::new(std::fs::File::create(format!("{path}/pre_state.json"))?),
+        &pre_state,
+    )?;
+    bincode::serialize_into(
+        BufWriter::new(std::fs::File::create(format!("{path}/bytecodes.bincode"))?),
+        &bytecodes,
+    )?;
+
+    // Write block hashes to file
+    serde_json::to_writer(
+        BufWriter::new(std::fs::File::create(format!("{path}/block_hashes.json"))?),
+        block_hashes,
+    )?;
+
+    Ok(())
+}
 
 pub(crate) fn dump_block_env(
     env: &EnvWithHandlerCfg,
