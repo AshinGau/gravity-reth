@@ -27,7 +27,7 @@ impl Default for ExecutionStageThresholds {
             // 50k full blocks of 30M gas
             max_cumulative_gas: Some(30_000_000 * 50_000),
             // 10 minutes
-            max_duration: Some(Duration::from_secs(10 * 60)),
+            max_duration: Some(Duration::from_secs(280)),
         }
     }
 }
