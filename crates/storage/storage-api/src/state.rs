@@ -1,5 +1,7 @@
 use std::num::NonZero;
 
+use crate::PersistBlockCache;
+
 use super::{
     AccountReader, BlockHashReader, BlockIdReader, StateProofProvider, StateRootProvider,
     StorageRootProvider,
@@ -108,12 +110,14 @@ pub trait TryIntoHistoricalStateProvider {
     fn try_into_history_at_block(
         self,
         block_number: BlockNumber,
+        cache: Option<PersistBlockCache>,
     ) -> ProviderResult<StateProviderBox>;
 }
 
 #[derive(Debug, Clone)]
 pub struct StateProviderOptions {
     pub parallel: NonZero<usize>,
+    pub cache: Option<PersistBlockCache>,
 }
 
 /// General options for state providers.
@@ -125,11 +129,23 @@ pub static STATE_PROVIDER_OPTS: Lazy<StateProviderOptions> = Lazy::new(|| StateP
             .unwrap_or(8),
     )
     .unwrap(),
+    cache: None,
 });
 
 impl Default for StateProviderOptions {
     fn default() -> Self {
-        Self { parallel: NonZero::new(1).unwrap() }
+        Self { parallel: NonZero::new(1).unwrap(), cache: None }
+    }
+}
+
+impl StateProviderOptions {
+    pub fn with_cache(mut self, cache: PersistBlockCache) -> Self {
+        self.cache = Some(cache);
+        self
+    }
+
+    pub fn get_cache(&self) -> Option<PersistBlockCache> {
+        self.cache.clone()
     }
 }
 

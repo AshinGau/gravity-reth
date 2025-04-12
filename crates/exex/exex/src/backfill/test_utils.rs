@@ -66,7 +66,13 @@ where
 
     // Execute the block to produce a block execution output
     let mut block_execution_output = EthExecutorProvider::ethereum(chain_spec)
+<<<<<<< HEAD
         .executor(StateProviderDatabase::new(LatestStateProviderRef::new(&provider)))
+=======
+        .executor(parallel_database!(StateProviderDatabase::new(LatestStateProviderRef::new(
+            &provider, None,
+        ))))
+>>>>>>> bc8f83be1 (opt(cache) add account and state root cache)
         .execute(block)?;
     block_execution_output.state.reverts.sort();
 
@@ -195,7 +201,7 @@ where
     let provider = provider_factory.provider()?;
 
     let executor = EthExecutorProvider::ethereum(chain_spec)
-        .executor(StateProviderDatabase::new(LatestStateProviderRef::new(&provider)));
+        .executor(StateProviderDatabase::new(LatestStateProviderRef::new(&provider), None));
 
     let mut execution_outcome = executor.execute_batch(vec![&block1, &block2])?;
     execution_outcome.state_mut().reverts.sort();
