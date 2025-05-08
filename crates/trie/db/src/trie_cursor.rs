@@ -14,7 +14,7 @@ use reth_trie::{
     BranchNodeCompact, Nibbles, StorageTrieEntry, StoredNibbles, StoredNibblesSubKey,
 };
 
-use crate::{NoopTrieCacheReader, TrieCacheReader};
+use crate::{NoopTrieCacheReader, StorageCacheKey, StorageCacheValue, TrieCacheReader};
 
 /// Wrapper struct for database transaction implementing trie cursor factory trait.
 #[derive(Debug)]
@@ -67,22 +67,23 @@ impl<TX: DbTx, CR: TrieCacheReader> TrieCursorFactory for DatabaseTrieCursorFact
 
 /// A cursor over the account trie.
 #[derive(Debug)]
-pub struct DatabaseAccountTrieCursor<C, R = NoopTrieCacheReader>(
-    pub(crate) C,
-    pub(crate) Option<R>,
-);
+pub struct DatabaseAccountTrieCursor<C, R = NoopTrieCacheReader> {
+    cursor: C,
+    cache: Option<R>,
+    current_key: Option<(Nibbles, bool)>,
+}
 
 impl<C> DatabaseAccountTrieCursor<C> {
     /// Create a new account trie cursor.
     pub const fn new(cursor: C) -> Self {
-        Self(cursor, None)
+        Self { cursor, cache: None, current_key: None }
     }
 }
 
 impl<C, R> DatabaseAccountTrieCursor<C, R> {
     /// Create a new account trie cursor.
     pub const fn with_cache(cursor: C, cache: Option<R>) -> Self {
-        Self(cursor, cache)
+        Self { cursor, cache, current_key: None }
     }
 }
 
@@ -96,12 +97,26 @@ where
         &mut self,
         key: Nibbles,
     ) -> Result<Option<(Nibbles, BranchNodeCompact)>, DatabaseError> {
-        if let Some(cache) = &self.1 {
+        if let Some(cache) = &self.cache {
             if let Some(node) = cache.trie_account(key.clone()) {
+                self.current_key = Some((key.clone(), true));
                 return Ok(Some((key, node)));
             }
         }
-        Ok(self.0.seek_exact(StoredNibbles(key))?.map(|value| (value.0 .0, value.1)))
+        self.current_key = None;
+        if let Some((key, value)) =
+            self.cursor.seek_exact(StoredNibbles(key))?.map(|value| (value.0 .0, value.1))
+        {
+            if let Some(cache) = &self.cache {
+                cache.cache(
+                    StorageCacheKey::TrieAccout(key.clone()),
+                    StorageCacheValue::TrieAccout(value.clone()),
+                );
+            }
+            Ok(Some((key, value)))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Seeks a key in the account trie that matches or is greater than the provided key.
@@ -109,22 +124,46 @@ where
         &mut self,
         key: Nibbles,
     ) -> Result<Option<(Nibbles, BranchNodeCompact)>, DatabaseError> {
-        if let Some(cache) = &self.1 {
+        if let Some(cache) = &self.cache {
             if let Some(node) = cache.trie_account(key.clone()) {
+                self.current_key = Some((key.clone(), false));
                 return Ok(Some((key, node)));
             }
         }
-        Ok(self.0.seek(StoredNibbles(key))?.map(|value| (value.0 .0, value.1)))
+        self.current_key = None;
+        if let Some((key, value)) =
+            self.cursor.seek(StoredNibbles(key))?.map(|value| (value.0 .0, value.1))
+        {
+            if let Some(cache) = &self.cache {
+                cache.cache(
+                    StorageCacheKey::TrieAccout(key.clone()),
+                    StorageCacheValue::TrieAccout(value.clone()),
+                );
+            }
+            Ok(Some((key, value)))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Move the cursor to the next entry and return it.
     fn next(&mut self) -> Result<Option<(Nibbles, BranchNodeCompact)>, DatabaseError> {
-        Ok(self.0.next()?.map(|value| (value.0 .0, value.1)))
+        if let Some((key, exact)) = self.current_key.take() {
+            if exact {
+                let _ = self.cursor.seek_exact(StoredNibbles(key))?;
+            } else {
+                let _ = self.cursor.seek(StoredNibbles(key))?;
+            }
+        }
+        Ok(self.cursor.next()?.map(|value| (value.0 .0, value.1)))
     }
 
     /// Retrieves the current key in the cursor.
     fn current(&mut self) -> Result<Option<Nibbles>, DatabaseError> {
-        Ok(self.0.current()?.map(|(k, _)| k.0))
+        if let Some((key, _)) = &self.current_key {
+            return Ok(Some(key.clone()));
+        }
+        Ok(self.cursor.current()?.map(|(k, _)| k.0))
     }
 }
 
@@ -136,19 +175,20 @@ pub struct DatabaseStorageTrieCursor<C, R = NoopTrieCacheReader> {
     cache: Option<R>,
     /// Hashed address used for cursor positioning.
     hashed_address: B256,
+    current_subkey: Option<Nibbles>,
 }
 
 impl<C> DatabaseStorageTrieCursor<C> {
     /// Create a new storage trie cursor.
     pub const fn new(cursor: C, hashed_address: B256) -> Self {
-        Self { cursor, cache: None, hashed_address }
+        Self { cursor, cache: None, hashed_address, current_subkey: None }
     }
 }
 
 impl<C, R> DatabaseStorageTrieCursor<C, R> {
     /// Create a new storage trie cursor.
     pub const fn with_cache(cursor: C, cache: Option<R>, hashed_address: B256) -> Self {
-        Self { cursor, cache, hashed_address }
+        Self { cursor, cache, hashed_address, current_subkey: None }
     }
 }
 
@@ -221,14 +261,27 @@ where
     ) -> Result<Option<(Nibbles, BranchNodeCompact)>, DatabaseError> {
         if let Some(cache) = &self.cache {
             if let Some(node) = cache.trie_storage(self.hashed_address, key.clone()) {
+                self.current_subkey = Some(key.clone());
                 return Ok(Some((key, node)));
             }
         }
-        Ok(self
+        self.current_subkey = None;
+        if let Some((subkey, value)) = self
             .cursor
             .seek_by_key_subkey(self.hashed_address, StoredNibblesSubKey(key.clone()))?
             .filter(|e| e.nibbles == StoredNibblesSubKey(key))
-            .map(|value| (value.nibbles.0, value.node)))
+            .map(|value| (value.nibbles.0, value.node))
+        {
+            if let Some(cache) = &self.cache {
+                cache.cache(
+                    StorageCacheKey::TrieStorage(self.hashed_address, subkey.clone()),
+                    StorageCacheValue::TrieStorage(value.clone()),
+                );
+            }
+            Ok(Some((subkey, value)))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Seeks the given key in the storage trie.
@@ -238,22 +291,42 @@ where
     ) -> Result<Option<(Nibbles, BranchNodeCompact)>, DatabaseError> {
         if let Some(cache) = &self.cache {
             if let Some(node) = cache.trie_storage(self.hashed_address, key.clone()) {
+                self.current_subkey = Some(key.clone());
                 return Ok(Some((key, node)));
             }
         }
-        Ok(self
+        self.current_subkey = None;
+        if let Some((subkey, value)) = self
             .cursor
             .seek_by_key_subkey(self.hashed_address, StoredNibblesSubKey(key))?
-            .map(|value| (value.nibbles.0, value.node)))
+            .map(|value| (value.nibbles.0, value.node))
+        {
+            if let Some(cache) = &self.cache {
+                cache.cache(
+                    StorageCacheKey::TrieStorage(self.hashed_address, subkey.clone()),
+                    StorageCacheValue::TrieStorage(value.clone()),
+                );
+            }
+            Ok(Some((subkey, value)))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Move the cursor to the next entry and return it.
     fn next(&mut self) -> Result<Option<(Nibbles, BranchNodeCompact)>, DatabaseError> {
+        if let Some(subkey) = self.current_subkey.take() {
+            let _ =
+                self.cursor.seek_by_key_subkey(self.hashed_address, StoredNibblesSubKey(subkey))?;
+        }
         Ok(self.cursor.next_dup()?.map(|(_, v)| (v.nibbles.0, v.node)))
     }
 
     /// Retrieves the current value in the storage trie cursor.
     fn current(&mut self) -> Result<Option<Nibbles>, DatabaseError> {
+        if let Some(subkey) = &self.current_subkey {
+            return Ok(Some(subkey.clone()));
+        }
         Ok(self.cursor.current()?.map(|(_, v)| v.nibbles.0))
     }
 }

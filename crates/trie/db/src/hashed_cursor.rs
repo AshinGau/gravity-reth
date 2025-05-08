@@ -7,7 +7,7 @@ use reth_db_api::{
 use reth_primitives_traits::Account;
 use reth_trie::hashed_cursor::{HashedCursor, HashedCursorFactory, HashedStorageCursor};
 
-use crate::{NoopTrieCacheReader, TrieCacheReader};
+use crate::{NoopTrieCacheReader, StorageCacheKey, StorageCacheValue, TrieCacheReader};
 
 /// A struct wrapping database transaction that implements [`HashedCursorFactory`].
 #[derive(Debug)]
@@ -63,19 +63,23 @@ impl<TX: DbTx, CR: TrieCacheReader> HashedCursorFactory
 /// A struct wrapping database cursor over hashed accounts implementing [`HashedCursor`] for
 /// iterating over accounts.
 #[derive(Debug)]
-pub struct DatabaseHashedAccountCursor<C, R = NoopTrieCacheReader>(C, Option<R>);
+pub struct DatabaseHashedAccountCursor<C, R = NoopTrieCacheReader> {
+    cursor: C,
+    cache: Option<R>,
+    current_key: Option<B256>,
+}
 
 impl<C> DatabaseHashedAccountCursor<C> {
     /// Create new database hashed account cursor.
     pub const fn new(cursor: C) -> Self {
-        Self(cursor, None)
+        Self { cursor, cache: None, current_key: None }
     }
 }
 
 impl<C, R> DatabaseHashedAccountCursor<C, R> {
     /// Create new database hashed account cursor.
     pub const fn with_cache(cursor: C, cache: Option<R>) -> Self {
-        Self(cursor, cache)
+        Self { cursor, cache, current_key: None }
     }
 }
 
@@ -87,16 +91,30 @@ where
     type Value = Account;
 
     fn seek(&mut self, key: B256) -> Result<Option<(B256, Self::Value)>, reth_db::DatabaseError> {
-        if let Some(cache) = &self.1 {
+        if let Some(cache) = &self.cache {
             if let Some(acount) = cache.hashed_account(key) {
+                self.current_key = Some(key);
                 return Ok(Some((key, acount)));
             }
         }
-        self.0.seek(key)
+        self.current_key = None;
+        let result = self.cursor.seek(key);
+        if let Some(cache) = &self.cache {
+            if let Ok(Some((key, value))) = &result {
+                cache.cache(
+                    StorageCacheKey::HashAccount(key.clone()),
+                    StorageCacheValue::HashAccount(value.clone()),
+                );
+            }
+        }
+        result
     }
 
     fn next(&mut self) -> Result<Option<(B256, Self::Value)>, reth_db::DatabaseError> {
-        self.0.next()
+        if let Some(key) = self.current_key.take() {
+            let _ = self.cursor.seek(key)?;
+        }
+        self.cursor.next()
     }
 }
 
@@ -110,19 +128,20 @@ pub struct DatabaseHashedStorageCursor<C, R = NoopTrieCacheReader> {
     cache: Option<R>,
     /// Target hashed address of the account that the storage belongs to.
     hashed_address: B256,
+    current_subkey: Option<B256>,
 }
 
 impl<C> DatabaseHashedStorageCursor<C> {
     /// Create new [`DatabaseHashedStorageCursor`].
     pub const fn new(cursor: C, hashed_address: B256) -> Self {
-        Self { cursor, cache: None, hashed_address }
+        Self { cursor, cache: None, hashed_address, current_subkey: None }
     }
 }
 
 impl<C, R> DatabaseHashedStorageCursor<C, R> {
     /// Create new [`DatabaseHashedStorageCursor`].
     pub const fn with_cache(cursor: C, cache: Option<R>, hashed_address: B256) -> Self {
-        Self { cursor, cache, hashed_address }
+        Self { cursor, cache, hashed_address, current_subkey: None }
     }
 }
 
@@ -139,13 +158,30 @@ where
     ) -> Result<Option<(B256, Self::Value)>, reth_db::DatabaseError> {
         if let Some(cache) = &self.cache {
             if let Some(value) = cache.hashed_storage(self.hashed_address, subkey) {
+                self.current_subkey = Some(subkey);
                 return Ok(Some((subkey, value)));
             }
         }
-        Ok(self.cursor.seek_by_key_subkey(self.hashed_address, subkey)?.map(|e| (e.key, e.value)))
+        self.current_subkey = None;
+        if let Some((subkey, value)) =
+            self.cursor.seek_by_key_subkey(self.hashed_address, subkey)?.map(|e| (e.key, e.value))
+        {
+            if let Some(cache) = &self.cache {
+                cache.cache(
+                    StorageCacheKey::HashStorage(self.hashed_address, subkey),
+                    StorageCacheValue::HashStorage(value),
+                );
+            }
+            Ok(Some((subkey, value)))
+        } else {
+            Ok(None)
+        }
     }
 
     fn next(&mut self) -> Result<Option<(B256, Self::Value)>, reth_db::DatabaseError> {
+        if let Some(subkey) = self.current_subkey.take() {
+            let _ = self.cursor.seek_by_key_subkey(self.hashed_address, subkey)?;
+        }
         Ok(self.cursor.next_dup_val()?.map(|e| (e.key, e.value)))
     }
 }

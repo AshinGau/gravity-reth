@@ -18,7 +18,7 @@ pub use prefix_set::PrefixSetLoader;
 pub use proof::{DatabaseProof, DatabaseStorageProof};
 pub use state::{DatabaseHashedPostState, DatabaseStateRoot};
 pub use storage::{DatabaseHashedStorage, DatabaseStorageRoot};
-pub use trie_cache::{NoopTrieCacheReader, TrieCacheReader};
+pub use trie_cache::*;
 pub use trie_cursor::{
     DatabaseAccountTrieCursor, DatabaseStorageTrieCursor, DatabaseTrieCursorFactory,
 };

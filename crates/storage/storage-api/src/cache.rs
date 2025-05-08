@@ -1,7 +1,7 @@
 use alloy_primitives::{Address, B256, U256};
 use core::sync::atomic::{AtomicU64, Ordering};
 use dashmap::{DashMap, DashSet};
-use metrics::{Gauge, Histogram};
+use metrics::Gauge;
 use metrics_derive::Metrics;
 use moka::sync::Cache;
 use reth_primitives::{Account, Bytecode};
@@ -9,7 +9,7 @@ use reth_trie::{
     updates::{StorageTrieUpdates, TrieUpdates},
     BranchNodeCompact, HashedPostState, Nibbles,
 };
-use reth_trie_db::TrieCacheReader;
+use reth_trie_db::{StorageCacheKey, StorageCacheValue, TrieCacheReader};
 use revm::db::states::{PlainStorageChangeset, StateChangeset};
 use std::{
     sync::{Arc, Mutex},
@@ -79,28 +79,6 @@ impl CacheMetricsReporter {
     }
 }
 
-#[derive(Hash, PartialEq, Eq, Clone)]
-enum CacheKey {
-    StateAccount(Address),
-    StateContract(B256),
-    StateStorage(Address, B256),
-    HashAccount(B256),
-    HashStorage(B256, B256),
-    TrieAccout(Nibbles),
-    TrieStorage(B256, Nibbles),
-}
-
-#[derive(Clone)]
-enum CacheValue {
-    StateAccount(Account),
-    StateContract(Bytecode),
-    StateStorage(U256),
-    HashAccount(Account),
-    HashStorage(U256),
-    TrieAccout(BranchNodeCompact),
-    TrieStorage(BranchNodeCompact),
-}
-
 #[derive(Default)]
 struct PersistBlockCacheInner {
     account_state: DashMap<Address, DashSet<B256>>,
@@ -113,7 +91,7 @@ struct PersistBlockCacheInner {
 #[derive(Clone)]
 pub struct PersistBlockCache {
     inner: Arc<PersistBlockCacheInner>,
-    cache: Arc<Cache<CacheKey, CacheValue>>,
+    cache: Arc<Cache<StorageCacheKey, StorageCacheValue>>,
 }
 
 impl std::fmt::Debug for PersistBlockCache {
@@ -130,8 +108,8 @@ impl Default for PersistBlockCache {
             .max_capacity(1000_000)
             .time_to_live(Duration::from_secs(60 * 60))
             .time_to_idle(Duration::from_secs(10 * 60))
-            .eviction_listener(move |k: Arc<CacheKey>, _, _| match k.as_ref() {
-                CacheKey::StateStorage(address, slot) => {
+            .eviction_listener(move |k: Arc<StorageCacheKey>, _, _| match k.as_ref() {
+                StorageCacheKey::StateStorage(address, slot) => {
                     let mut remove = false;
                     if let Some(cached_slots) = eviction_storages.account_state.get(address) {
                         cached_slots.remove(slot);
@@ -148,7 +126,7 @@ impl Default for PersistBlockCache {
                         }
                     }
                 }
-                CacheKey::HashStorage(hash_address, hash_slot) => {
+                StorageCacheKey::HashStorage(hash_address, hash_slot) => {
                     let mut remove = false;
                     if let Some(cached_slots) = eviction_storages.hashed_state.get(hash_address) {
                         cached_slots.remove(hash_slot);
@@ -165,7 +143,7 @@ impl Default for PersistBlockCache {
                         }
                     }
                 }
-                CacheKey::TrieStorage(hash_address, nibbles) => {
+                StorageCacheKey::TrieStorage(hash_address, nibbles) => {
                     let mut remove = false;
                     if let Some(cached_slots) = eviction_storages.trie_updates.get(hash_address) {
                         cached_slots.remove(nibbles);
@@ -191,9 +169,9 @@ impl Default for PersistBlockCache {
 
 impl TrieCacheReader for PersistBlockCache {
     fn hashed_account(&self, hash_address: B256) -> Option<Account> {
-        if let Some(cached) = self.cache.get(&CacheKey::HashAccount(hash_address)) {
+        if let Some(cached) = self.cache.get(&StorageCacheKey::HashAccount(hash_address)) {
             match cached {
-                CacheValue::HashAccount(account) => {
+                StorageCacheValue::HashAccount(account) => {
                     self.inner.metrics.trie_cache_hit_record.hit();
                     Some(account)
                 }
@@ -206,9 +184,10 @@ impl TrieCacheReader for PersistBlockCache {
     }
 
     fn hashed_storage(&self, hash_address: B256, hash_slot: B256) -> Option<U256> {
-        if let Some(cached) = self.cache.get(&CacheKey::HashStorage(hash_address, hash_slot)) {
+        if let Some(cached) = self.cache.get(&StorageCacheKey::HashStorage(hash_address, hash_slot))
+        {
             match cached {
-                CacheValue::HashStorage(value) => {
+                StorageCacheValue::HashStorage(value) => {
                     self.inner.metrics.trie_cache_hit_record.hit();
                     Some(value)
                 }
@@ -221,9 +200,9 @@ impl TrieCacheReader for PersistBlockCache {
     }
 
     fn trie_account(&self, nibbles: Nibbles) -> Option<BranchNodeCompact> {
-        if let Some(cached) = self.cache.get(&CacheKey::TrieAccout(nibbles)) {
+        if let Some(cached) = self.cache.get(&StorageCacheKey::TrieAccout(nibbles)) {
             match cached {
-                CacheValue::TrieAccout(branch) => {
+                StorageCacheValue::TrieAccout(branch) => {
                     self.inner.metrics.trie_cache_hit_record.hit();
                     Some(branch)
                 }
@@ -236,9 +215,9 @@ impl TrieCacheReader for PersistBlockCache {
     }
 
     fn trie_storage(&self, hash_address: B256, nibbles: Nibbles) -> Option<BranchNodeCompact> {
-        if let Some(cached) = self.cache.get(&CacheKey::TrieStorage(hash_address, nibbles)) {
+        if let Some(cached) = self.cache.get(&StorageCacheKey::TrieStorage(hash_address, nibbles)) {
             match cached {
-                CacheValue::TrieStorage(branch) => {
+                StorageCacheValue::TrieStorage(branch) => {
                     self.inner.metrics.trie_cache_hit_record.hit();
                     Some(branch)
                 }
@@ -249,13 +228,17 @@ impl TrieCacheReader for PersistBlockCache {
             None
         }
     }
+
+    fn cache(&self, key: StorageCacheKey, value: StorageCacheValue) {
+        self.cache.insert(key, value);
+    }
 }
 
 impl PersistBlockCache {
     pub fn basic_account(&self, address: &Address) -> Option<Account> {
-        if let Some(cached) = self.cache.get(&CacheKey::StateAccount(*address)) {
+        if let Some(cached) = self.cache.get(&StorageCacheKey::StateAccount(*address)) {
             match cached {
-                CacheValue::StateAccount(account) => {
+                StorageCacheValue::StateAccount(account) => {
                     self.inner.metrics.block_cache_hit_record.hit();
                     Some(account)
                 }
@@ -268,9 +251,9 @@ impl PersistBlockCache {
     }
 
     pub fn bytecode_by_hash(&self, code_hash: &B256) -> Option<Bytecode> {
-        if let Some(cached) = self.cache.get(&CacheKey::StateContract(*code_hash)) {
+        if let Some(cached) = self.cache.get(&StorageCacheKey::StateContract(*code_hash)) {
             match cached {
-                CacheValue::StateContract(code) => {
+                StorageCacheValue::StateContract(code) => {
                     self.inner.metrics.block_cache_hit_record.hit();
                     Some(code)
                 }
@@ -283,9 +266,9 @@ impl PersistBlockCache {
     }
 
     pub fn storage(&self, address: Address, slot: B256) -> Option<U256> {
-        if let Some(cached) = self.cache.get(&CacheKey::StateStorage(address, slot)) {
+        if let Some(cached) = self.cache.get(&StorageCacheKey::StateStorage(address, slot)) {
             match cached {
-                CacheValue::StateStorage(value) => {
+                StorageCacheValue::StateStorage(value) => {
                     self.inner.metrics.block_cache_hit_record.hit();
                     Some(value)
                 }
@@ -352,19 +335,19 @@ impl PersistBlockCache {
         for (address, account) in changes.accounts {
             if let Some(account) = account {
                 self.cache.insert(
-                    CacheKey::StateAccount(address),
-                    CacheValue::StateAccount(account.into()),
+                    StorageCacheKey::StateAccount(address),
+                    StorageCacheValue::StateAccount(account.into()),
                 );
             } else {
-                self.cache.remove(&CacheKey::StateAccount(address));
+                self.cache.remove(&StorageCacheKey::StateAccount(address));
             }
         }
 
         // Write bytecode
         for (hash, bytecode) in changes.contracts {
             self.cache.insert(
-                CacheKey::StateContract(hash),
-                CacheValue::StateContract(Bytecode(bytecode)),
+                StorageCacheKey::StateContract(hash),
+                StorageCacheValue::StateContract(Bytecode(bytecode)),
             );
         }
 
@@ -374,7 +357,7 @@ impl PersistBlockCache {
             if wipe_storage {
                 if let Some((_, storage_slots)) = self.inner.account_state.remove(&address) {
                     for slot in storage_slots {
-                        self.cache.remove(&CacheKey::StateStorage(address, slot));
+                        self.cache.remove(&StorageCacheKey::StateStorage(address, slot));
                     }
                 }
             }
@@ -382,7 +365,7 @@ impl PersistBlockCache {
                 let slot: B256 = slot.into();
                 if value.is_zero() {
                     // delete slot
-                    self.cache.remove(&CacheKey::StateStorage(address, slot));
+                    self.cache.remove(&StorageCacheKey::StateStorage(address, slot));
                     let mut clean = false;
                     if let Some(cached_slots) = self.inner.account_state.get(&address) {
                         cached_slots.remove(&slot);
@@ -400,8 +383,8 @@ impl PersistBlockCache {
                     }
                 } else {
                     self.cache.insert(
-                        CacheKey::StateStorage(address, slot),
-                        CacheValue::StateStorage(value),
+                        StorageCacheKey::StateStorage(address, slot),
+                        StorageCacheValue::StateStorage(value),
                     );
                     if let Some(cached_slots) = self.inner.account_state.get(&address) {
                         cached_slots.insert(slot);
@@ -418,11 +401,11 @@ impl PersistBlockCache {
         for (hashed_address, account) in hashed_state.accounts {
             if let Some(account) = account {
                 self.cache.insert(
-                    CacheKey::HashAccount(hashed_address),
-                    CacheValue::HashAccount(account),
+                    StorageCacheKey::HashAccount(hashed_address),
+                    StorageCacheValue::HashAccount(account),
                 );
             } else {
-                self.cache.remove(&CacheKey::HashAccount(hashed_address));
+                self.cache.remove(&StorageCacheKey::HashAccount(hashed_address));
             }
         }
 
@@ -431,14 +414,15 @@ impl PersistBlockCache {
             if storage.wiped {
                 if let Some((_, storage_slots)) = self.inner.hashed_state.remove(&hashed_address) {
                     for slot in storage_slots {
-                        self.cache.remove(&CacheKey::HashStorage(hashed_address, slot));
+                        self.cache.remove(&StorageCacheKey::HashStorage(hashed_address, slot));
                     }
                 }
 
                 for (hashed_slot, value) in storage.storage {
                     if value.is_zero() {
                         // delete slot
-                        self.cache.remove(&CacheKey::HashStorage(hashed_address, hashed_slot));
+                        self.cache
+                            .remove(&StorageCacheKey::HashStorage(hashed_address, hashed_slot));
                         let mut clean = false;
                         if let Some(cached_slots) = self.inner.hashed_state.get(&hashed_address) {
                             cached_slots.remove(&hashed_slot);
@@ -456,8 +440,8 @@ impl PersistBlockCache {
                         }
                     } else {
                         self.cache.insert(
-                            CacheKey::HashStorage(hashed_address, hashed_slot),
-                            CacheValue::HashStorage(value),
+                            StorageCacheKey::HashStorage(hashed_address, hashed_slot),
+                            StorageCacheValue::HashStorage(value),
                         );
                         if let Some(cached_slots) = self.inner.hashed_state.get(&hashed_address) {
                             cached_slots.insert(hashed_slot);
@@ -483,12 +467,15 @@ impl PersistBlockCache {
         let TrieUpdates { account_nodes, removed_nodes, storage_tries } = trie_updates;
         for removed_node in removed_nodes {
             if !account_nodes.contains_key(&removed_node) {
-                self.cache.remove(&CacheKey::TrieAccout(removed_node));
+                self.cache.remove(&StorageCacheKey::TrieAccout(removed_node));
             }
         }
         for (nibbles, node) in account_nodes {
             if !nibbles.is_empty() {
-                self.cache.insert(CacheKey::TrieAccout(nibbles), CacheValue::TrieAccout(node));
+                self.cache.insert(
+                    StorageCacheKey::TrieAccout(nibbles),
+                    StorageCacheValue::TrieAccout(node),
+                );
             }
         }
 
@@ -498,13 +485,16 @@ impl PersistBlockCache {
             if is_deleted {
                 if let Some((_, nibble_slots)) = self.inner.trie_updates.remove(&hashed_address) {
                     for nibbles in nibble_slots {
-                        self.cache.remove(&CacheKey::TrieStorage(hashed_address, nibbles));
+                        self.cache.remove(&StorageCacheKey::TrieStorage(hashed_address, nibbles));
                     }
                 }
             }
             for removed_node in removed_nodes {
                 if !storage_nodes.contains_key(&removed_node) {
-                    self.cache.remove(&CacheKey::TrieStorage(hashed_address, removed_node.clone()));
+                    self.cache.remove(&StorageCacheKey::TrieStorage(
+                        hashed_address,
+                        removed_node.clone(),
+                    ));
                     let mut clean = false;
                     if let Some(cached_slots) = self.inner.trie_updates.get(&hashed_address) {
                         cached_slots.remove(&removed_node);
@@ -525,8 +515,8 @@ impl PersistBlockCache {
             for (nibbles, node) in storage_nodes {
                 if !nibbles.is_empty() {
                     self.cache.insert(
-                        CacheKey::TrieStorage(hashed_address, nibbles.clone()),
-                        CacheValue::TrieStorage(node),
+                        StorageCacheKey::TrieStorage(hashed_address, nibbles.clone()),
+                        StorageCacheValue::TrieStorage(node),
                     );
                     if let Some(cached_slots) = self.inner.trie_updates.get(&hashed_address) {
                         cached_slots.insert(nibbles);

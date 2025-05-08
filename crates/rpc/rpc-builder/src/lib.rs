@@ -1649,7 +1649,9 @@ impl<RpcMiddleware> RpcServerConfig<RpcMiddleware> {
                         tower::ServiceBuilder::new()
                             .option_layer(Self::maybe_cors_layer(cors)?)
                             .option_layer(Self::maybe_jwt_layer(self.jwt_secret))
-                            .option_layer(Self::maybe_compression_layer(self.http_disable_compression)),
+                            .option_layer(Self::maybe_compression_layer(
+                                self.http_disable_compression,
+                            )),
                     )
                     .set_rpc_middleware(
                         self.rpc_middleware.clone().layer(
