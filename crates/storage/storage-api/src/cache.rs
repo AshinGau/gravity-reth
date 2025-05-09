@@ -69,9 +69,11 @@ impl CacheMetricsReporter {
 
     fn report(&self) {
         if let Some(hit_ratio) = self.block_cache_hit_record.report() {
+            println!("block_cache_hit_ratio: {}", hit_ratio);
             self.metrics.block_cache_hit_ratio.set(hit_ratio);
         }
         if let Some(hit_ratio) = self.trie_cache_hit_record.report() {
+            println!("trie_cache_hit_ratio: {}", hit_ratio);
             self.metrics.trie_cache_hit_ratio.set(hit_ratio);
         }
         let cached_items = self.cached_items.load(Ordering::Relaxed) as f64;
