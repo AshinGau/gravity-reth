@@ -52,7 +52,6 @@ where
             .add_transaction(TransactionOrigin::Local, pool_transaction)
             .await
             .map_err(Self::Error::from_eth_err)?;
-        info!("send raw transaction took: {:?}", start.elapsed());
         Ok(hash)
     }
 }

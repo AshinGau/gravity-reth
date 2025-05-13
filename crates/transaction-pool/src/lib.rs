@@ -182,8 +182,8 @@ use reth_execution_types::ChangedAccount;
 use reth_primitives::Recovered;
 use reth_primitives_traits::Block;
 use reth_storage_api::StateProviderFactory;
-use std::{collections::HashSet, sync::Arc};
-use tokio::sync::mpsc::Receiver;
+use std::{collections::HashSet, os::unix::thread, sync::{atomic::{AtomicBool, AtomicU8}, Arc}};
+use tokio::sync::{mpsc::Receiver, Mutex};
 use tracing::{instrument, trace};
 
 pub mod error;
@@ -215,19 +215,31 @@ pub type EthTransactionPool<Client, S> = Pool<
 pub struct Pool<V, T: TransactionOrdering, S> {
     /// Arc'ed instance of the pool internals
     pool: Arc<PoolInner<V, T, S>>,
+    batch_insert_task_handle: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
+    batch_insert_task_running: Arc<AtomicBool>,
+}
+
+static ENABLE_BATCH_INSERT: AtomicU8 = AtomicU8::new(2);
+fn get_enable_batch_insert() -> bool {
+    if ENABLE_BATCH_INSERT.load(std::sync::atomic::Ordering::SeqCst) == 2 {
+        let env = std::env::var("RETH_TXPOOL_BATCH_INSERT").unwrap_or("false".to_string());
+        ENABLE_BATCH_INSERT.store(env.parse().unwrap_or(0), std::sync::atomic::Ordering::SeqCst);
+    }
+    ENABLE_BATCH_INSERT.load(std::sync::atomic::Ordering::SeqCst) == 1
 }
 
 // === impl Pool ===
 
 impl<V, T, S> Pool<V, T, S>
 where
-    V: TransactionValidator,
+    V: TransactionValidator + 'static,
     T: TransactionOrdering<Transaction = <V as TransactionValidator>::Transaction>,
     S: BlobStore,
 {
     /// Create a new transaction pool instance.
     pub fn new(validator: V, ordering: T, blob_store: S, config: PoolConfig) -> Self {
-        Self { pool: Arc::new(PoolInner::new(validator, ordering, blob_store, config)) }
+        let pool = Arc::new(PoolInner::new(validator, ordering, blob_store, config));
+        Self { pool, batch_insert_task_handle: Arc::new(Mutex::new(None)), batch_insert_task_running: Arc::new(AtomicBool::new(false)) }
     }
 
     /// Returns the wrapped pool.
@@ -261,7 +273,6 @@ where
         let hash = *transaction.hash();
 
         let outcome = self.pool.validator().validate_transaction(origin, transaction).await;
-
         (hash, outcome)
     }
 
@@ -333,7 +344,7 @@ where
 /// implements the `TransactionPool` interface for various transaction pool API consumers.
 impl<V, T, S> TransactionPool for Pool<V, T, S>
 where
-    V: TransactionValidator,
+    V: TransactionValidator + 'static,
     <V as TransactionValidator>::Transaction: EthPoolTransaction,
     T: TransactionOrdering<Transaction = <V as TransactionValidator>::Transaction>,
     S: BlobStore,
@@ -363,6 +374,26 @@ where
         transaction: Self::Transaction,
     ) -> PoolResult<TxHash> {
         let (_, tx) = self.validate(origin, transaction).await;
+        let pool = self.pool.clone();
+        if self.batch_insert_task_running.load(std::sync::atomic::Ordering::SeqCst) {
+            return self.pool
+                    .send_transactions(origin, std::iter::once(tx))
+                    .await
+                    .pop()
+                    .expect("result length is the same as the input");
+        }
+        if get_enable_batch_insert()  {
+            {
+                let mut handle = self.batch_insert_task_handle.lock().await;
+                if handle.is_none() {
+                    tracing::info!("Batch insert task started");
+                    *handle = Some(std::thread::spawn(move || {
+                        pool.batch_add_transactions_task();
+                    }));
+                }
+                self.batch_insert_task_running.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        };
         let mut results = self.pool.add_transactions(origin, std::iter::once(tx));
         results.pop().expect("result length is the same as the input")
     }
@@ -376,8 +407,25 @@ where
             return Vec::new()
         }
         let validated = self.validate_all(origin, transactions).await;
-
-        self.pool.add_transactions(origin, validated.into_iter().map(|(_, tx)| tx))
+        let pool = self.pool.clone();
+        if get_enable_batch_insert() {
+            let mut handle = self.batch_insert_task_handle.lock().await;
+            if handle.is_none() {
+                *handle = Some(std::thread::spawn(move || {
+                    pool.batch_add_transactions_task();
+                }));
+            }
+            self.batch_insert_task_running.store(true, std::sync::atomic::Ordering::SeqCst);
+            if self.batch_insert_task_running.load(std::sync::atomic::Ordering::SeqCst) {
+                self.pool
+                    .send_transactions(origin, validated.into_iter()
+                    .map(|(_, tx)| tx)).await
+            } else {
+                self.pool.add_transactions(origin, validated.into_iter().map(|(_, tx)| tx))
+            }
+        } else {
+            self.pool.add_transactions(origin, validated.into_iter().map(|(_, tx)| tx))
+        }
     }
 
     fn transaction_event_listener(&self, tx_hash: TxHash) -> Option<TransactionEvents> {
@@ -613,7 +661,7 @@ where
 
 impl<V, T, S> TransactionPoolExt for Pool<V, T, S>
 where
-    V: TransactionValidator,
+    V: TransactionValidator + 'static,
     <V as TransactionValidator>::Transaction: EthPoolTransaction,
     T: TransactionOrdering<Transaction = <V as TransactionValidator>::Transaction>,
     S: BlobStore,
@@ -648,8 +696,8 @@ where
     }
 }
 
-impl<V, T: TransactionOrdering, S> Clone for Pool<V, T, S> {
+impl<V: 'static, T: TransactionOrdering, S> Clone for Pool<V, T, S> {
     fn clone(&self) -> Self {
-        Self { pool: Arc::clone(&self.pool) }
+        Self { pool: Arc::clone(&self.pool), batch_insert_task_handle: self.batch_insert_task_handle.clone(), batch_insert_task_running: self.batch_insert_task_running.clone() }
     }
 }
