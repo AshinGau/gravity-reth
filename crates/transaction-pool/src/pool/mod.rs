@@ -81,6 +81,7 @@ use crate::{
     CanonicalStateUpdate, EthPoolTransaction, PoolConfig, TransactionOrdering,
     TransactionValidator,
 };
+use alloy_consensus::Transaction;
 use alloy_primitives::{Address, TxHash, B256};
 use best::BestTransactions;
 use event_listener::{Event, Listener};
@@ -128,14 +129,15 @@ pub const NEW_TX_LISTENER_BUFFER_SIZE: usize = 1024;
 
 const BLOB_SIDECAR_LISTENER_BUFFER_SIZE: usize = 512;
 
-type BatchItem<T> = (
+type BatchItem<T: PoolTransaction> = (
     TransactionOrigin,
-    TransactionValidationOutcome<T>,
+    T,
 );
 
 pub struct TxBuffer<T: PoolTransaction> {
     buffer: Vec<BatchItem<T>>,
     event: Arc<Notify>,
+    full_notify: Arc<Notify>,
 }
 
 impl<T: PoolTransaction> TxBuffer<T> {
@@ -143,6 +145,14 @@ impl<T: PoolTransaction> TxBuffer<T> {
         let origin_event = self.event.clone();
         self.event = Arc::new(Notify::new());
         (std::mem::take(&mut self.buffer), origin_event)
+    }
+
+    pub fn add(&mut self, item: BatchItem<T>) -> Arc<Notify> {
+        self.buffer.push(item);
+        // if self.buffer.len() >= get_buffer_insert_size() {
+        //     self.full_notify.notify_one();
+        // }
+        self.event.clone()
     }
 }
 
@@ -185,7 +195,7 @@ where
     /// Map of transaction hash to result of adding the transaction
     add_txn_res: DashMap<TxHash, PoolResult<TxHash>>,
     /// Buffer for transactions
-    buffer: Mutex<TxBuffer<T::Transaction>>,
+    buffer: tokio::sync::Mutex<TxBuffer<T::Transaction>>,
 }
 
 // === impl PoolInner ===
@@ -209,7 +219,7 @@ where
             config,
             blob_store,
             blob_store_metrics: Default::default(),
-            buffer: Mutex::new(TxBuffer { buffer: Vec::new(), event: Arc::new(Notify::new()) }),
+            buffer: tokio::sync::Mutex::new(TxBuffer { buffer: Vec::new(), event: Arc::new(Notify::new()), full_notify: Arc::new(Notify::new()) }),
             add_txn_res: DashMap::new(),
         }
     }
@@ -560,25 +570,34 @@ where
     }
 
     /// Task responsible for receiving transactions and processing them in batches.
-    pub fn batch_add_transactions_task(
+    pub async fn batch_add_transactions_task(
         self: Arc<Self>,
     ) {
-        let mut sleep_duration = Duration::from_millis(50);
+        let sleep_duration = Duration::from_millis(50);
+        // let mut duration = Duration::from_millis(0);
+        let full_notify = self.buffer.lock().await.full_notify.clone();
         loop {
-            std::thread::sleep(sleep_duration);
-            let start = Instant::now();
-            self.process_batch_and_store_results();
-            let duration = start.elapsed();
-            sleep_duration = Duration::from_millis(50).saturating_sub(duration);
+            tokio::select! {
+                _ = full_notify.notified() => {
+                    self.process_batch_and_store_results().await;
+                }
+                _ = tokio::time::sleep(sleep_duration) => {
+                    self.process_batch_and_store_results().await;
+                }
+            }
+            // tokio::time::sleep(sleep_duration.saturating_sub(duration)).await;
+            // let start = Instant::now();
+            // self.process_batch_and_store_results().await;
+            // duration = start.elapsed();
         }
     }
 
     /// Processes a batch of transactions, adds them to the pool,
     /// stores results in the shared DashMap, and handles discarded transactions.
-    fn process_batch_and_store_results(
+    async fn process_batch_and_store_results(
         &self
     ) {
-        let mut buffer = self.buffer.lock();
+        let mut buffer = self.buffer.lock().await;
         let (items_to_process, notify) = buffer.take();
         drop(buffer);
         let num_items = items_to_process.len();
@@ -591,9 +610,10 @@ where
             TxHash,
             TransactionValidationOutcome<T::Transaction>,
         )> = Vec::with_capacity(num_items);
-
+        let origins: Vec<TransactionOrigin> = items_to_process.iter().map(|(origin, _)| *origin).collect();
+        let outcomes = self.validator().validate_transactions(items_to_process).await;
         // Extract data needed for processing, discard the notifier for this function's scope
-        for (origin, tx_outcome) in items_to_process {
+        for (tx_outcome, origin) in outcomes.into_iter().zip(origins) {
             origins_hashes_and_outcomes.push((origin, tx_outcome.tx_hash(), tx_outcome));
         }
 
@@ -667,18 +687,15 @@ where
 
     /// Submits transactions to the pool for asynchronous processing.
     /// Waits for the batch containing these transactions to be processed and returns the results.
-    pub async fn send_transactions(
+    pub async fn send_transaction(
         &self,
         origin: TransactionOrigin,
-        transactions: impl IntoIterator<Item = TransactionValidationOutcome<T::Transaction>>,
+        tx: T::Transaction,
     ) -> Vec<PoolResult<TxHash>> {    
-        let mut hashes_to_wait_for: Vec<TxHash> = Vec::new();
-        let mut buffer = self.buffer.lock();
-        for tx_outcome in transactions.into_iter() {
-            hashes_to_wait_for.push(tx_outcome.tx_hash());
-            let item = (origin, tx_outcome); // Clone outcome for the item
-            buffer.buffer.push(item);
-        }
+        let mut hashes_to_wait_for = Vec::new();
+        hashes_to_wait_for.push(tx.hash().clone());
+        let mut buffer = self.buffer.lock().await;
+        buffer.buffer.push((origin, tx));
         let notify = buffer.event.clone();
         drop(buffer);
         if hashes_to_wait_for.is_empty() {

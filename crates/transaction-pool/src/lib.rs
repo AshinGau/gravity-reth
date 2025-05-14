@@ -260,8 +260,13 @@ where
         origin: TransactionOrigin,
         transactions: impl IntoIterator<Item = V::Transaction>,
     ) -> Vec<(TxHash, TransactionValidationOutcome<V::Transaction>)> {
-        futures_util::future::join_all(transactions.into_iter().map(|tx| self.validate(origin, tx)))
+        self.pool
+            .validator()
+            .validate_transactions(transactions.into_iter().map(|tx| (origin, tx)).collect())
             .await
+            .into_iter()
+            .map(|tx| (tx.tx_hash(), tx))
+            .collect()
     }
 
     /// Validates the given transaction
@@ -373,11 +378,10 @@ where
         origin: TransactionOrigin,
         transaction: Self::Transaction,
     ) -> PoolResult<TxHash> {
-        let (_, tx) = self.validate(origin, transaction).await;
         let pool = self.pool.clone();
         if self.batch_insert_task_running.load(std::sync::atomic::Ordering::SeqCst) {
             return self.pool
-                    .send_transactions(origin, std::iter::once(tx))
+                    .send_transaction(origin, transaction)
                     .await
                     .pop()
                     .expect("result length is the same as the input");
@@ -388,12 +392,14 @@ where
                 if handle.is_none() {
                     tracing::info!("Batch insert task started");
                     *handle = Some(std::thread::spawn(move || {
-                        pool.batch_add_transactions_task();
+                        let rt = tokio::runtime::Runtime::new().unwrap();
+                        rt.block_on(pool.batch_add_transactions_task());
                     }));
                 }
                 self.batch_insert_task_running.store(true, std::sync::atomic::Ordering::SeqCst);
             }
         };
+        let (_, tx) = self.validate(origin, transaction).await;
         let mut results = self.pool.add_transactions(origin, std::iter::once(tx));
         results.pop().expect("result length is the same as the input")
     }
@@ -407,25 +413,7 @@ where
             return Vec::new()
         }
         let validated = self.validate_all(origin, transactions).await;
-        let pool = self.pool.clone();
-        if get_enable_batch_insert() {
-            let mut handle = self.batch_insert_task_handle.lock().await;
-            if handle.is_none() {
-                *handle = Some(std::thread::spawn(move || {
-                    pool.batch_add_transactions_task();
-                }));
-            }
-            self.batch_insert_task_running.store(true, std::sync::atomic::Ordering::SeqCst);
-            if self.batch_insert_task_running.load(std::sync::atomic::Ordering::SeqCst) {
-                self.pool
-                    .send_transactions(origin, validated.into_iter()
-                    .map(|(_, tx)| tx)).await
-            } else {
-                self.pool.add_transactions(origin, validated.into_iter().map(|(_, tx)| tx))
-            }
-        } else {
-            self.pool.add_transactions(origin, validated.into_iter().map(|(_, tx)| tx))
-        }
+        self.pool.add_transactions(origin, validated.into_iter().map(|(_, tx)| tx))
     }
 
     fn transaction_event_listener(&self, tx_hash: TxHash) -> Option<TransactionEvents> {
