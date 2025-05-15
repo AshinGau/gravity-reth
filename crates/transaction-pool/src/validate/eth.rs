@@ -357,8 +357,10 @@ where
 
         // If we don't have a state provider yet, fetch the latest state
         if maybe_state.is_none() {
+            println!("get lastet provider");
             match self.client.latest() {
                 Ok(new_state) => {
+                    println!("find lastet provider");
                     *maybe_state = Some(new_state);
                 }
                 Err(err) => {
@@ -498,6 +500,7 @@ where
         origin: TransactionOrigin,
         transaction: Tx,
     ) -> TransactionValidationOutcome<Tx> {
+        println!("validate_one");
         let mut provider = None;
         self.validate_one_with_provider(origin, transaction, &mut provider)
     }
@@ -507,6 +510,7 @@ where
         &self,
         transactions: Vec<(TransactionOrigin, Tx)>,
     ) -> Vec<TransactionValidationOutcome<Tx>> {
+        println!("validate_batch");
         let mut provider = None;
         transactions
             .into_iter()

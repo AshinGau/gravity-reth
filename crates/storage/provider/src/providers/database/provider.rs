@@ -376,9 +376,11 @@ impl<TX: DbTx + 'static, N: NodeTypes> TryIntoHistoricalStateProvider for Databa
         mut block_number: BlockNumber,
         cache: Option<PersistBlockCache>,
     ) -> ProviderResult<StateProviderBox> {
+        println!("block_number: {}, best_block_number: {}, last_block_number: {}", block_number, self.best_block_number().unwrap_or_default(), self.last_block_number().unwrap_or_default());
         if block_number == self.best_block_number().unwrap_or_default() &&
             block_number == self.last_block_number().unwrap_or_default()
         {
+            println!("new LatestStateProvider with cache: {}", cache.is_some());
             return Ok(Box::new(LatestStateProvider::new(self, cache)))
         }
 
