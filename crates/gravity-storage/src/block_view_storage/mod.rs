@@ -59,11 +59,13 @@ fn get_state_provider<Client: StateProviderFactory + 'static>(
     block_hash: B256,
     parallel: bool,
 ) -> Result<StateProviderBox, GravityStorageError> {
+    println!("pipeline get_state_provider");
     let state_provider = if parallel {
         client.state_by_block_hash_with_opts(block_hash, STATE_PROVIDER_OPTS.clone())
     } else {
         client.state_by_block_hash(block_hash)
     };
+    println!("pipeline get_state_provider end");
 
     match state_provider {
         Ok(state_provider) => Ok(state_provider),
