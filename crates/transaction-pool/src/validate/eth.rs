@@ -510,7 +510,7 @@ where
         &self,
         transactions: Vec<(TransactionOrigin, Tx)>,
     ) -> Vec<TransactionValidationOutcome<Tx>> {
-        println!("validate_batch");
+        println!("validate_batch: num_txs: {}", transactions.len());
         let mut provider = None;
         transactions
             .into_iter()
