@@ -1,17 +1,10 @@
-use alloy_rlp::{BufMut, Encodable, Header};
+use alloy_primitives::{keccak256, B256};
+use alloy_rlp::{BufMut, Decodable, Encodable, Header, EMPTY_STRING_CODE};
+use alloy_trie::nodes::RlpNode;
+use nybbles::Nibbles;
 
-enum Node {
-    FullNode {
-        children: [Option<Box<Node>>; 17],
-        flags: NodeFlag,
-    },
-    ShortNode {
-        key: Box<dyn AsRef<[u8]>>,
-        val: Option<Box<Node>>,
-        flags: NodeFlag,
-    },
-    HashNode(Box<dyn AsRef<[u8]>>),
-    ValueNode(Box<dyn AsRef<[u8]>>),
+enum NodeType {
+    BranchNode, ExtensionNode, LeafNode, HashNode, ValueNode
 }
 
 #[derive(Default)]
@@ -34,50 +27,74 @@ impl NodeFlag {
     }
 }
 
-impl Node {
-    fn cache(&self) -> (Option<&[u8]>, bool) {
-        match self {
-            Node::FullNode { children: _, flags } => flags.flags(),
-            Node::ShortNode { key: _, val: _, flags } => flags.flags(),
-            _ => (None, true),
-        }
-    }
+trait Node {
+    fn node_type(&self) -> NodeType;
 
-    /// Returns the length of RLP encoded fields of node.
-    #[inline]
-    fn rlp_payload_length(&self) -> usize {
-        match self {
-            Node::FullNode { children, flags } => todo!(),
-            Node::ShortNode { key, val, flags } => todo!(),
-            Node::HashNode(items) => todo!(),
-            Node::ValueNode(items) => todo!(),
-        }
-    }
+    fn cache(&self) -> (Option<&[u8]>, bool);
+
+    fn rlp_payload_length(&mut self, buffer: &mut Vec<u8>) -> usize;
+
+    fn rlp(&mut self, buffer: &mut Vec<u8>);
+
+    fn encode(&mut self, out: &mut Vec<u8>);
+
+    fn insert(&mut self, prefix: Nibbles, key: Nibbles, value: ValueNode);
+
+    fn delete(&mut self, prefix: Nibbles, key: Nibbles);
 }
 
-impl Encodable for Node {
-    #[inline]
-    fn encode(&self, out: &mut dyn BufMut) {
-        match self {
-            Node::FullNode { children, flags } => {
-                Header { list: true, payload_length: self.rlp_payload_length() }.encode(out);
-                for child in children {
-                    if let Some(child) = child {
-                        
-                    } else {
+// impl serde::Serialize, serde::Deserialize for storage.
+struct NodeRef(Box<dyn Node>);
 
-                    }
-                }
-                
-            },
-            Node::ShortNode { key, val, flags } => todo!(),
-            Node::HashNode(as_ref) => todo!(),
-            Node::ValueNode(as_ref) => todo!(),
-        }
+struct BranchNode {
+    children: [Option<Box<dyn Node>>; 17],
+    flags: NodeFlag,
+}
+
+struct ExtensionNode {
+    shared_nibbles: Box<dyn AsRef<[u8]>>,
+    next_node: Option<Box<dyn Node>>,
+    flags: NodeFlag,
+}
+
+struct LeafNode {
+    key_end: Box<dyn AsRef<[u8]>>,
+    value: Option<Box<dyn Node>>,
+    flags: NodeFlag,
+}
+
+struct HashNode(Box<dyn AsRef<[u8]>>);
+struct ValueNode(Box<dyn AsRef<[u8]>>);
+
+impl Node for BranchNode {
+    fn node_type(&self) -> NodeType {
+        NodeType::BranchNode
     }
 
-    #[inline]
-    fn length(&self) -> usize {
+    fn cache(&self) -> (Option<&[u8]>, bool) {
+        self.flags.flags()
+    }
+
+    fn rlp_payload_length(&mut self, buffer: &mut Vec<u8>) -> usize {
         todo!()
     }
+
+    fn rlp(&mut self, buffer: &mut Vec<u8>) {
+        if self.flags.hash.is_some() {
+            return;
+        }
+        let header = Header { list: true, payload_length: self.rlp_payload_length(buffer) };
+        buffer.clear();
+        header.encode(buffer);
+        for child in &self.children {
+            if let Some(child) = child {
+                buffer.put_slice(self.cache().0.unwrap());
+            } else {
+                buffer.put_u8(EMPTY_STRING_CODE);
+            }
+        }
+        let rlp = RlpNode::from_rlp(buffer);
+        self.flags.hash = Some(Box::new(rlp.clone()));
+    }
 }
+
