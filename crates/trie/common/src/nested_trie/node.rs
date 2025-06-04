@@ -17,49 +17,49 @@ impl NodeFlag {
     pub fn dirty_node() -> Self {
         Self { rlp: None, dirty: true }
     }
+
+    pub fn mark_diry(&mut self) {
+        self.rlp.take();
+        self.dirty = true;
+    }
 }
 
 pub(crate) enum Node {
-    BranchNode {
+    FullNode {
         children: [Option<Box<Node>>; 17],
         flags: NodeFlag,
     },
-    ExtensionNode {
-        shared_nibbles: Nibbles,
-        next_node: Box<Node>,
-        flags: NodeFlag,
-    },
-    LeafNode {
-        key_end: Nibbles,
+    ShortNode {
+        key: Nibbles,
         value: Box<Node>,
         flags: NodeFlag,
     },
-    HashNode(RlpNode),
     ValueNode(Box<dyn AsRef<[u8]>>),
+    HashNode(RlpNode),
 }
 
 impl Node {
     pub fn cached_rlp(&self) -> Option<&RlpNode> {
         match self {
-            Node::BranchNode { children: _, flags } => flags.rlp.as_ref(),
-            Node::ExtensionNode { shared_nibbles: _, next_node: _, flags } => flags.rlp.as_ref(),
-            Node::LeafNode { key_end: _, value: _, flags } => flags.rlp.as_ref(),
+            Node::FullNode { children: _, flags } => flags.rlp.as_ref(),
+            Node::ShortNode { key: _, value: _, flags } => flags.rlp.as_ref(),
+            Node::ValueNode(_) => None,
             Node::HashNode(rlp_node) => Some(&rlp_node),
         }
     }
 
     pub fn dirty(&self) -> bool {
         match self {
-            Node::BranchNode { children: _, flags } => flags.dirty,
-            Node::ExtensionNode { shared_nibbles: _, next_node: _, flags } => flags.dirty,
-            Node::LeafNode { key_end: _, value: _, flags } => flags.dirty,
+            Node::FullNode { children: _, flags } => flags.dirty,
+            Node::ShortNode { key: _, value: _, flags } => flags.dirty,
+            Node::ValueNode(_) => true,
             Node::HashNode(_) => false,
         }
     }
 
     pub fn build_hash(&mut self, buf: &mut Vec<u8>) -> &RlpNode {
         match self {
-            Node::BranchNode { children, flags } => {
+            Node::FullNode { children, flags } => {
                 if flags.rlp.is_none() {
                     let header = Header { list: true, payload_length: branch_node_rlp_length(children, buf) };
                     buf.clear();
@@ -75,28 +75,27 @@ impl Node {
                 }
                 flags.rlp.as_ref().unwrap()
             },
-            Node::ExtensionNode { shared_nibbles, next_node, flags } => {
+            Node::ShortNode { key, value, flags } => {
                 if flags.rlp.is_none() {
-                    let header = Header { list: true, payload_length: extension_node_rlp_length(shared_nibbles, next_node, buf) };
-                    buf.clear();
-                    header.encode(buf);
-                    encode_path_leaf(shared_nibbles, false).as_slice().encode(buf);
-                    buf.put_slice(next_node.cached_rlp().unwrap());
-                    flags.rlp = Some(RlpNode::from_rlp(buf));
-                }
-                flags.rlp.as_ref().unwrap()
-            },
-            Node::LeafNode { key_end, value, flags } => {
-                if flags.rlp.is_none() {
-                    let header = Header { list: true, payload_length: leaf_node_rlp_length(key_end, value) };
-                    buf.clear();
-                    encode_path_leaf(key_end, true).as_slice().encode(buf);
-                    Encodable::encode(value.as_ref().as_ref(), buf);
+                    if let Node::ValueNode(value) = value.as_ref() {
+                        let header = Header { list: true, payload_length: leaf_node_rlp_length(key, value) };
+                        buf.clear();
+                        header.encode(buf);
+                        encode_path_leaf(key, true).as_slice().encode(buf);
+                        Encodable::encode(value.as_ref().as_ref(), buf);
+                    } else {
+                        let header = Header { list: true, payload_length: extension_node_rlp_length(key, value, buf) };
+                        buf.clear();
+                        header.encode(buf);
+                        encode_path_leaf(key, false).as_slice().encode(buf);
+                        buf.put_slice(value.cached_rlp().unwrap());
+                    }
                     flags.rlp = Some(RlpNode::from_rlp(buf));
                 }
                 flags.rlp.as_ref().unwrap()
             },
             Node::HashNode(rlp_node) => rlp_node,
+            _ => unreachable!(),
         }
     }
 
