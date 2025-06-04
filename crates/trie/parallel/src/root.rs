@@ -254,10 +254,65 @@ impl From<ParallelStateRootError> for ProviderError {
 mod tests {
     use super::*;
     use alloy_primitives::{keccak256, Address, U256};
+    use alloy_rlp::encode_fixed_size;
     use rand::Rng;
     use reth_primitives::{Account, StorageEntry};
     use reth_provider::{test_utils::create_test_provider_factory, HashingWriter};
-    use reth_trie::{test_utils, HashedPostState, HashedStorage};
+    use reth_trie::{nested_trie::{Node, Trie, TrieReader, TrieWriter}, test_utils, HashedPostState, HashedStorage};
+
+    #[derive(Default)]
+    struct NoopTrieReader;
+    impl TrieReader for NoopTrieReader {
+        fn read(&self, path: &Nibbles) -> Option<Node> {
+            None
+        }
+    }
+    #[derive(Default)]
+    struct NoopTrieWriter;
+    impl TrieWriter for NoopTrieWriter {
+        fn write(&self, path: &Nibbles, node: &Node) { }
+    }
+
+    #[test]
+    fn nested_state_root() {
+        let mut rng = rand::thread_rng();
+        let state = (0..100)
+            .map(|_| {
+                let address = Address::random();
+                let account =
+                    Account { balance: U256::from(rng.gen::<u64>()), ..Default::default() };
+                let mut storage = HashMap::<B256, U256>::default();
+                let has_storage = rng.gen_bool(0.7);
+                if has_storage {
+                    for _ in 0..100 {
+                        storage.insert(
+                            B256::from(U256::from(rng.gen::<u64>())),
+                            U256::from(rng.gen::<u64>()),
+                        );
+                    }
+                }
+                (address, (account, storage))
+            })
+            .collect::<HashMap<_, _>>();
+
+        let encoded_accounts = state.clone().into_iter().map(|(address, (account, storage))| {
+            let mut storage_trie = Trie::new(None, NoopTrieReader::default(), NoopTrieWriter::default());
+            for (hashed_slot, value) in storage.into_iter().map(|(k, v)| (keccak256(k), encode_fixed_size(&v))) {
+                storage_trie.insert(Nibbles::unpack(hashed_slot), Node::ValueNode(Box::new(value)));
+            }
+            let storage_root = storage_trie.hash();
+            let account = account.into_trie_account(storage_root);
+            (address, alloy_rlp::encode(account))
+        });
+        let mut account_trie = Trie::new(None, NoopTrieReader::default(), NoopTrieWriter::default());
+        for (address, account) in encoded_accounts {
+            account_trie.insert(Nibbles::unpack(keccak256(address)), Node::ValueNode(Box::new(account)));
+        }
+        assert_eq!(
+            account_trie.hash(),
+            test_utils::state_root(state)
+        );
+    }
 
     #[test]
     fn random_parallel_root() {

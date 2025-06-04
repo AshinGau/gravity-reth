@@ -4,30 +4,33 @@ use nybbles::Nibbles;
 
 use crate::nested_trie::node::{Node, NodeFlag};
 
-trait TrieReader {
+pub trait TrieReader {
     fn read(&self, path: &Nibbles) -> Option<Node>;
 }
 
-trait TrieWriter {
+pub trait TrieWriter {
     fn write(&self, path: &Nibbles, node: &Node);
 }
 
-struct Trie<R, W>
+pub struct Trie<R, W>
 where
     R: TrieReader,
     W: TrieWriter,
 {
     root: Option<Node>,
     reader: R,
-    commiter: W,
+    writer: W,
 }
-
 
 impl<R, W> Trie<R, W>
 where
     R: TrieReader,
     W: TrieWriter,
 {
+    pub fn new(root: Option<Node>, reader: R, writer: W) -> Self {
+        Self { root, reader, writer }
+    }
+
     fn insert_inner(&self, node: Option<Node>, prefix: Nibbles, key: Nibbles, value: Node) -> (bool, Node) {
         if key.is_empty() {
             return (true, value);

@@ -3,8 +3,8 @@ use alloy_rlp::{length_of_length, BufMut, Decodable, Encodable, Header, EMPTY_ST
 use alloy_trie::{nodes::{encode_path_leaf, RlpNode}, EMPTY_ROOT_HASH};
 use nybbles::Nibbles;
 
-#[derive(Default)]
-pub(crate) struct NodeFlag {
+#[derive(Default, Debug)]
+pub struct NodeFlag {
     rlp: Option<RlpNode>,
     dirty: bool,
 }
@@ -24,7 +24,7 @@ impl NodeFlag {
     }
 }
 
-pub(crate) enum Node {
+pub enum Node {
     FullNode {
         children: [Option<Box<Node>>; 17],
         flags: NodeFlag,
