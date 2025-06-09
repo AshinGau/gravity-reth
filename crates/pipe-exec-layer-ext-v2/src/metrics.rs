@@ -29,4 +29,11 @@ pub(crate) struct PipeExecLayerMetrics {
     pub(crate) finish_commit_time_diff: Histogram,
     /// How long it took for transactions to be filtered
     pub(crate) filter_transaction_duration: Histogram,
+    /// insert bundle time
+    pub(crate) insert_bundle_time: Histogram,
+    /// get state view time
+    pub(crate) get_state_view_time: Histogram,
+    /// create_block_for_executor
+    pub(crate) create_block_time: Histogram,
+    
 }

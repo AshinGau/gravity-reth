@@ -5,7 +5,7 @@ use revm::{
     primitives::AccountInfo,
     Database, TransitionState,
 };
-use std::error::Error;
+use std::{error::Error, time::Instant};
 
 pub trait State {
     fn bundle_size_hint(&self) -> usize;
@@ -64,9 +64,11 @@ where
     }
 
     fn merge_transitions(&mut self, retention: BundleRetention) {
+        let start = Instant::now();
         if let Some(transition_state) = self.transition_state.as_mut().map(TransitionState::take) {
             self.bundle_state.parallel_apply_transitions_and_create_reverts(transition_state, retention);
         }
+        println!("merge_transitions time: {}ms", start.elapsed().as_millis())
     }
 
     fn basic(

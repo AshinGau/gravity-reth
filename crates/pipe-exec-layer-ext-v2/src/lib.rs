@@ -208,7 +208,9 @@ impl<Storage: GravityStorage> Core<Storage> {
         let start_time = Instant::now();
         let ExecuteOrderedBlockResult { block_without_roots, execution_output, txs_info } =
             self.execute_ordered_block(block, &parent_block_header);
+        let bundle_start = Instant::now();
         self.storage.insert_bundle_state(block_number, &execution_output.state);
+        self.metrics.insert_bundle_time.record(bundle_start.elapsed());
         let elapsed = start_time.elapsed();
         info!(target: "PipeExecService.process",
             block_number=?block_number,
@@ -403,15 +405,19 @@ impl<Storage: GravityStorage> Core<Storage> {
         let parent_id = block.parent_id();
         let block_number = block.number();
 
+        let start = Instant::now();
         let (parent_id_, state) = self.storage.get_state_view(block_number - 1).unwrap();
+        self.metrics.get_state_view_time.record(start.elapsed());
         assert_eq!(parent_id, parent_id_);
 
+        let start = Instant::now();
         let (block, txs_info) = match block {
             ReceivedBlock::OrderedBlock(ordered_block) => {
                 self.create_block_for_executor(ordered_block, parent_header, &state)
             }
             ReceivedBlock::HistoryBlock(block) => (block, Vec::new()),
         };
+        self.metrics.create_block_time.record(start.elapsed());
 
         info!(target: "execute_ordered_block",
             id=?block_id,
