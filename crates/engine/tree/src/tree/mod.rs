@@ -58,7 +58,7 @@ use reth_revm::{cancelled::ManualCancel, database::StateProviderDatabase};
 use reth_stages_api::ControlFlow;
 use reth_trie::{
     trie_cursor::InMemoryTrieCursorFactory, updates::TrieUpdates, HashedPostState,
-    MultiProofTargets, TrieInput,
+    MultiProofTargets, TrieInput, TrieInputV2,
 };
 use reth_trie_db::DatabaseTrieCursorFactory;
 use reth_trie_parallel::root::{ParallelStateRoot, ParallelStateRootError};
@@ -125,7 +125,7 @@ pub struct TreeState<N: NodePrimitives = EthPrimitives> {
     /// Map of hash to trie updates for canonical blocks that are persisted but not finalized.
     ///
     /// Contains the block number for easy removal.
-    persisted_trie_updates: HashMap<B256, (BlockNumber, Arc<TrieUpdates>)>,
+    persisted_trie_updates: HashMap<B256, (BlockNumber, Arc<TrieInputV2>)>,
     /// Currently tracked canonical head of the chain.
     current_canonical_head: BlockNumHash,
 }
@@ -2691,7 +2691,8 @@ where
                 execution_output: Arc::new(ExecutionOutcome::from((output, block_num_hash.number))),
                 hashed_state: Arc::new(hashed_state),
             },
-            trie: Arc::new(trie_output),
+            // todo(gaoxin)
+            trie: Default::default(),
         };
 
         // if the parent is the canonical head, we can insert the block as the pending block
@@ -2754,9 +2755,7 @@ where
             input.append(revert_state);
 
             // Extend with contents of parent in-memory blocks.
-            for block in blocks.iter().rev() {
-                input.append_cached_ref(block.trie_updates(), block.hashed_state())
-            }
+            // todo(gaoxin)
         } else {
             // The block attaches to canonical persisted parent.
             debug!(target: "engine::tree", %parent_hash, "Parent found on disk");

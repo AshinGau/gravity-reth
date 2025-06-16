@@ -25,8 +25,7 @@ use reth_trie::{
 };
 use reth_trie_db::{
     DatabaseHashedPostState, DatabaseHashedStorage, DatabaseProof, DatabaseStateRoot,
-    DatabaseStorageProof, DatabaseStorageRoot, DatabaseTrieWitness, NoopTrieCacheReader,
-    StateCommitment,
+    DatabaseStorageProof, DatabaseStorageRoot, DatabaseTrieWitness, StateCommitment,
 };
 use std::{fmt::Debug, sync::Arc};
 
@@ -316,12 +315,8 @@ impl<Provider: DBProvider + BlockNumReader + StateCommitmentProvider> StateRootP
         mut input: TrieInput,
     ) -> ProviderResult<(B256, TrieUpdates)> {
         input.prepend(self.revert_state()?);
-        StateRoot::overlay_root_from_nodes_with_updates::<NoopTrieCacheReader>(
-            self.tx(),
-            input,
-            None,
-        )
-        .map_err(|err| ProviderError::Database(err.into()))
+        StateRoot::overlay_root_from_nodes_with_updates(self.tx(), input)
+            .map_err(|err| ProviderError::Database(err.into()))
     }
 }
 

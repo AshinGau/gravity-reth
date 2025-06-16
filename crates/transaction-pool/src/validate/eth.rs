@@ -22,10 +22,12 @@ use alloy_eips::{
     eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M, eip4844::env_settings::EnvKzgSettings,
     eip7840::BlobParams,
 };
+use gravity_storage::block_view_storage::BlockViewProvider;
 use reth_chainspec::{ChainSpecProvider, EthChainSpec, EthereumHardforks};
 use reth_primitives::{InvalidTransactionError, SealedBlock};
 use reth_primitives_traits::{Block, GotExpected};
-use reth_storage_api::{StateProvider, StateProviderFactory};
+use reth_revm::{database::StateProviderDatabase, DatabaseRef};
+use reth_storage_api::{StateProviderFactory, StateProviderOptions, PERSIST_BLOCK_CACHE};
 use reth_tasks::TaskSpawner;
 use std::{
     marker::PhantomData,
@@ -187,7 +189,7 @@ where
         &self,
         origin: TransactionOrigin,
         mut transaction: Tx,
-        maybe_state: &mut Option<Box<dyn StateProvider>>,
+        maybe_state: &mut Option<BlockViewProvider>,
     ) -> TransactionValidationOutcome<Tx> {
         // Checks for tx_type
         match transaction.ty() {
@@ -357,9 +359,13 @@ where
 
         // If we don't have a state provider yet, fetch the latest state
         if maybe_state.is_none() {
-            match self.client.latest() {
-                Ok(new_state) => {
-                    *maybe_state = Some(new_state);
+            match self.client.latest_with_opts(StateProviderOptions::default().with_raw_db()) {
+                Ok(state) => {
+                    let state_with_cache = BlockViewProvider::new(
+                        StateProviderDatabase::new(state),
+                        Some(PERSIST_BLOCK_CACHE.clone()),
+                    );
+                    *maybe_state = Some(state_with_cache);
                 }
                 Err(err) => {
                     return TransactionValidationOutcome::Error(*transaction.hash(), Box::new(err))
@@ -367,10 +373,10 @@ where
             }
         }
 
-        let state = maybe_state.as_deref().expect("provider is set");
+        let state = maybe_state.as_ref().expect("provider is set");
 
         // Use provider to get account info
-        let account = match state.basic_account(transaction.sender_ref()) {
+        let account = match state.basic_ref(transaction.sender()) {
             Ok(account) => account.unwrap_or_default(),
             Err(err) => {
                 return TransactionValidationOutcome::Error(*transaction.hash(), Box::new(err))
@@ -383,10 +389,10 @@ where
         //
         // Any other case means that the account is not an EOA, and should not be able to send
         // transactions.
-        if let Some(code_hash) = &account.bytecode_hash {
+        if !account.is_empty_code_hash() {
             let is_eip7702 = if self.fork_tracker.is_prague_activated() {
-                match state.bytecode_by_hash(code_hash) {
-                    Ok(bytecode) => bytecode.unwrap_or_default().is_eip7702(),
+                match state.code_by_hash_ref(account.code_hash) {
+                    Ok(bytecode) => bytecode.is_eip7702(),
                     Err(err) => {
                         return TransactionValidationOutcome::Error(
                             *transaction.hash(),
