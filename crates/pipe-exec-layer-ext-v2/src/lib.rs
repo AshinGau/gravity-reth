@@ -239,7 +239,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         // Merkling the state trie
         self.merklize_barrier.wait(block_number - 1).await.unwrap();
         let start_time = Instant::now();
-        let (state_root, trie_input) = self.storage.state_root(hashed_state).unwrap();
+        let (state_root, trie_input) = self.storage.state_root(&hashed_state).unwrap();
         let write_start = Instant::now();
         self.cache.write_trie_updates(&trie_input, block_number);
         self.metrics.cache_trie_state.record(write_start.elapsed());
@@ -301,7 +301,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             Arc::new(RecoveredBlock::new_sealed(sealed_block, senders)),
             Arc::new(execution_outcome),
             // todo(gaoxin)
-            Default::default(),
+            Arc::new(hashed_state),
             Arc::new(trie_input),
         ))
         .await;

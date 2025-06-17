@@ -91,12 +91,13 @@ where
         + Sync
         + 'static,
 {
-    pub fn calculate(&self, hashed_state: HashedPostState) -> ProviderResult<(B256, TrieInputV2)> {
+    pub fn calculate(&self, hashed_state: &HashedPostState) -> ProviderResult<(B256, TrieInputV2)> {
         let mut trie_input = TrieInputV2::default();
         let mut removed_account_nodes: [Vec<(Nibbles, Option<Node>)>; 16] = Default::default();
         let (tx, rx) = mpsc::channel();
         let mut num_task = 0;
-        let HashedPostState { accounts: hashed_accounts, storages: hashed_storages } = hashed_state;
+        let HashedPostState { accounts: hashed_accounts, storages: hashed_storages } =
+            hashed_state.clone();
         for (hashed_address, account) in hashed_accounts {
             if let Some(account) = account {
                 let view = self.view.clone();

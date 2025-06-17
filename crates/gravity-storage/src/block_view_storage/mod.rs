@@ -53,7 +53,7 @@ where
         Ok(BlockViewProvider::new(StateProviderDatabase::new(state), Some(self.cache.clone())))
     }
 
-    fn state_root(&self, hashed_state: HashedPostState) -> ProviderResult<(B256, TrieInputV2)> {
+    fn state_root(&self, hashed_state: &HashedPostState) -> ProviderResult<(B256, TrieInputV2)> {
         let consistent_view = ConsistentDbView::new_with_best_tip(self.client.clone())?;
         let nested_hash = NestedStateRoot::new(consistent_view, Some(self.cache.clone()));
         nested_hash.calculate(hashed_state)

@@ -12,7 +12,7 @@ pub trait GravityStorage: Send + Sync + 'static {
     fn get_state_view(&self, opts: StateProviderOptions) -> ProviderResult<Self::StateView>;
 
     /// calculate state root
-    fn state_root(&self, hashed_state: HashedPostState) -> ProviderResult<(B256, TrieInputV2)>;
+    fn state_root(&self, hashed_state: &HashedPostState) -> ProviderResult<(B256, TrieInputV2)>;
 
     /// Insert the mapping from block_number to block_id
     fn insert_block_id(&self, block_number: u64, block_id: B256);

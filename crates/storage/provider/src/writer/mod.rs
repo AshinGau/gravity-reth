@@ -181,8 +181,8 @@ where
             )?;
 
             // insert hashes and intermediate merkle nodes
-            // self.database()
-            //     .write_hashed_state(&Arc::unwrap_or_clone(hashed_state).into_sorted())?;
+            self.database()
+                .write_hashed_state(&Arc::unwrap_or_clone(hashed_state).into_sorted())?;
             let _ = self.database().write(trie.as_ref())?;
             PERSIST_BLOCK_CACHE.persist_tip(block_number);
         }
