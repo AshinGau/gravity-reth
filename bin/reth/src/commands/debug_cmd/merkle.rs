@@ -166,7 +166,7 @@ impl<C: ChainSpecParser<ChainSpec = ChainSpec>> Command<C> {
 
             td += sealed_block.difficulty();
             let executor = executor_provider.executor(parallel_database!(
-                StateProviderDatabase::new(LatestStateProviderRef::new(&provider_rw, None))
+                StateProviderDatabase::new(LatestStateProviderRef::new(&provider_rw))
             ));
             let output = executor.execute(&sealed_block)?;
 

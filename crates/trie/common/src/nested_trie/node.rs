@@ -120,6 +120,11 @@ pub struct NodeEntry {
     pub path: Nibbles,
     pub node: Node,
 }
+impl NodeEntry {
+    pub fn new(path: &Nibbles, node: &Node) -> Self {
+        Self { path: path.clone(), node: node.clone() }
+    }
+}
 pub type StoredNode = Vec<u8>;
 
 impl From<NodeEntry> for StoredNode {

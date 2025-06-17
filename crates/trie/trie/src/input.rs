@@ -7,9 +7,8 @@ use reth_trie_common::nested_trie::Node;
 
 use crate::{prefix_set::TriePrefixSetsMut, updates::TrieUpdates, HashedPostState};
 
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct TrieInputV2 {
-    pub state: HashedPostState,
     pub update_account_nodes: HashMap<Nibbles, Node>,
     pub update_storage_nodes: HashMap<B256, HashMap<Nibbles, Node>>,
     // path, wipe_all: Some(hashed_address)

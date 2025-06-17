@@ -13,9 +13,8 @@ use reth_execution_types::{Chain, ExecutionOutcome};
 use reth_metrics::{metrics::Gauge, Metrics};
 use reth_primitives::{EthPrimitives, NodePrimitives, RecoveredBlock, SealedBlock, SealedHeader};
 use reth_primitives_traits::{BlockBody as _, SignedTransaction};
-use reth_storage_api::{PersistBlockCache, StateProviderBox, USE_STORAGE_CACHE};
-use reth_trie::{updates::TrieUpdates, HashedPostState};
-use revm::db::OriginalValuesKnown;
+use reth_storage_api::StateProviderBox;
+use reth_trie::{HashedPostState, TrieInputV2};
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
 use tokio::sync::{broadcast, watch};
 
@@ -138,7 +137,6 @@ pub(crate) struct CanonicalInMemoryStateInner<N: NodePrimitives> {
     pub(crate) in_memory_state: InMemoryState<N>,
     /// A broadcast stream that emits events when the canonical chain is updated.
     pub(crate) canon_state_notification_sender: CanonStateNotificationSender<N>,
-    pub(crate) persist_block_cache: PersistBlockCache,
 }
 
 impl<N: NodePrimitives> CanonicalInMemoryStateInner<N> {
@@ -153,7 +151,6 @@ impl<N: NodePrimitives> CanonicalInMemoryStateInner<N> {
             self.in_memory_state.pending.send_modify(|p| {
                 p.take();
             });
-            self.persist_block_cache.clear();
         }
         self.in_memory_state.update_metrics();
     }
@@ -193,13 +190,8 @@ impl<N: NodePrimitives> CanonicalInMemoryState<N> {
                 chain_info_tracker,
                 in_memory_state,
                 canon_state_notification_sender,
-                persist_block_cache: Default::default(),
             }),
         }
-    }
-
-    pub fn persist_block_cache(&self) -> PersistBlockCache {
-        self.inner.persist_block_cache.clone()
     }
 
     /// Create an empty state.
@@ -222,7 +214,6 @@ impl<N: NodePrimitives> CanonicalInMemoryState<N> {
             chain_info_tracker,
             in_memory_state,
             canon_state_notification_sender,
-            persist_block_cache: Default::default(),
         };
 
         Self { inner: Arc::new(inner) }
@@ -339,19 +330,11 @@ impl<N: NodePrimitives> CanonicalInMemoryState<N> {
 
             // drain all blocks and only keep the ones that are not persisted (below the persisted
             // height)
-            let mut old_blocks = vec![];
-            let mut persist_blocks = vec![];
-            for block in blocks.drain() {
-                if block.1.block_ref().recovered_block().number() > persisted_height {
-                    old_blocks.push(block.1.block.clone());
-                } else {
-                    persist_blocks.push(block.1.block.clone());
-                }
-            }
-            if *USE_STORAGE_CACHE {
-                persist_blocks.sort_by_key(|b| b.recovered_block().number());
-                self.cache_persist_blocks(persist_blocks);
-            }
+            let mut old_blocks = blocks
+                .drain()
+                .filter(|(_, b)| b.block_ref().recovered_block().number() > persisted_height)
+                .map(|(_, b)| b.block.clone())
+                .collect::<Vec<_>>();
 
             // sort the blocks by number so we can insert them back in natural order (low -> high)
             old_blocks.sort_unstable_by_key(|block| block.recovered_block().number());
@@ -376,27 +359,6 @@ impl<N: NodePrimitives> CanonicalInMemoryState<N> {
             });
         }
         self.inner.in_memory_state.update_metrics();
-    }
-
-    fn cache_persist_blocks(&self, blocks: Vec<ExecutedBlockWithTrieUpdates<N>>) {
-        let persist_block_cache = &self.inner.persist_block_cache;
-        for ExecutedBlockWithTrieUpdates {
-            block: ExecutedBlock { recovered_block, execution_output, hashed_state },
-            trie,
-        } in blocks
-        {
-            let block_number = recovered_block.number();
-            persist_block_cache.update_lock(block_number);
-
-            // cache state
-            let change_set = execution_output.bundle.to_plain_state(OriginalValuesKnown::No);
-            persist_block_cache.write_state_changes(change_set);
-            // insert hashes and intermediate merkle nodes
-            // persist_block_cache.write_hashed_state(Arc::unwrap_or_clone(hashed_state));
-            // persist_block_cache.write_trie_updates(Arc::unwrap_or_clone(trie));
-
-            persist_block_cache.commit(block_number);
-        }
     }
 
     /// Returns in memory state corresponding the given hash.
@@ -866,7 +828,7 @@ pub struct ExecutedBlockWithTrieUpdates<N: NodePrimitives = EthPrimitives> {
     #[into]
     pub block: ExecutedBlock<N>,
     /// Trie updates that result of applying the block.
-    pub trie: Arc<TrieUpdates>,
+    pub trie: Arc<TrieInputV2>,
 }
 
 impl<N: NodePrimitives> ExecutedBlockWithTrieUpdates<N> {
@@ -875,14 +837,14 @@ impl<N: NodePrimitives> ExecutedBlockWithTrieUpdates<N> {
         recovered_block: Arc<RecoveredBlock<N::Block>>,
         execution_output: Arc<ExecutionOutcome<N::Receipt>>,
         hashed_state: Arc<HashedPostState>,
-        trie: Arc<TrieUpdates>,
+        trie: Arc<TrieInputV2>,
     ) -> Self {
         Self { block: ExecutedBlock { recovered_block, execution_output, hashed_state }, trie }
     }
 
     /// Returns a reference to the trie updates for the block
     #[inline]
-    pub fn trie_updates(&self) -> &TrieUpdates {
+    pub fn trie_updates(&self) -> &TrieInputV2 {
         &self.trie
     }
 

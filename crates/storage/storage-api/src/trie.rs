@@ -141,5 +141,5 @@ pub trait StorageTrieWriter: Send + Sync {
 }
 
 pub trait TrieWriterV2 {
-    fn write(&self, input: TrieInputV2) -> Result<usize, DatabaseError>;
+    fn write(&self, input: &TrieInputV2) -> Result<usize, DatabaseError>;
 }

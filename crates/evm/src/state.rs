@@ -65,7 +65,8 @@ where
 
     fn merge_transitions(&mut self, retention: BundleRetention) {
         if let Some(transition_state) = self.transition_state.as_mut().map(TransitionState::take) {
-            self.bundle_state.parallel_apply_transitions_and_create_reverts(transition_state, retention);
+            self.bundle_state
+                .parallel_apply_transitions_and_create_reverts(transition_state, retention);
         }
     }
 

@@ -1,7 +1,7 @@
 use crate::{
     providers::{StaticFileProvider, StaticFileWriter as SfWriter},
     BlockExecutionWriter, BlockWriter, HistoryWriter, StateWriter, StaticFileProviderFactory,
-    StorageLocation, TrieWriter,
+    StorageLocation, TrieWriterV2,
 };
 use alloy_consensus::BlockHeader;
 use reth_chain_state::{ExecutedBlock, ExecutedBlockWithTrieUpdates};
@@ -9,7 +9,9 @@ use reth_db::transaction::{DbTx, DbTxMut};
 use reth_errors::ProviderResult;
 use reth_primitives::{NodePrimitives, StaticFileSegment};
 use reth_primitives_traits::SignedTransaction;
-use reth_storage_api::{DBProvider, StageCheckpointWriter, TransactionsProviderExt};
+use reth_storage_api::{
+    DBProvider, StageCheckpointWriter, TransactionsProviderExt, PERSIST_BLOCK_CACHE,
+};
 use reth_storage_errors::writer::UnifiedStorageWriterError;
 use revm::db::OriginalValuesKnown;
 use std::sync::Arc;
@@ -123,7 +125,7 @@ where
     ProviderDB: DBProvider<Tx: DbTx + DbTxMut>
         + BlockWriter
         + TransactionsProviderExt
-        + TrieWriter
+        + TrieWriterV2
         + StateWriter
         + HistoryWriter
         + StageCheckpointWriter
@@ -165,6 +167,7 @@ where
             trie,
         } in blocks
         {
+            let block_number = recovered_block.number();
             #[cfg(not(pipe_test))]
             self.database()
                 .insert_block(Arc::unwrap_or_clone(recovered_block), StorageLocation::Both)?;
@@ -178,9 +181,10 @@ where
             )?;
 
             // insert hashes and intermediate merkle nodes
-            self.database()
-                .write_hashed_state(&Arc::unwrap_or_clone(hashed_state).into_sorted())?;
-            self.database().write_trie_updates(&trie)?;
+            // self.database()
+            //     .write_hashed_state(&Arc::unwrap_or_clone(hashed_state).into_sorted())?;
+            let _ = self.database().write(trie.as_ref())?;
+            PERSIST_BLOCK_CACHE.persist_tip(block_number);
         }
 
         // update history indices
