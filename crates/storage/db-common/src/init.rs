@@ -99,7 +99,7 @@ where
         + TrieWriterV2
         + AsRef<PF::ProviderRW>,
     PF::ChainSpec: EthChainSpec<Header = <PF::Primitives as NodePrimitives>::BlockHeader>,
-    PF::Provider: Send + Sync + 'static,
+    PF::Provider: Send + Sync,
 {
     let chain = factory.chain_spec();
 
@@ -312,7 +312,7 @@ pub fn insert_world_trie<'a, 'b, Reader, Writer>(
     alloc: impl Iterator<Item = (&'a Address, &'b GenesisAccount)> + Clone,
 ) -> ProviderResult<()>
 where
-    Reader: DBProvider<Tx: DbTx> + Send + Sync + 'static,
+    Reader: DBProvider<Tx: DbTx> + Send + Sync,
     Writer: DBProvider<Tx: DbTxMut> + TrieWriterV2,
 {
     let mut accounts = HashMap::default();

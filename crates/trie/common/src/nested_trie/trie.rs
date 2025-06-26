@@ -20,10 +20,22 @@ pub struct TrieOutput {
     pub update_nodes: HashMap<Nibbles, Node>,
 }
 
+impl TrieOutput {
+    pub fn is_empty(&self) -> bool {
+        self.removed_nodes.is_empty() && self.update_nodes.is_empty()
+    }
+}
+
 #[derive(Default, Debug, Clone)]
 pub struct CompatibleTrieOutput {
     pub removed_nodes: HashSet<Nibbles>,
     pub update_nodes: HashMap<Nibbles, BranchNodeCompact>,
+}
+
+impl CompatibleTrieOutput {
+    pub fn is_empty(&self) -> bool {
+        self.removed_nodes.is_empty() && self.update_nodes.is_empty()
+    }
 }
 
 #[derive(Debug)]
