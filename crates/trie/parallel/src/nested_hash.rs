@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Mutex;
 
 use alloy_primitives::{
     map::{B256Map, HashMap},
@@ -12,7 +12,7 @@ use reth_db_api::{
 };
 
 use reth_primitives_traits::Account;
-use reth_provider::{DBProvider, PersistBlockCache, ProviderError, ProviderResult};
+use reth_provider::{DBProvider, PersistBlockCache, ProviderResult};
 use reth_storage_errors::db::DatabaseError;
 use reth_trie::{
     nested_trie::{Node, Trie, TrieReader},
@@ -78,26 +78,30 @@ where
 }
 
 #[derive(Debug)]
-pub struct NestedStateRoot<Provider> {
-    provider: Arc<Provider>,
+pub struct NestedStateRoot<P, F>
+where
+    P: DBProvider<Tx: DbTx>,
+    F: Fn() -> ProviderResult<P>,
+{
+    provider: F,
     cache: Option<PersistBlockCache>,
 }
 
-impl<Provider> NestedStateRoot<Provider> {
-    pub fn new(provider: Provider, cache: Option<PersistBlockCache>) -> Self {
-        Self { provider: Arc::new(provider), cache }
-    }
-}
-
-impl<Provider> NestedStateRoot<Provider>
+impl<P, F> NestedStateRoot<P, F>
 where
-    Provider: DBProvider<Tx: DbTx>,
+    P: DBProvider<Tx: DbTx>,
+    F: Fn() -> ProviderResult<P>,
 {
+    pub fn new(provider: F, cache: Option<PersistBlockCache>) -> Self {
+        Self { provider, cache }
+    }
+
     pub fn read_hashed_state(&self) -> ProviderResult<HashedPostState> {
         let mut accounts = HashMap::default();
         let mut storages: B256Map<HashedStorage> = HashMap::default();
 
-        let mut account_cursor = self.provider.tx_ref().cursor_read::<tables::HashedAccounts>()?;
+        let mut account_cursor =
+            (self.provider)()?.tx_ref().cursor_read::<tables::HashedAccounts>()?;
         let account_walker = account_cursor.walk(None)?;
         for account in account_walker {
             let (hashed_address, account) = account?;
@@ -105,7 +109,7 @@ where
         }
 
         let mut storage_cursor =
-            self.provider.tx_ref().cursor_dup_read::<tables::HashedStorages>()?;
+            (self.provider)()?.tx_ref().cursor_dup_read::<tables::HashedStorages>()?;
         let storage_walker = storage_cursor.walk_dup(None, None)?;
         for storage in storage_walker {
             let (hashed_address, entry) = storage?;
@@ -116,9 +120,10 @@ where
     }
 }
 
-impl<Provider> NestedStateRoot<Provider>
+impl<P, F> NestedStateRoot<P, F>
 where
-    Provider: DBProvider<Tx: DbTx> + Send + Sync,
+    P: DBProvider<Tx: DbTx>,
+    F: Fn() -> ProviderResult<P> + Send + Sync,
 {
     pub fn calculate(
         &self,
@@ -135,13 +140,13 @@ where
             let index = (hashed_address[0] >> 4) as usize;
             partitioned_accounts[index].push((hashed_address, account));
         }
-        let abort: OnceLock<ProviderError> = Default::default();
-        std::thread::scope(|scope| {
+        std::thread::scope(|scope| -> ProviderResult<()> {
+            let mut handles = Vec::new();
             for partition in partitioned_accounts {
                 if partition.is_empty() {
                     continue;
                 }
-                scope.spawn(|| {
+                handles.push(scope.spawn(|| -> ProviderResult<()> {
                     let index = (partition[0].0[0] >> 4) as usize;
                     let mut updated_account_nodes = updated_account_nodes[index].lock().unwrap();
                     for (hashed_address, account) in partition {
@@ -157,103 +162,89 @@ where
                                 let node = Some(Node::ValueNode(alloy_rlp::encode(account)));
                                 updated_account_nodes.push((path, node));
                             } else {
-                                let result = (|| -> ProviderResult<()> {
-                                    let mut updated_storage_nodes: [Vec<(Nibbles, Option<Node>)>;
-                                        16] = Default::default();
-                                    let create_reader = || {
-                                        let cursor = self
-                                            .provider
-                                            .tx_ref()
-                                            .cursor_dup_read::<tables::StoragesTrieV2>()?;
-                                        Ok(StorageTrieReader::new(
-                                            cursor,
-                                            hashed_address,
-                                            self.cache.clone(),
-                                        ))
-                                    };
-
-                                    let cursor = self
-                                        .provider
+                                let mut updated_storage_nodes: [Vec<(Nibbles, Option<Node>)>; 16] =
+                                    Default::default();
+                                let create_reader = || {
+                                    let cursor = (self.provider)()?
                                         .tx_ref()
                                         .cursor_dup_read::<tables::StoragesTrieV2>()?;
-                                    let trie_reader = StorageTrieReader::new(
+                                    Ok(StorageTrieReader::new(
                                         cursor,
                                         hashed_address,
                                         self.cache.clone(),
-                                    );
-                                    // only make the large storage trie parallel
-                                    let parallel = storage
-                                        .as_ref()
-                                        .map(|s| s.storage.len() > 256)
-                                        .unwrap_or(false);
-                                    let mut storage_trie =
-                                        Trie::new(trie_reader, parallel, compatible)?;
-                                    if let Some(storage) = storage {
-                                        for (hashed_slot, value) in storage.storage {
-                                            let nibbles = Nibbles::unpack(hashed_slot);
-                                            let index = nibbles[0] as usize;
-                                            let value = if value.is_zero() {
-                                                None
-                                            } else {
-                                                let value = encode_fixed_size(&value);
-                                                Some(Node::ValueNode(value.to_vec()))
-                                            };
-                                            updated_storage_nodes[index].push((nibbles, value));
-                                        }
-                                    }
-                                    storage_trie
-                                        .parallel_update(updated_storage_nodes, create_reader)?;
-                                    let account = account.into_trie_account(storage_trie.hash());
-                                    updated_account_nodes.push((
-                                        path,
-                                        Some(Node::ValueNode(alloy_rlp::encode(account))),
-                                    ));
+                                    ))
+                                };
 
-                                    let (trie_output, compatible_output) =
-                                        storage_trie.take_output();
-                                    if !trie_output.is_empty() {
-                                        assert!(trie_update
+                                let cursor = (self.provider)()?
+                                    .tx_ref()
+                                    .cursor_dup_read::<tables::StoragesTrieV2>()?;
+                                let trie_reader = StorageTrieReader::new(
+                                    cursor,
+                                    hashed_address,
+                                    self.cache.clone(),
+                                );
+                                // only make the large storage trie parallel
+                                let parallel = storage
+                                    .as_ref()
+                                    .map(|s| s.storage.len() > 256)
+                                    .unwrap_or(false);
+                                let mut storage_trie =
+                                    Trie::new(trie_reader, parallel, compatible)?;
+                                if let Some(storage) = storage {
+                                    for (hashed_slot, value) in storage.storage {
+                                        let nibbles = Nibbles::unpack(hashed_slot);
+                                        let index = nibbles[0] as usize;
+                                        let value = if value.is_zero() {
+                                            None
+                                        } else {
+                                            let value = encode_fixed_size(&value);
+                                            Some(Node::ValueNode(value.to_vec()))
+                                        };
+                                        updated_storage_nodes[index].push((nibbles, value));
+                                    }
+                                }
+                                storage_trie
+                                    .parallel_update(updated_storage_nodes, create_reader)?;
+                                let account = account.into_trie_account(storage_trie.hash());
+                                updated_account_nodes.push((
+                                    path,
+                                    Some(Node::ValueNode(alloy_rlp::encode(account))),
+                                ));
+
+                                let (trie_output, compatible_output) = storage_trie.take_output();
+                                if !trie_output.is_empty() {
+                                    assert!(trie_update
+                                        .lock()
+                                        .unwrap()
+                                        .storage_tries
+                                        .insert(
+                                            hashed_address,
+                                            StorageTrieUpdatesV2 {
+                                                is_deleted: false,
+                                                storage_nodes: trie_output.update_nodes,
+                                                removed_nodes: trie_output.removed_nodes,
+                                            }
+                                        )
+                                        .is_none());
+                                }
+                                if let Some(compatible) = compatible_trie_update.as_ref() {
+                                    let compatible_output = compatible_output.unwrap();
+                                    if !compatible_output.is_empty() {
+                                        assert!(compatible
                                             .lock()
                                             .unwrap()
                                             .storage_tries
                                             .insert(
                                                 hashed_address,
-                                                StorageTrieUpdatesV2 {
+                                                StorageTrieUpdates {
                                                     is_deleted: false,
-                                                    storage_nodes: trie_output.update_nodes,
-                                                    removed_nodes: trie_output.removed_nodes,
+                                                    storage_nodes: compatible_output.update_nodes,
+                                                    removed_nodes: compatible_output.removed_nodes,
                                                 }
                                             )
                                             .is_none());
                                     }
-                                    if let Some(compatible) = compatible_trie_update.as_ref() {
-                                        let compatible_output = compatible_output.unwrap();
-                                        if !compatible_output.is_empty() {
-                                            assert!(compatible
-                                                .lock()
-                                                .unwrap()
-                                                .storage_tries
-                                                .insert(
-                                                    hashed_address,
-                                                    StorageTrieUpdates {
-                                                        is_deleted: false,
-                                                        storage_nodes: compatible_output
-                                                            .update_nodes,
-                                                        removed_nodes: compatible_output
-                                                            .removed_nodes,
-                                                    }
-                                                )
-                                                .is_none());
-                                        }
-                                    }
-                                    Ok(())
-                                })();
-                                match result {
-                                    Err(e) => {
-                                        abort.get_or_init(|| e);
-                                    }
-                                    _ => {}
-                                };
+                                }
                             }
                         } else {
                             updated_account_nodes.push((path, None));
@@ -271,21 +262,23 @@ where
                             }
                         }
                     }
-                });
+                    Ok(())
+                }));
             }
-        });
-        if let Some(abort) = abort.into_inner() {
-            return Err(abort);
-        }
+            for handle in handles {
+                handle.join().unwrap()?;
+            }
+            Ok(())
+        })?;
 
         let updated_account_nodes = updated_account_nodes.map(|u| u.into_inner().unwrap());
         let mut trie_update = trie_update.into_inner().unwrap();
         let mut compatible_trie_update = compatible_trie_update.map(|c| c.into_inner().unwrap());
         let create_reader = || {
-            let cursor = self.provider.tx_ref().cursor_read::<tables::AccountsTrieV2>()?;
+            let cursor = (self.provider)()?.tx_ref().cursor_read::<tables::AccountsTrieV2>()?;
             Ok(AccountTrieReader(cursor, self.cache.clone()))
         };
-        let cursor = self.provider.tx_ref().cursor_read::<tables::AccountsTrieV2>()?;
+        let cursor = (self.provider)()?.tx_ref().cursor_read::<tables::AccountsTrieV2>()?;
         let mut account_trie =
             Trie::new(AccountTrieReader(cursor, self.cache.clone()), true, compatible)?;
         account_trie.parallel_update(updated_account_nodes, create_reader)?;
@@ -549,7 +542,7 @@ mod tests {
         let state = random_state();
         // test paralle root hash
         let factory = create_test_provider_factory();
-        let provider = factory.database_provider_ro().unwrap();
+        let provider = || factory.database_provider_ro();
         let mut hashed_state = HashedPostState::default();
         for (address, (account, storage)) in state.clone() {
             let hashed_address = keccak256(address);

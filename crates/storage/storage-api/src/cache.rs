@@ -231,7 +231,7 @@ impl PersistBlockCache {
         self.metrics.stored_block_number.store(block_number, Ordering::Relaxed);
         let mut guard = self.persist_block_number.lock().unwrap();
         if let Some(ref mut persist_block_number) = *guard {
-            if block_number != *persist_block_number + 1 {
+            if block_number <= *persist_block_number {
                 panic!(
                     "Persist uncontinuous block, expect: {}, actual: {}",
                     *persist_block_number + 1,

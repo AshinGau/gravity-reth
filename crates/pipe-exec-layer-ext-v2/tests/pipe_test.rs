@@ -9,8 +9,9 @@ use reth_node_builder::{EngineNodeLauncher, NodeBuilder, WithLaunchContext};
 use reth_node_ethereum::{node::EthereumAddOns, EthereumNode};
 use reth_pipe_exec_layer_ext_v2::{new_pipe_exec_layer_api, ExecutionArgs, PipeExecLayerApi};
 use reth_provider::{
-    providers::BlockchainProvider, BlockHashReader, BlockNumReader, BlockReader,
-    DatabaseProviderFactory, HeaderProvider, TransactionVariant, TrieWriterV2, PERSIST_BLOCK_CACHE,
+    providers::BlockchainProvider, writer::UnifiedStorageWriter, BlockHashReader, BlockNumReader,
+    BlockReader, DatabaseProviderFactory, HeaderProvider, TransactionVariant, TrieWriterV2,
+    PERSIST_BLOCK_CACHE,
 };
 use reth_tracing::{
     tracing_subscriber::filter::LevelFilter, LayerInfo, LogFormat, RethTracer, Tracer,
@@ -141,15 +142,15 @@ async fn run_pipe(
     block_number_to_id.insert(latest_block_number, latest_block_hash);
 
     // write new state root
-    let nested_hash = NestedStateRoot::new(provider.database_provider_ro().unwrap(), None);
+    let nested_provider = || provider.database_provider_ro();
+    let nested_hash = NestedStateRoot::new(nested_provider, None);
     let hashed_state = nested_hash.read_hashed_state().unwrap();
     let (root_hash, trie_updates, _) = nested_hash.calculate(&hashed_state, false).unwrap();
-    // let trie_write = provider.database_provider_rw().unwrap();
-    // trie_write.write(&trie_updates).unwrap();
+    let trie_write = provider.database_provider_rw().unwrap();
+    trie_write.write(&trie_updates).unwrap();
+    UnifiedStorageWriter::commit_unwind(trie_write)?;
+
     info!("Calculate and write state root={root_hash}");
-    // I don't know why I can't write into trie tables, so I write into cache
-    let cache = PERSIST_BLOCK_CACHE.clone();
-    cache.write_trie_updates(&trie_updates, latest_block_number);
 
     // Load block number to hash from test data
 

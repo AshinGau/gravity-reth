@@ -2,12 +2,13 @@ use crate::metrics::PersistenceMetrics;
 use alloy_consensus::BlockHeader;
 use alloy_eips::BlockNumHash;
 use reth_chain_state::ExecutedBlockWithTrieUpdates;
-use reth_errors::ProviderError;
+use reth_errors::{ProviderError, ProviderResult};
 use reth_ethereum_primitives::EthPrimitives;
 use reth_primitives_traits::NodePrimitives;
 use reth_provider::{
     providers::ProviderNodeTypes, writer::UnifiedStorageWriter, BlockHashReader,
     ChainStateBlockWriter, DatabaseProviderFactory, ProviderFactory, StaticFileProviderFactory,
+    PERSIST_BLOCK_CACHE,
 };
 use reth_prune::{PrunerError, PrunerOutput, PrunerWithFactory};
 use reth_stages_api::{MetricEvent, MetricEventsSender};
@@ -151,12 +152,44 @@ where
         });
 
         let num_blocks = blocks.len();
-        if last_block_hash_num.is_some() {
-            let provider_rw = self.provider.database_provider_rw()?;
+        let mut trie_updates = Vec::with_capacity(num_blocks);
+        for block in blocks.iter() {
+            trie_updates.push(block.triev2.clone());
+        }
+        if let Some(last_num) = last_block_hash_num.clone() {
+            println!("debug step: here1");
+            let block_provider_rw = self.provider.database_provider_rw()?;
+            println!("debug step: here2");
+            let trie_provider_rw = self.provider.database_provider_rw()?;
+            println!("debug step: here3");
             let static_file_provider = self.provider.static_file_provider();
-
-            UnifiedStorageWriter::from(&provider_rw, &static_file_provider).save_blocks(blocks)?;
-            UnifiedStorageWriter::commit(provider_rw)?;
+            println!("debug step: here4");
+            std::thread::scope(|scope| -> ProviderResult<()> {
+                let mut handles = Vec::new();
+                handles.push(scope.spawn(|| -> ProviderResult<()> {
+                    println!("debug step: here5");
+                    let start = Instant::now();
+                    UnifiedStorageWriter::from(&block_provider_rw, &static_file_provider)
+                        .save_blocks(blocks)?;
+                    println!("write block time: {}ms", start.elapsed().as_millis());
+                    println!("debug step: here6");
+                    UnifiedStorageWriter::commit(block_provider_rw)
+                }));
+                handles.push(scope.spawn(|| -> ProviderResult<()> {
+                    println!("debug step: here7");
+                    let start = Instant::now();
+                    UnifiedStorageWriter::from(&trie_provider_rw, &static_file_provider)
+                        .write_trie_updates(trie_updates)?;
+                    println!("write trie updates time: {}ms", start.elapsed().as_millis());
+                    println!("debug step: here8");
+                    UnifiedStorageWriter::commit(trie_provider_rw)
+                }));
+                for handle in handles {
+                    handle.join().unwrap()?;
+                }
+                Ok(())
+            })?;
+            PERSIST_BLOCK_CACHE.persist_tip(last_num.number);
         }
         let elapsed = start_time.elapsed();
         self.metrics.save_blocks_duration_seconds.record(elapsed);
