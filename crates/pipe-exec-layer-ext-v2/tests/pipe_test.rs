@@ -2,7 +2,7 @@ use gravity_storage::block_view_storage::BlockViewStorage;
 use reth_chainspec::ChainSpec;
 use reth_cli_commands::{launcher::FnLauncher, NodeCommand};
 use reth_cli_runner::CliRunner;
-use reth_db::{tables, transaction::DbTx, DatabaseEnv};
+use reth_db::DatabaseEnv;
 use reth_ethereum_cli::chainspec::EthereumChainSpecParser;
 use reth_node_api::NodeTypesWithDBAdapter;
 use reth_node_builder::{EngineNodeLauncher, NodeBuilder, WithLaunchContext};
@@ -11,13 +11,11 @@ use reth_pipe_exec_layer_ext_v2::{new_pipe_exec_layer_api, ExecutionArgs, PipeEx
 use reth_provider::{
     providers::BlockchainProvider, writer::UnifiedStorageWriter, BlockHashReader, BlockNumReader,
     BlockReader, DatabaseProviderFactory, HeaderProvider, TransactionVariant, TrieWriterV2,
-    PERSIST_BLOCK_CACHE,
 };
 use reth_tracing::{
     tracing_subscriber::filter::LevelFilter, LayerInfo, LogFormat, RethTracer, Tracer,
 };
-use reth_trie::{nested_trie::Trie, Nibbles};
-use reth_trie_parallel::nested_hash::{AccountTrieReader, NestedStateRoot};
+use reth_trie_parallel::nested_hash::NestedStateRoot;
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use tracing::info;
 

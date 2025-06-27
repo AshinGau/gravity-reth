@@ -1,7 +1,7 @@
 use crate::{
     providers::{StaticFileProvider, StaticFileWriter as SfWriter},
     BlockExecutionWriter, BlockWriter, HistoryWriter, StateWriter, StaticFileProviderFactory,
-    StorageLocation, TrieWriterV2,
+    StorageLocation, TrieWriterV2, PERSIST_BLOCK_CACHE,
 };
 use alloy_consensus::BlockHeader;
 use reth_chain_state::{ExecutedBlock, ExecutedBlockWithTrieUpdates};
@@ -11,7 +11,6 @@ use reth_primitives_traits::{NodePrimitives, SignedTransaction};
 use reth_static_file_types::StaticFileSegment;
 use reth_storage_api::{DBProvider, StageCheckpointWriter, TransactionsProviderExt, TrieWriter};
 use reth_storage_errors::writer::UnifiedStorageWriterError;
-use reth_trie::TrieUpdatesV2;
 use revm_database::OriginalValuesKnown;
 use std::sync::Arc;
 use tracing::debug;
@@ -133,13 +132,6 @@ where
         + AsRef<ProviderDB>
         + StaticFileProviderFactory,
 {
-    pub fn write_trie_updates(&self, trie_updates: Vec<Arc<TrieUpdatesV2>>) -> ProviderResult<()> {
-        for update in trie_updates {
-            let _ = self.database().write(update.as_ref())?;
-        }
-        Ok(())
-    }
-
     /// Writes executed blocks and receipts to storage.
     pub fn save_blocks<N>(&self, blocks: Vec<ExecutedBlockWithTrieUpdates<N>>) -> ProviderResult<()>
     where
@@ -172,9 +164,10 @@ where
         for ExecutedBlockWithTrieUpdates {
             block: ExecutedBlock { recovered_block, execution_output, hashed_state },
             trie,
-            ..
+            triev2,
         } in blocks
         {
+            let block_number = recovered_block.number();
             let block_hash = recovered_block.hash();
 
             #[cfg(not(feature = "pipe_test"))]
@@ -194,6 +187,8 @@ where
             self.database().write_trie_updates(
                 trie.as_ref().ok_or(ProviderError::MissingTrieUpdates(block_hash))?,
             )?;
+            let _ = self.database().write(triev2.as_ref())?;
+            PERSIST_BLOCK_CACHE.persist_tip(block_number);
         }
 
         // update history indices
