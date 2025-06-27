@@ -207,6 +207,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         // Wait untile there's no large gap between cache and db
         let block_number = block.number();
         let block_id = block.id();
+        self.metrics.start_process_block_number.set(block_number as f64);
 
         self.storage.insert_block_id(block_number, block_id);
         // Retrieve the parent block header to generate the necessary configs for
@@ -338,6 +339,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         self.metrics.finish_commit_time_diff.record(finish_commit_time - prev_finish_commit_time);
         self.make_canonical_barrier.notify(block_number, finish_commit_time).unwrap();
 
+        self.metrics.end_process_block_number.set(block_number as f64);
         self.metrics.total_gas_used.increment(gas_used);
     }
 

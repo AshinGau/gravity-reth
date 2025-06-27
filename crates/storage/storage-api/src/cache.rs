@@ -245,20 +245,18 @@ impl PersistBlockCache {
 
     pub fn persist_tip(&self, block_number: u64) {
         self.metrics.stored_block_number.store(block_number, Ordering::Relaxed);
-        {
-            let mut guard = self.persist_block_number.lock().unwrap();
-            if let Some(ref mut persist_block_number) = *guard {
-                if block_number != *persist_block_number + 1 {
-                    panic!(
-                        "Persist uncontinuous block, expect: {}, actual: {}",
-                        *persist_block_number + 1,
-                        block_number
-                    );
-                }
-                *persist_block_number = block_number;
-            } else {
-                *guard = Some(block_number);
+        let mut guard = self.persist_block_number.lock().unwrap();
+        if let Some(ref mut persist_block_number) = *guard {
+            if block_number != *persist_block_number + 1 {
+                panic!(
+                    "Persist uncontinuous block, expect: {}, actual: {}",
+                    *persist_block_number + 1,
+                    block_number
+                );
             }
+            *persist_block_number = block_number;
+        } else {
+            *guard = Some(block_number);
         }
         if let Some(merged_block_number) = self.merged_block_number.lock().unwrap().clone() {
             let (lock, cvar) = self.persist_wait.as_ref();
