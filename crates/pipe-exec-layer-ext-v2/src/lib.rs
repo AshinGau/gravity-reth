@@ -214,7 +214,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         // executing the current block
         let (parent_block_header, prev_start_execute_time) =
             self.execute_block_barrier.wait(block_number - 1).await.unwrap();
-        self.cache.wait_persist_gap();
+        // self.cache.wait_persist_gap();
         let start_time = Instant::now();
         let ExecuteOrderedBlockResult { block_without_roots, execution_output, txs_info } =
             self.execute_ordered_block(block, &parent_block_header);
