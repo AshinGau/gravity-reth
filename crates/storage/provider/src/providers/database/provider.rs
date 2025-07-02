@@ -2294,11 +2294,10 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
 }
 
 impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> TrieWriterV2 for DatabaseProvider<TX, N> {
-    fn write(&self, input: &TrieUpdatesV2) -> Result<usize, DatabaseError> {
+    fn write_trie_updatesv2(&self, input: &TrieUpdatesV2) -> Result<usize, DatabaseError> {
         let mut num_updated = 0;
         let tx = self.tx_ref();
         let mut account_trie_cursor = tx.cursor_write::<tables::AccountsTrieV2>()?;
-        let mut storage_trie_cursor = tx.cursor_dup_write::<tables::StoragesTrieV2>()?;
         for path in &input.removed_nodes {
             if account_trie_cursor.seek_exact(path.clone().into())?.is_some() {
                 account_trie_cursor.delete_current()?;
@@ -2309,6 +2308,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> TrieWriterV2 for DatabaseProvid
             num_updated += 1;
         }
 
+        let mut storage_trie_cursor = tx.cursor_dup_write::<tables::StoragesTrieV2>()?;
         for (hashed_address, storage_trie_update) in &input.storage_tries {
             if storage_trie_update.is_deleted {
                 // self-destruct

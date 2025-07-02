@@ -331,7 +331,7 @@ where
     let nested_hash = NestedStateRoot::new(provider, None);
     let (root_hash, trie_updates, _) = nested_hash.calculate(&hashed_state, false)?;
 
-    writer.write(&trie_updates)?;
+    writer.write_trie_updatesv2(&trie_updates)?;
     info!(target: "reth::cli",
     root_hash=?root_hash,
     "Inserted world trie");

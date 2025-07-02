@@ -332,6 +332,17 @@ impl Node {
         }
     }
 
+    /// Take the cached hash
+    pub fn take_rlp(&mut self) -> Option<RlpNode> {
+        match self {
+            Self::FullNode { children: _, flags } | Self::ShortNode { key: _, value: _, flags } => {
+                flags.rlp.take()
+            }
+            Self::ValueNode(_) => None,
+            Self::HashNode(rlp_node) => Some(rlp_node.clone()),
+        }
+    }
+
     /// Test whether current node is changed
     pub const fn dirty(&self) -> bool {
         match self {

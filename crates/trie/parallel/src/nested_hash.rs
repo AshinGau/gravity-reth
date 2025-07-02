@@ -357,7 +357,7 @@ mod tests {
     }
 
     impl TrieWriterV2 for InmemoryTrieDB {
-        fn write(&self, input: &TrieUpdatesV2) -> Result<usize, DatabaseError> {
+        fn write_trie_updatesv2(&self, input: &TrieUpdatesV2) -> Result<usize, DatabaseError> {
             let mut account_trie = self.account_trie.lock().unwrap();
             let mut storage_trie = self.storage_trie.lock().unwrap();
             let mut num_update = 0;
@@ -523,11 +523,11 @@ mod tests {
         assert_eq!(state_root1, test_utils::state_root(state1.clone()));
 
         // write into db
-        let _ = db.write(&trie_input1).unwrap();
+        let _ = db.write_trie_updatesv2(&trie_input1).unwrap();
         let state2 = random_state();
         let (state_root2, trie_input2) = calculate(state2.clone(), db.clone(), true);
         let state_merged = merge_state(state1.clone(), state2.clone());
-        let _ = db.write(&trie_input2).unwrap();
+        let _ = db.write_trie_updatesv2(&trie_input2).unwrap();
 
         // compare state root
         assert_eq!(state_root2, test_utils::state_root(state_merged.clone()));
@@ -539,11 +539,11 @@ mod tests {
         if state_merged.len() == state1.len() + state2.len() {
             let (delete_root1, delete_input1) = calculate(state2, db.clone(), false);
             assert_eq!(delete_root1, state_root1);
-            let _ = db.write(&delete_input1).unwrap();
+            let _ = db.write_trie_updatesv2(&delete_input1).unwrap();
             let (delete_root2, delete_input2) = calculate(state1, db.clone(), false);
             // has deleted all data, so the state root is EMPTY_ROOT_HASH
             assert_eq!(delete_root2, EMPTY_ROOT_HASH);
-            let _ = db.write(&delete_input2).unwrap();
+            let _ = db.write_trie_updatesv2(&delete_input2).unwrap();
             assert!(db.account_trie.lock().unwrap().is_empty());
             assert!(db.storage_trie.lock().unwrap().is_empty());
         }

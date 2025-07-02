@@ -89,9 +89,10 @@ where
 
     /// Take the trie output
     pub fn take_output(mut self) -> (TrieOutput, Option<CompatibleTrieOutput>) {
-        if let Some(root) = self.root.take() {
-            self.take_output_inner(root, Nibbles::new());
-        }
+        // if let Some(root) = self.root.take() {
+            // self.take_output_inner(root, Nibbles::new());
+        // }
+        self.root.take();
         (self.trie_output, self.compatible)
     }
 
@@ -109,12 +110,16 @@ where
                 }
                 let mut convert: [Option<Box<Node>>; 17] = Default::default();
                 for (nibble, child) in children.into_iter().enumerate() {
-                    if let Some(child) = child {
-                        let rlp = child.cached_rlp().unwrap().clone();
-                        let mut child_path = prefix.clone();
-                        child_path.push_unchecked(nibble as u8);
-                        self.take_output_inner(*child, child_path);
-                        convert[nibble] = Some(Box::new(Node::HashNode(rlp)));
+                    if let Some(mut child) = child {
+                        if child.dirty() {
+                            let rlp = child.take_rlp().unwrap();
+                            let mut child_path = prefix.clone();
+                            child_path.push_unchecked(nibble as u8);
+                            self.take_output_inner(*child, child_path);
+                            convert[nibble] = Some(Box::new(Node::HashNode(rlp)));
+                        } else {
+                            convert[nibble] = Some(child);
+                        }
                     }
                 }
                 self.trie_output
@@ -123,9 +128,8 @@ where
             }
             Node::ShortNode { key, value, flags } => {
                 match *value {
-                    next_node @ Node::FullNode { .. } => {
-                        let convert =
-                            Box::new(Node::HashNode(next_node.cached_rlp().unwrap().clone()));
+                    mut next_node @ Node::FullNode { .. } => {
+                        let convert = Box::new(Node::HashNode(next_node.take_rlp().unwrap()));
                         let mut next_path = prefix.clone();
                         next_path.extend_from_slice_unchecked(&key);
                         self.take_output_inner(next_node, next_path);
@@ -147,7 +151,6 @@ where
                             Node::ShortNode { key, value: Box::new(hash_node), flags },
                         );
                     }
-                    // assert next_node != HashNode, because current node is dirty
                     Node::ShortNode { .. } => unreachable!("Consecutive ShortNodes"),
                 }
             }
