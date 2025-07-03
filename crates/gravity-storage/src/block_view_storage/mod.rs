@@ -12,7 +12,7 @@ use reth_revm::{
 use reth_storage_api::StateProviderFactory;
 use reth_trie::{
     updates::{TrieUpdates, TrieUpdatesV2},
-    HashedPostState,
+    HashedPostState, EMPTY_ROOT_HASH,
 };
 use reth_trie_parallel::nested_hash::NestedStateRoot;
 use std::{collections::BTreeMap, sync::Mutex};
@@ -63,9 +63,10 @@ where
         hashed_state: &HashedPostState,
         compatible: bool,
     ) -> ProviderResult<(B256, TrieUpdatesV2, Option<TrieUpdates>)> {
-        let provider = || self.client.database_provider_ro();
-        let nested_hash = NestedStateRoot::new(provider, Some(self.cache.clone()));
-        nested_hash.calculate(hashed_state, compatible)
+        // let provider = || self.client.database_provider_ro();
+        // let nested_hash = NestedStateRoot::new(provider, Some(self.cache.clone()));
+        // nested_hash.calculate(hashed_state, compatible)
+        Ok((EMPTY_ROOT_HASH, Default::default(), None))
     }
 
     fn insert_block_id(&self, block_number: u64, block_id: B256) {
