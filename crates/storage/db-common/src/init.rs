@@ -96,6 +96,7 @@ where
         + HeaderProvider
         + HashingWriter
         + StateWriter
+        + TrieWriterV2
         + AsRef<PF::ProviderRW>,
     PF::ChainSpec: EthChainSpec<Header = <PF::Primitives as NodePrimitives>::BlockHeader>,
 {

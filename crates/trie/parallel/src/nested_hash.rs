@@ -205,7 +205,7 @@ where
                                 if let Some(storage) = storage {
                                     for (hashed_slot, value) in storage.storage {
                                         let nibbles = Nibbles::unpack(hashed_slot);
-                                        let index = nibbles[0] as usize;
+                                        let index = nibbles.get(0).unwrap() as usize;
                                         let value = if value.is_zero() {
                                             None
                                         } else {
