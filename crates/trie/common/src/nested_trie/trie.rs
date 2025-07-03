@@ -89,10 +89,9 @@ where
 
     /// Take the trie output
     pub fn take_output(mut self) -> (TrieOutput, Option<CompatibleTrieOutput>) {
-        // if let Some(root) = self.root.take() {
-            // self.take_output_inner(root, Nibbles::new());
-        // }
-        self.root.take();
+        if let Some(root) = self.root.take() {
+            self.take_output_inner(root, Nibbles::new());
+        }
         (self.trie_output, self.compatible)
     }
 
