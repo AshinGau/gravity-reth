@@ -169,10 +169,10 @@ where
         if let Some(node) = node {
             match node {
                 Node::FullNode { mut children, mut flags } => {
-                    let index = key.get(0).unwrap() as usize;
+                    let index = key.get_unchecked(0) as usize;
                     let child = children[index].take().map(|n| *n);
                     let mut new_prefix = prefix.clone();
-                    new_prefix.push_unchecked(key.get(0).unwrap());
+                    new_prefix.push_unchecked(key.get_unchecked(0));
                     let (dirty, new_node) =
                         self.insert_inner(child, new_prefix, key.slice(1..), value)?;
                     children[index] = Some(Box::new(new_node));
@@ -210,7 +210,7 @@ where
                         node_key.slice(matchlen_inc..),
                         *node_value,
                     )?;
-                    children[node_key.get(matchlen).unwrap() as usize] =
+                    children[node_key.get_unchecked(matchlen) as usize] =
                         Some(Box::new(extension_node));
 
                     let mut new_prefix = prefix.clone();
@@ -427,10 +427,10 @@ where
         if let Some(node) = node {
             match node {
                 Node::FullNode { mut children, flags } => {
-                    let index = key.get(0).unwrap() as usize;
+                    let index = key.get_unchecked(0) as usize;
                     let child = children[index].take().map(|n| *n);
                     let mut new_prefix = prefix.clone();
-                    new_prefix.push_unchecked(key.get(0).unwrap());
+                    new_prefix.push_unchecked(key.get_unchecked(0));
                     let (dirty, new_node) = self.delete_inner(child, new_prefix, key.slice(1..))?;
                     children[index] = new_node.map(Box::new);
                     if !dirty {
