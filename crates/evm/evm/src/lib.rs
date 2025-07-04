@@ -455,7 +455,7 @@ pub trait ConfigureEvm: Clone + Debug + Send + Sync + Unpin {
     ) -> impl Executor<DB, Primitives = Self::Primitives, Error = BlockExecutionError> {
         BasicBlockExecutor::new(self, db)
     }
-    
+
     /// Returns a new [`ParallelExecutor`].
     fn parallel_executor<'a, DB: ParallelDatabase + 'a>(
         &self,

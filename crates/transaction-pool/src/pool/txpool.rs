@@ -758,8 +758,8 @@ impl<T: TransactionOrdering> TxPool<T> {
         on_chain_code_hash: Option<B256>,
     ) -> Result<(), PoolError> {
         // Short circuit if the sender has neither delegation nor pending delegation.
-        if (on_chain_code_hash.is_none() || on_chain_code_hash == Some(KECCAK_EMPTY))
-            && !self.all_transactions.auths.contains_key(&transaction.sender_id())
+        if (on_chain_code_hash.is_none() || on_chain_code_hash == Some(KECCAK_EMPTY)) &&
+            !self.all_transactions.auths.contains_key(&transaction.sender_id())
         {
             return Ok(());
         }
@@ -1733,9 +1733,7 @@ impl<T: PoolTransaction> AllTransactions<T> {
                         cumulative_cost += tx.transaction.cost();
                         if tx.transaction.is_eip4844() && cumulative_cost > on_chain_balance {
                             // the transaction would shift
-                            return Err(InsertErr::Overdraft {
-                                transaction: Arc::new(new_blob_tx),
-                            });
+                            return Err(InsertErr::Overdraft { transaction: Arc::new(new_blob_tx) });
                         }
                     }
                 }

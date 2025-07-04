@@ -217,7 +217,10 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
         trace!(target: "providers::db", ?block_number, %block_hash, "Returning historical state provider for block hash");
 
         if opts.parallel.get() > 1 {
-            Ok(Box::new(ParallelStateProvider::try_new(|| Ok(self.provider()?.try_into_history_at_block(block_number)?), opts.parallel.get())?))
+            Ok(Box::new(ParallelStateProvider::try_new(
+                || Ok(self.provider()?.try_into_history_at_block(block_number)?),
+                opts.parallel.get(),
+            )?))
         } else {
             provider.try_into_history_at_block(block_number)
         }
