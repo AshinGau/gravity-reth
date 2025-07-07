@@ -543,7 +543,7 @@ where
         //
         // Any other case means that the account is not an EOA, and should not be able to send
         // transactions.
-        if account.is_empty_code_hash() {
+        if !account.is_empty_code_hash() {
             let is_eip7702 = if self.fork_tracker.is_prague_activated() {
                 match state.code_by_hash_ref(account.code_hash) {
                     Ok(bytecode) => bytecode.is_eip7702(),
