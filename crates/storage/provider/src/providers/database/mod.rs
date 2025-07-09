@@ -4,8 +4,8 @@ use crate::{
     traits::{BlockSource, ReceiptProvider},
     BlockHashReader, BlockNumReader, BlockReader, ChainSpecProvider, DatabaseProviderFactory,
     HashedPostStateProvider, HeaderProvider, HeaderSyncGapProvider, ProviderError,
-    PruneCheckpointReader, StageCheckpointReader, StateProviderBox, StateProviderOptions,
-    StaticFileProviderFactory, TransactionVariant, TransactionsProvider,
+    PruneCheckpointReader, StageCheckpointReader, StateProviderBox, StaticFileProviderFactory,
+    TransactionVariant, TransactionsProvider,
 };
 use alloy_consensus::transaction::TransactionMeta;
 use alloy_eips::BlockHashOrNumber;
@@ -40,9 +40,6 @@ use tracing::trace;
 
 mod provider;
 pub use provider::{DatabaseProvider, DatabaseProviderRO, DatabaseProviderRW};
-
-mod parallel_provider;
-use parallel_provider::ParallelStateProvider;
 
 use super::ProviderNodeTypes;
 
@@ -171,59 +168,32 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
 
     /// State provider for latest block
     #[track_caller]
-    pub fn latest(&self, opts: StateProviderOptions) -> ProviderResult<StateProviderBox> {
+    pub fn latest(&self) -> ProviderResult<StateProviderBox> {
         trace!(target: "providers::db", "Returning latest state provider");
-
-        let factory = || {
-            Ok(Box::new(LatestStateProvider::new(self.database_provider_ro()?)) as StateProviderBox)
-        };
-
-        if opts.parallel.get() > 1 {
-            Ok(Box::new(ParallelStateProvider::try_new(factory, opts.parallel.get())?))
-        } else {
-            factory()
-        }
+        Ok(Box::new(LatestStateProvider::new(self.database_provider_ro()?)))
     }
 
     /// Storage provider for state at that given block
     pub fn history_by_block_number(
         &self,
         block_number: BlockNumber,
-        opts: StateProviderOptions,
     ) -> ProviderResult<StateProviderBox> {
+        let state_provider = self.provider()?.try_into_history_at_block(block_number)?;
         trace!(target: "providers::db", ?block_number, "Returning historical state provider for block number");
-
-        let factory = || self.provider()?.try_into_history_at_block(block_number);
-
-        if opts.parallel.get() > 1 {
-            Ok(Box::new(ParallelStateProvider::try_new(factory, opts.parallel.get())?))
-        } else {
-            factory()
-        }
+        Ok(state_provider)
     }
 
     /// Storage provider for state at that given block hash
-    pub fn history_by_block_hash(
-        &self,
-        block_hash: BlockHash,
-        opts: StateProviderOptions,
-    ) -> ProviderResult<StateProviderBox> {
+    pub fn history_by_block_hash(&self, block_hash: BlockHash) -> ProviderResult<StateProviderBox> {
         let provider = self.provider()?;
 
         let block_number = provider
             .block_number(block_hash)?
             .ok_or(ProviderError::BlockHashNotFound(block_hash))?;
 
+        let state_provider = provider.try_into_history_at_block(block_number)?;
         trace!(target: "providers::db", ?block_number, %block_hash, "Returning historical state provider for block hash");
-
-        if opts.parallel.get() > 1 {
-            Ok(Box::new(ParallelStateProvider::try_new(
-                || Ok(self.provider()?.try_into_history_at_block(block_number)?),
-                opts.parallel.get(),
-            )?))
-        } else {
-            provider.try_into_history_at_block(block_number)
-        }
+        Ok(state_provider)
     }
 }
 
@@ -697,7 +667,7 @@ mod tests {
     #[test]
     fn common_history_provider() {
         let factory = create_test_provider_factory();
-        let _ = factory.latest(Default::default());
+        let _ = factory.latest();
     }
 
     #[test]

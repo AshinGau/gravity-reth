@@ -30,7 +30,7 @@ use reth_primitives_traits::{
     GotExpected, SealedBlock,
 };
 use reth_revm::{database::StateProviderDatabase, DatabaseRef};
-use reth_storage_api::{StateProviderFactory, StateProviderOptions, PERSIST_BLOCK_CACHE};
+use reth_storage_api::{StateProviderFactory, PERSIST_BLOCK_CACHE};
 use reth_tasks::TaskSpawner;
 use std::{
     marker::PhantomData,
@@ -272,10 +272,7 @@ where
                 // stateless checks passed, pass transaction down stateful validation pipeline
                 // If we don't have a state provider yet, fetch the latest state
                 if maybe_state.is_none() {
-                    match self
-                        .client
-                        .latest_with_opts(StateProviderOptions::default().with_raw_db())
-                    {
+                    match self.client.latest() {
                         Ok(state) => {
                             let state_with_cache = BlockViewProvider::new(
                                 StateProviderDatabase::new(state),

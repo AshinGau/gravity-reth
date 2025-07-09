@@ -2,8 +2,8 @@ use crate::{
     traits::{BlockSource, ReceiptProvider},
     AccountReader, BlockHashReader, BlockIdReader, BlockNumReader, BlockReader, BlockReaderIdExt,
     ChainSpecProvider, ChangeSetReader, EthStorage, HeaderProvider, ReceiptProviderIdExt,
-    StateProvider, StateProviderBox, StateProviderFactory, StateProviderOptions, StateReader,
-    StateRootProvider, TransactionVariant, TransactionsProvider,
+    StateProvider, StateProviderBox, StateProviderFactory, StateReader, StateRootProvider,
+    TransactionVariant, TransactionsProvider,
 };
 use alloy_consensus::{constants::EMPTY_ROOT_HASH, transaction::TransactionMeta, Header};
 use alloy_eips::{BlockHashOrNumber, BlockId, BlockNumberOrTag};
@@ -899,7 +899,7 @@ where
 impl<T: NodePrimitives, ChainSpec: EthChainSpec + Send + Sync + 'static> StateProviderFactory
     for MockEthProvider<T, ChainSpec>
 {
-    fn latest_with_opts(&self, _opts: StateProviderOptions) -> ProviderResult<StateProviderBox> {
+    fn latest(&self) -> ProviderResult<StateProviderBox> {
         Ok(Box::new(self.clone()))
     }
 
@@ -935,19 +935,11 @@ impl<T: NodePrimitives, ChainSpec: EthChainSpec + Send + Sync + 'static> StatePr
         Ok(Box::new(self.clone()))
     }
 
-    fn history_by_block_hash_with_opts(
-        &self,
-        _block: BlockHash,
-        _opts: StateProviderOptions,
-    ) -> ProviderResult<StateProviderBox> {
+    fn history_by_block_hash(&self, _block: BlockHash) -> ProviderResult<StateProviderBox> {
         Ok(Box::new(self.clone()))
     }
 
-    fn state_by_block_hash_with_opts(
-        &self,
-        _block: BlockHash,
-        _opts: StateProviderOptions,
-    ) -> ProviderResult<StateProviderBox> {
+    fn state_by_block_hash(&self, _block: BlockHash) -> ProviderResult<StateProviderBox> {
         Ok(Box::new(self.clone()))
     }
 
@@ -955,11 +947,7 @@ impl<T: NodePrimitives, ChainSpec: EthChainSpec + Send + Sync + 'static> StatePr
         Ok(Box::new(self.clone()))
     }
 
-    fn pending_state_by_hash_with_opts(
-        &self,
-        _block_hash: B256,
-        _opts: StateProviderOptions,
-    ) -> ProviderResult<Option<StateProviderBox>> {
+    fn pending_state_by_hash(&self, _block_hash: B256) -> ProviderResult<Option<StateProviderBox>> {
         Ok(Some(Box::new(self.clone())))
     }
 }
