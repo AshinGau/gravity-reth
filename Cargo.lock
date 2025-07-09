@@ -9555,6 +9555,7 @@ dependencies = [
  "c-kzg",
  "derive_more",
  "futures-util",
+ "gravity-storage",
  "metrics",
  "op-alloy-consensus",
  "op-alloy-flz",
