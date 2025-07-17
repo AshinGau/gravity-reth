@@ -1,14 +1,16 @@
 #![allow(clippy::type_complexity)]
 
-use std::sync::Mutex;
+use std::{ops::RangeInclusive, sync::Mutex};
 
 use alloy_primitives::{
+    keccak256,
     map::{B256Map, HashMap},
-    B256, KECCAK256_EMPTY,
+    BlockNumber, B256, KECCAK256_EMPTY,
 };
 use alloy_rlp::encode_fixed_size;
 use reth_db_api::{
     cursor::{DbCursorRO, DbDupCursorRO},
+    models::{AccountBeforeTx, BlockNumberAddress},
     tables,
     transaction::DbTx,
 };
@@ -87,19 +89,19 @@ where
 
 /// Root hash for nested trie
 #[derive(Debug)]
-pub struct NestedStateRoot<P, F>
+pub struct NestedStateRoot<Tx, F>
 where
-    P: DBProvider<Tx: DbTx>,
-    F: Fn() -> ProviderResult<P>,
+    Tx: DbTx,
+    F: Fn() -> ProviderResult<Tx>,
 {
     provider: F,
     cache: Option<PersistBlockCache>,
 }
 
-impl<P, F> NestedStateRoot<P, F>
+impl<Tx, F> NestedStateRoot<Tx, F>
 where
-    P: DBProvider<Tx: DbTx>,
-    F: Fn() -> ProviderResult<P>,
+    Tx: DbTx,
+    F: Fn() -> ProviderResult<Tx>,
 {
     /// Create a new `NestedStateRoot`
     pub const fn new(provider: F, cache: Option<PersistBlockCache>) -> Self {
@@ -107,34 +109,62 @@ where
     }
 
     /// Compatible with origin `BranchNodeCompact` trie
-    pub fn read_hashed_state(&self) -> ProviderResult<HashedPostState> {
+    pub fn read_hashed_state(
+        &self,
+        range: Option<RangeInclusive<BlockNumber>>,
+    ) -> ProviderResult<HashedPostState> {
         let mut accounts = HashMap::default();
         let mut storages: B256Map<HashedStorage> = HashMap::default();
+        let tx = (self.provider)()?;
+        if let Some(range) = range {
+            // Walk account changeset and insert account prefixes.
+            let mut account_changeset_cursor = tx.cursor_read::<tables::AccountChangeSets>()?;
+            let mut account_hashed_state_cursor = tx.cursor_read::<tables::HashedAccounts>()?;
+            for account_entry in account_changeset_cursor.walk_range(range.clone())? {
+                let (_, AccountBeforeTx { address, .. }) = account_entry?;
+                let hashed_address = keccak256(address);
+                let account = account_hashed_state_cursor.seek_exact(hashed_address)?;
+                accounts.insert(hashed_address, account.map(|a| a.1));
+            }
 
-        let mut account_cursor =
-            (self.provider)()?.tx_ref().cursor_read::<tables::HashedAccounts>()?;
-        let account_walker = account_cursor.walk(None)?;
-        for account in account_walker {
-            let (hashed_address, account) = account?;
-            accounts.insert(hashed_address, Some(account));
-        }
+            // Walk storage changeset and insert storage prefixes as well as account prefixes if
+            // missing from the account prefix set.
+            let mut storage_cursor = tx.cursor_dup_read::<tables::StorageChangeSets>()?;
+            let storage_range = BlockNumberAddress::range(range);
+            for storage_entry in storage_cursor.walk_range(storage_range)? {
+                let (BlockNumberAddress((_, address)), entry) = storage_entry?;
+                let hashed_address = keccak256(address);
+                storages
+                    .entry(hashed_address)
+                    .or_default()
+                    .storage
+                    .insert(keccak256(entry.key), entry.value);
+            }
+        } else {
+            let mut account_cursor = tx.cursor_read::<tables::HashedAccounts>()?;
+            let account_walker = account_cursor.walk(None)?;
+            for account in account_walker {
+                let (hashed_address, account) = account?;
+                accounts.insert(hashed_address, Some(account));
+            }
 
-        let mut storage_cursor =
-            (self.provider)()?.tx_ref().cursor_dup_read::<tables::HashedStorages>()?;
-        let storage_walker = storage_cursor.walk_dup(None, None)?;
-        for storage in storage_walker {
-            let (hashed_address, entry) = storage?;
-            storages.entry(hashed_address).or_default().storage.insert(entry.key, entry.value);
+            let mut storage_cursor =
+                tx.cursor_dup_read::<tables::HashedStorages>()?;
+            let storage_walker = storage_cursor.walk_dup(None, None)?;
+            for storage in storage_walker {
+                let (hashed_address, entry) = storage?;
+                storages.entry(hashed_address).or_default().storage.insert(entry.key, entry.value);
+            }
         }
 
         Ok(HashedPostState { accounts, storages })
     }
 }
 
-impl<P, F> NestedStateRoot<P, F>
+impl<Tx, F> NestedStateRoot<Tx, F>
 where
-    P: DBProvider<Tx: DbTx>,
-    F: Fn() -> ProviderResult<P> + Send + Sync,
+    Tx: DbTx,
+    F: Fn() -> ProviderResult<Tx> + Send + Sync,
 {
     /// Calculate the root hash of nested trie
     pub fn calculate(
@@ -159,6 +189,7 @@ where
                     continue;
                 }
                 handles.push(scope.spawn(|| -> ProviderResult<()> {
+                    let tx = (self.provider)()?;
                     let index = (partition[0].0[0] >> 4) as usize;
                     let mut updated_account_nodes = updated_account_nodes[index].lock().unwrap();
                     for (hashed_address, account) in partition {
@@ -178,7 +209,6 @@ where
                                     Default::default();
                                 let create_reader = || {
                                     let cursor = (self.provider)()?
-                                        .tx_ref()
                                         .cursor_dup_read::<tables::StoragesTrieV2>()?;
                                     Ok(StorageTrieReader::new(
                                         cursor,
@@ -187,8 +217,7 @@ where
                                     ))
                                 };
 
-                                let cursor = (self.provider)()?
-                                    .tx_ref()
+                                let cursor = tx
                                     .cursor_dup_read::<tables::StoragesTrieV2>()?;
                                 let trie_reader = StorageTrieReader::new(
                                     cursor,
@@ -287,10 +316,10 @@ where
         let mut trie_update = trie_update.into_inner().unwrap();
         let mut compatible_trie_update = compatible_trie_update.map(|c| c.into_inner().unwrap());
         let create_reader = || {
-            let cursor = (self.provider)()?.tx_ref().cursor_read::<tables::AccountsTrieV2>()?;
+            let cursor = (self.provider)()?.cursor_read::<tables::AccountsTrieV2>()?;
             Ok(AccountTrieReader(cursor, self.cache.clone()))
         };
-        let cursor = (self.provider)()?.tx_ref().cursor_read::<tables::AccountsTrieV2>()?;
+        let cursor = (self.provider)()?.cursor_read::<tables::AccountsTrieV2>()?;
         let mut account_trie =
             Trie::new(AccountTrieReader(cursor, self.cache.clone()), true, compatible)?;
         account_trie.parallel_update(updated_account_nodes, create_reader)?;
@@ -554,7 +583,7 @@ mod tests {
         let state = random_state();
         // test paralle root hash
         let factory = create_test_provider_factory();
-        let provider = || factory.database_provider_ro();
+        let provider = || factory.database_provider_ro().map(|db| db.into_tx());
         let mut hashed_state = HashedPostState::default();
         for (address, (account, storage)) in state.clone() {
             let hashed_address = keccak256(address);

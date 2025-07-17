@@ -1,7 +1,8 @@
 use crate::{error::StageError, StageCheckpoint, StageId};
 use alloy_primitives::{BlockNumber, TxNumber};
+use reth_db_api::database::{RawDbTxProvider};
 use reth_provider::{
-    BlockReader, ProviderError, ProviderResult, StateProviderBox, StateProviderOptions,
+    BlockReader, DBProvider, ProviderError, ProviderResult, StateProviderBox, StateProviderOptions
 };
 use std::{
     cmp::{max, min},
@@ -244,11 +245,11 @@ pub trait Stage<Provider>: Send + Sync {
     /// Execute the stage.
     fn execute_v2(
         &mut self,
-        provider: &Provider,
-        _factory: &dyn LatestStateProviderFactory,
+        rw_provider: &Provider,
+        _tx_provider: &dyn RawDbTxProvider<Provider::Tx>,
         input: ExecInput,
-    ) -> Result<ExecOutput, StageError> {
-        self.execute(provider, input)
+    ) -> Result<ExecOutput, StageError> where Provider: DBProvider {
+        self.execute(rw_provider, input)
     }
 
     /// Post execution commit hook.

@@ -1,3 +1,5 @@
+use reth_storage_errors::ProviderResult;
+
 use crate::{
     table::TableImporter,
     transaction::{DbTx, DbTxMut},
@@ -76,3 +78,8 @@ impl<DB: Database> Database for &DB {
         <DB as Database>::tx_mut(self)
     }
 }
+
+pub trait RawDbTxProvider<Tx: DbTx> {
+    fn raw_tx(&self) -> ProviderResult<Tx>;
+}
+

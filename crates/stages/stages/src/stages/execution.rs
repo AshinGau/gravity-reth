@@ -284,13 +284,14 @@ where
         self.execute_inner(provider, None, input)
     }
 
+    /// Execute the stage.
     fn execute_v2(
         &mut self,
-        provider: &Provider,
-        factory: &dyn LatestStateProviderFactory,
+        rw_provider: &Provider,
+        _tx_provider: &dyn RawDbTxProvider<Provider::Tx>,
         input: ExecInput,
-    ) -> Result<ExecOutput, StageError> {
-        self.execute_inner(provider, Some(factory), input)
+    ) -> Result<ExecOutput, StageError> where Provider: DBProvider {
+        self.execute_inner(provider, None, input)
     }
 
     fn post_execute_commit(&mut self) -> Result<(), StageError> {

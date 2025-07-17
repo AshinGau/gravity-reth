@@ -12,7 +12,7 @@ use alloy_eips::BlockHashOrNumber;
 use alloy_primitives::{Address, BlockHash, BlockNumber, TxHash, TxNumber, B256, U256};
 use core::fmt;
 use reth_chainspec::ChainInfo;
-use reth_db::{init_db, mdbx::DatabaseArguments, DatabaseEnv};
+use reth_db::{database::RawDbTxProvider, init_db, mdbx::DatabaseArguments, DatabaseEnv};
 use reth_db_api::{database::Database, models::StoredBlockBodyIndices};
 use reth_errors::{RethError, RethResult};
 use reth_node_types::{
@@ -216,6 +216,12 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
 
         trace!(target: "providers::db", ?block_number, %block_hash, "Returning historical state provider for block hash");
         self.history_by_block_number(block_number, opts)
+    }
+}
+
+impl<N: ProviderNodeTypes> RawDbTxProvider<<<N as NodeTypesWithDB>::DB as Database>::TX> for ProviderFactory<N> {
+    fn raw_tx(&self) -> ProviderResult<<<N as NodeTypesWithDB>::DB as Database>::TX> {
+        self.database_provider_ro().map(|db| db.into_tx())
     }
 }
 
