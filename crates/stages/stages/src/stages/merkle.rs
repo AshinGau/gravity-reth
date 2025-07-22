@@ -185,7 +185,7 @@ where
         }
 
         let range = input.next_block_range();
-        let (_from_block, to_block) = range.clone().into_inner();
+        let (from_block, to_block) = range.clone().into_inner();
         let current_block_number = input.checkpoint().block_number;
 
         let target_block = provider
@@ -227,6 +227,7 @@ where
         self.save_execution_checkpoint(provider, None)?;
 
         validate_state_root(trie_root, SealedHeader::seal_slow(target_block), to_block)?;
+        println!("validate_state_root success from {} to {}", from_block, to_block);
 
         Ok(ExecOutput {
             checkpoint: StageCheckpoint::new(to_block)
