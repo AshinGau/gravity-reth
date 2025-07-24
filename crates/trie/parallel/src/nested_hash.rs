@@ -135,7 +135,6 @@ where
                 let (BlockNumberAddress((_, address)), entry) = storage_entry?;
                 let hashed_address = keccak256(address);
                 if !accounts.contains_key(&hashed_address) {
-                    println!("not found changed account: {} in accout change set", address);
                     let account = account_hashed_state_cursor.seek_exact(hashed_address)?;
                     accounts.insert(hashed_address, account.map(|a| a.1));
                 }

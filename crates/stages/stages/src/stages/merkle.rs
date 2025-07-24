@@ -9,7 +9,7 @@ use reth_db_api::{
 use reth_primitives_traits::{GotExpected, SealedHeader};
 use reth_provider::{
     DBProvider, HeaderProvider, ProviderError, StageCheckpointReader, StageCheckpointWriter,
-    StatsReader, TrieWriter, TrieWriterV2,
+    StatsReader, TrieWriter, TrieWriterV2, EXECUTION_MERKLE_CHANNEL,
 };
 use reth_stages_api::{
     BlockErrorKind, BoxedConcurrentProvider, EntitiesCheckpoint, ExecInput, ExecOutput,
@@ -203,7 +203,7 @@ where
                 None, // No cache for history sync
             );
             // Read the hashed state from database for the specified range
-            let hashed_state = nested_state_root.read_hashed_state(Some(range))?;
+            let hashed_state = EXECUTION_MERKLE_CHANNEL.consume(from_block);
             let (final_root, trie_updates_v2, _compatible_updates) =
                 nested_state_root.calculate(&hashed_state, false)?;
             provider.write_trie_updatesv2(&trie_updates_v2)?;
