@@ -181,6 +181,14 @@ where
         let mut partitioned_accounts: [Vec<(&B256, &Option<Account>)>; 16] = Default::default();
         let HashedPostState { accounts: hashed_accounts, storages: hashed_storages } = hashed_state;
 
+        for (hashed_address, storage) in hashed_storages {
+            let account = hashed_accounts.get(hashed_address);
+            assert!(account.is_some(), "can't find account");
+            if storage.wiped {
+                assert!(account.unwrap().is_none(), "account is not self-destructed");
+            }
+        }
+
         for (hashed_address, account) in hashed_accounts {
             let index = (hashed_address[0] >> 4) as usize;
             partitioned_accounts[index].push((hashed_address, account));
