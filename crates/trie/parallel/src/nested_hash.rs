@@ -235,12 +235,6 @@ where
                                     continue;
                                 }
                             }
-                            if account.get_bytecode_hash() == KECCAK256_EMPTY &&
-                                storage.as_ref().map(|s| s.is_empty()).unwrap_or(true)
-                            {
-                                empty_root_account();
-                                continue;
-                            }
 
                             let mut updated_storage_nodes: [Vec<(Nibbles, Option<Node>)>; 16] =
                                 Default::default();
