@@ -23,17 +23,15 @@ use alloy_consensus::{BlockHeader, Header};
 pub use alloy_evm::EthEvm;
 use alloy_evm::{
     eth::{EthBlockExecutionCtx, EthBlockExecutorFactory},
-    EthEvmFactory,
+    EthEvmFactory, FromRecoveredTx, FromTxWithEncoded,
 };
 use alloy_primitives::{Bytes, U256};
 use core::{convert::Infallible, fmt::Debug};
-use gravity_primitives::CONFIG;
 use reth_chainspec::{ChainSpec, EthChainSpec, MAINNET};
-use reth_ethereum_primitives::{Block, EthPrimitives};
+use reth_ethereum_primitives::{Block, EthPrimitives, TransactionSigned};
 use reth_evm::{
-    execute::{BasicBlockExecutor, BlockExecutionError},
-    parallel_execute::{ParallelExecutor, WrapExecutor},
-    ConfigureEvm, EvmEnv, NextBlockEnvAttributes, ParallelDatabase,
+    precompiles::PrecompilesMap, ConfigureEvm, EvmEnv, EvmFactory, NextBlockEnvAttributes,
+    ParallelDatabase, TransactionEnv,
 };
 use reth_primitives_traits::{SealedBlock, SealedHeader};
 use revm::{
@@ -82,6 +80,13 @@ pub struct EthEvmConfig<C = ChainSpec, EvmFactory = EthEvmFactory> {
 }
 
 impl EthEvmConfig {
+    /// Creates a new Ethereum EVM configuration for the ethereum mainnet.
+    pub fn mainnet() -> Self {
+        Self::ethereum(MAINNET.clone())
+    }
+}
+
+impl<ChainSpec> EthEvmConfig<ChainSpec> {
     /// Creates a new Ethereum EVM configuration with the given chain spec.
     pub fn new(chain_spec: Arc<ChainSpec>) -> Self {
         Self::ethereum(chain_spec)
@@ -90,11 +95,6 @@ impl EthEvmConfig {
     /// Creates a new Ethereum EVM configuration.
     pub fn ethereum(chain_spec: Arc<ChainSpec>) -> Self {
         Self::new_with_evm_factory(chain_spec, EthEvmFactory::default())
-    }
-
-    /// Creates a new Ethereum EVM configuration for the ethereum mainnet.
-    pub fn mainnet() -> Self {
-        Self::ethereum(MAINNET.clone())
     }
 }
 
@@ -208,9 +208,7 @@ where
                 BlobExcessGasAndPrice { excess_blob_gas, blob_gasprice }
             });
 
-        let mut basefee = parent.next_block_base_fee(
-            self.chain_spec().base_fee_params_at_timestamp(attributes.timestamp),
-        );
+        let mut basefee = chain_spec.next_block_base_fee(parent, attributes.timestamp);
 
         let mut gas_limit = attributes.gas_limit;
 

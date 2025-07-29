@@ -110,7 +110,7 @@ where
                 .eth_api()
                 .provider()
                 .chain_spec()
-                .blob_params_at_timestamp(evm_env.block_env.timestamp.to())
+                .blob_params_at_timestamp(evm_env.block_env.timestamp.saturating_to())
                 .unwrap_or_else(BlobParams::cancun);
             if transactions.iter().filter_map(|tx| tx.blob_gas_used()).sum::<u64>() >
                 blob_params.max_blob_gas_per_block()
@@ -185,7 +185,7 @@ where
                     };
 
                     hasher.update(*tx.tx_hash());
-                    let ResultAndState { result, state, .. } = evm
+                    let ResultAndState { result, state } = evm
                         .transact(eth_api.evm_config().tx_env(&tx))
                         .map_err(Eth::Error::from_evm_err)?;
 
@@ -273,7 +273,7 @@ where
     }
 }
 
-/// Container type for  `EthBundle` internals
+/// Container type for `EthBundle` internals
 #[derive(Debug)]
 struct EthBundleInner<Eth> {
     /// Access to commonly used code of the `eth` namespace

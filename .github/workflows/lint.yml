@@ -191,18 +191,27 @@ jobs:
       - run: cargo build --bin reth --workspace --features ethereum
         env:
           RUSTFLAGS: -D warnings
-      - run: ./book/cli/update.sh target/debug/reth
-      - name: Check book changes
+      - run: ./docs/cli/update.sh target/debug/reth
+      - name: Check docs changes
         run: git diff --exit-code
 
-  codespell:
+  typos:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: codespell-project/actions-codespell@v2
+      - uses: crate-ci/typos@v1
+
+  check-toml:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Run dprint
+        uses: dprint/check@v2.3
         with:
-          skip: "*.json"
+          config-path: dprint.json
 
   check-toml:
     runs-on: ubuntu-latest
@@ -285,7 +294,7 @@ jobs:
       - fmt
       - udeps
       - book
-      - codespell
+      - typos
       - grafana
       - no-test-deps
       - features

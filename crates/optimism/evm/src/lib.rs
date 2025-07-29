@@ -11,7 +11,7 @@
 
 extern crate alloc;
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 use alloy_consensus::{BlockHeader, Header};
 use alloy_evm::{FromRecoveredTx, FromTxWithEncoded};
 use alloy_op_evm::{block::receipt_builder::OpReceiptBuilder, OpBlockExecutionCtx};
@@ -22,7 +22,6 @@ use op_revm::{OpSpecId, OpTransaction};
 use reth_chainspec::EthChainSpec;
 use reth_evm::{ConfigureEvm, EvmEnv};
 use reth_optimism_chainspec::OpChainSpec;
-use reth_optimism_consensus::next_block_base_fee;
 use reth_optimism_forks::OpHardforks;
 use reth_optimism_primitives::{DepositReceipt, OpPrimitives};
 use reth_primitives_traits::{NodePrimitives, SealedBlock, SealedHeader, SignedTransaction};
@@ -101,7 +100,7 @@ impl<ChainSpec: OpHardforks, N: NodePrimitives, R> OpEvmConfig<ChainSpec, N, R> 
 
 impl<ChainSpec, N, R> ConfigureEvm for OpEvmConfig<ChainSpec, N, R>
 where
-    ChainSpec: EthChainSpec + OpHardforks,
+    ChainSpec: EthChainSpec<Header = Header> + OpHardforks,
     N: NodePrimitives<
         Receipt = R::Receipt,
         SignedTx = R::Transaction,
@@ -135,7 +134,7 @@ where
         let blob_excess_gas_and_price = spec
             .into_eth_spec()
             .is_enabled_in(SpecId::CANCUN)
-            .then_some(BlobExcessGasAndPrice { excess_blob_gas: 0, blob_gasprice: 0 });
+            .then_some(BlobExcessGasAndPrice { excess_blob_gas: 0, blob_gasprice: 1 });
 
         let block_env = BlockEnv {
             number: U256::from(header.number()),
@@ -177,7 +176,7 @@ where
         let blob_excess_gas_and_price = spec_id
             .into_eth_spec()
             .is_enabled_in(SpecId::CANCUN)
-            .then_some(BlobExcessGasAndPrice { excess_blob_gas: 0, blob_gasprice: 0 });
+            .then_some(BlobExcessGasAndPrice { excess_blob_gas: 0, blob_gasprice: 1 });
 
         let block_env = BlockEnv {
             number: U256::from(parent.number() + 1),
@@ -187,7 +186,10 @@ where
             prevrandao: Some(attributes.prev_randao),
             gas_limit: attributes.gas_limit,
             // calculate basefee based on parent block's gas usage
-            basefee: next_block_base_fee(self.chain_spec(), parent, attributes.timestamp)?,
+            basefee: self
+                .chain_spec()
+                .next_block_base_fee(parent, attributes.timestamp)
+                .unwrap_or_default(),
             // calculate excess gas based on parent block's blob gas usage
             blob_excess_gas_and_price,
         };
@@ -213,18 +215,6 @@ where
             parent_beacon_block_root: attributes.parent_beacon_block_root,
             extra_data: attributes.extra_data,
         }
-    }
-
-    fn parallel_executor<'a, DB: reth_evm::ParallelDatabase + 'a>(
-        &self,
-        _db: DB,
-    ) -> Box<
-        dyn reth_evm::parallel_execute::ParallelExecutor<
-                Primitives = Self::Primitives,
-                Error = reth_execution_errors::BlockExecutionError,
-            > + 'a,
-    > {
-        todo!()
     }
 }
 #[cfg(test)]
