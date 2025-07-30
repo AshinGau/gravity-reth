@@ -336,6 +336,8 @@ mod tests {
         self, random_block, random_block_range, random_changeset_range,
         random_contract_account_range, BlockParams, BlockRangeParams,
     };
+    use reth_trie::StateRoot;
+    use reth_trie_db::DatabaseStateRoot;
     use reth_trie::test_utils::{state_root, state_root_prehashed};
     use std::collections::BTreeMap;
 
