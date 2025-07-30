@@ -23,15 +23,17 @@ use alloy_consensus::{BlockHeader, Header};
 pub use alloy_evm::EthEvm;
 use alloy_evm::{
     eth::{EthBlockExecutionCtx, EthBlockExecutorFactory},
-    EthEvmFactory, FromRecoveredTx, FromTxWithEncoded,
+    EthEvmFactory,
 };
 use alloy_primitives::{Bytes, U256};
 use core::{convert::Infallible, fmt::Debug};
+use gravity_primitives::CONFIG;
 use reth_chainspec::{ChainSpec, EthChainSpec, MAINNET};
-use reth_ethereum_primitives::{Block, EthPrimitives, TransactionSigned};
+use reth_ethereum_primitives::{Block, EthPrimitives};
 use reth_evm::{
-    precompiles::PrecompilesMap, ConfigureEvm, EvmEnv, EvmFactory, NextBlockEnvAttributes,
-    ParallelDatabase, TransactionEnv,
+    execute::{BasicBlockExecutor, BlockExecutionError},
+    parallel_execute::{ParallelExecutor, WrapExecutor},
+    ConfigureEvm, EvmEnv, NextBlockEnvAttributes, ParallelDatabase,
 };
 use reth_primitives_traits::{SealedBlock, SealedHeader};
 use revm::{
@@ -208,7 +210,9 @@ where
                 BlobExcessGasAndPrice { excess_blob_gas, blob_gasprice }
             });
 
-        let mut basefee = chain_spec.next_block_base_fee(parent, attributes.timestamp);
+        let mut basefee = parent.next_block_base_fee(
+            self.chain_spec().base_fee_params_at_timestamp(attributes.timestamp),
+        );
 
         let mut gas_limit = attributes.gas_limit;
 

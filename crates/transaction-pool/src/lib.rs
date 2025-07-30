@@ -802,11 +802,7 @@ where
 
 impl<V, T, S> TransactionPoolExt for Pool<V, T, S>
 where
-<<<<<<< HEAD
     V: TransactionValidator + 'static,
-=======
-    V: TransactionValidator,
->>>>>>> v1.6.0
     <V as TransactionValidator>::Transaction: EthPoolTransaction,
     T: TransactionOrdering<Transaction = <V as TransactionValidator>::Transaction>,
     S: BlobStore,

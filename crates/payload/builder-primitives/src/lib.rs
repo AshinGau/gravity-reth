@@ -8,23 +8,7 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
-<<<<<<<< HEAD:crates/rpc/rpc-convert/src/lib.rs
-mod fees;
-mod rpc;
-pub mod transaction;
-
-pub use fees::{CallFees, CallFeesError};
-pub use rpc::*;
-pub use transaction::{
-    EthTxEnvError, IntoRpcTx, RpcConvert, RpcConverter, TransactionConversionError, TryIntoSimTx,
-    TxInfoMapper,
-};
-
-#[cfg(feature = "op")]
-pub use transaction::op::*;
-========
 mod events;
 pub use crate::events::{Events, PayloadEvents};
 
 pub use reth_payload_primitives::PayloadBuilderError;
->>>>>>>> v1.6.0:crates/payload/builder-primitives/src/lib.rs

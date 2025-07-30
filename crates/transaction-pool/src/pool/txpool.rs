@@ -1620,10 +1620,6 @@ impl<T: PoolTransaction> AllTransactions<T> {
             if current_pool != tx.subpool {
                 updates.push(PoolUpdate {
                     id: *id,
-<<<<<<< HEAD
-                    hash: *tx.transaction.hash(),
-=======
->>>>>>> v1.6.0
                     current: current_pool,
                     destination: tx.subpool.into(),
                 })

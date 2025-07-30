@@ -1,15 +1,8 @@
 ---
 description: Trace API for inspecting Ethereum state and transactions.
 ---
-<<<<<<<< HEAD:book/vocs/docs/pages/jsonrpc/trace.mdx
 
 # `trace` Namespace
-
-{/* TODO: We should probably document the format of the traces themselves, OE does not do that */}
-========
-
-# `trace` Namespace
->>>>>>>> v1.6.0:docs/vocs/docs/pages/jsonrpc/trace.mdx
 
 The `trace` API provides several methods to inspect the Ethereum state, including Parity-style traces.
 
@@ -21,8 +14,6 @@ There are two types of methods in this API:
 
 -   **Ad-hoc tracing APIs** for performing diagnostics on calls or transactions (historical or hypothetical).
 -   **Transaction-trace filtering APIs** for getting full externality traces on any transaction executed by reth.
-<<<<<<<< HEAD:book/vocs/docs/pages/jsonrpc/trace.mdx
-========
 
 ## Trace Format Specification
 
@@ -145,7 +136,6 @@ When `stateDiff` trace type is requested, the `stateDiff` field contains an obje
 ### VM Trace Format
 
 When `vmTrace` trace type is requested, the `vmTrace` field contains detailed virtual machine execution information including opcodes, stack, memory, and storage changes at each step. The exact format depends on the specific VM tracer implementation.
->>>>>>>> v1.6.0:docs/vocs/docs/pages/jsonrpc/trace.mdx
 
 ## Ad-hoc tracing APIs
 

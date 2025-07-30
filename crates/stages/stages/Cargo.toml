@@ -117,7 +117,6 @@ test-utils = [
     "reth-codecs/test-utils",
     "reth-db-api/test-utils",
     "reth-trie-parallel/test-utils",
-    "reth-trie-db/test-utils",
     "reth-trie/test-utils",
     "reth-prune-types/test-utils",
     "dep:reth-ethereum-primitives",

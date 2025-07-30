@@ -9,21 +9,6 @@ $ reth p2p body --help
 Usage: reth p2p body [OPTIONS] <ID>
 
 Options:
-<<<<<<<< HEAD:book/vocs/docs/pages/cli/reth/p2p.mdx
-      --config <FILE>
-          The path to the configuration file to use.
-
-      --chain <CHAIN_OR_PATH>
-          The chain this node is running.
-          Possible values are either a built-in chain or the path to a chain specification file.
-
-          Built-in chains:
-              mainnet, sepolia, holesky, hoodi, dev
-
-          [default: mainnet]
-
-========
->>>>>>>> v1.6.0:docs/vocs/docs/pages/cli/reth/p2p/body.mdx
       --retries <RETRIES>
           The number of retries per request
 
@@ -235,15 +220,6 @@ Datadir:
 
   <ID>
           The block number or hash
-
-      --db.max-size <MAX_SIZE>
-          Maximum database size (e.g., 4TB, 8MB)
-
-      --db.growth-step <GROWTH_STEP>
-          Database growth step (e.g., 4GB, 4KB)
-
-      --db.read-transaction-timeout <READ_TRANSACTION_TIMEOUT>
-          Read transaction timeout in seconds, 0 means no timeout
 
 Logging:
       --log.stdout.format <FORMAT>
