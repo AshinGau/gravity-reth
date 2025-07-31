@@ -331,7 +331,7 @@ where
     let hashed_state = HashedPostState { accounts, storages };
     let cache = (*PERSIST_BLOCK_CACHE).clone();
     let nested_hash = NestedStateRoot::new(provider, Some(cache.clone()));
-    let (root_hash, trie_updates, _) = nested_hash.calculate(&hashed_state, false)?;
+    let (root_hash, trie_updates) = nested_hash.calculate(&hashed_state)?;
     cache.write_trie_updates(&trie_updates, 0);
     println!(
         "nested debug: genesis block init, account trie size: {}, storage trie size: {}",

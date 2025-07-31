@@ -205,8 +205,7 @@ where
             );
             // Read the hashed state from database for the specified range
             let hashed_state = EXECUTION_MERKLE_CHANNEL.consume(from_block);
-            let (final_root, trie_updates_v2, _compatible_updates) =
-                nested_state_root.calculate(&hashed_state, false)?;
+            let (final_root, trie_updates_v2) = nested_state_root.calculate(&hashed_state)?;
             cache.write_trie_updates(&trie_updates_v2, to_block);
             provider.write_trie_updatesv2(&trie_updates_v2)?;
 
@@ -295,8 +294,7 @@ where
             let nested_state_root =
                 NestedStateRoot::new(|| provider_ro().map(|db| db.into_tx()), None);
             let hashed_state = nested_state_root.read_hashed_state(Some(range))?;
-            let (block_root, trie_updates_v2, _compatible_updates) =
-                nested_state_root.calculate(&hashed_state, false)?;
+            let (block_root, trie_updates_v2) = nested_state_root.calculate(&hashed_state)?;
 
             // Validate the calculated state root
             let target = provider
