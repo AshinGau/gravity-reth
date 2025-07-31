@@ -252,6 +252,50 @@ impl PersistBlockCache {
         Self(inner)
     }
 
+    fn check_helper(&self, node: Node, prefix: Nibbles) -> usize {
+        let mut cnt = 1;
+        match node {
+            Node::FullNode { children, flags } => {
+                for (nibble, child) in children.into_iter().enumerate() {
+                    if child.is_some() {
+                        let mut path = prefix.clone();
+                        path.push_unchecked(nibble as u8);
+                        if let Some(child) = self.account_trie.get(&path) {
+                            cnt += self.check_helper(child.value.clone(), path);
+                        } else {
+                            unreachable!();
+                        }
+                    }
+                }
+            },
+            Node::ShortNode { key, value, flags } => {
+                match *value {
+                    Node::HashNode(..) => {
+                        let mut path = prefix.clone();
+                        path.extend(&key);
+                        if let Some(next) = self.account_trie.get(&path) {
+                            cnt += self.check_helper(next.value.clone(), path);
+                        } else {
+                            unreachable!();
+                        }
+                    },
+                    Node::ValueNode(..) => { },
+                    _ => unreachable!()
+                }
+            },
+            _ => unreachable!()
+        }
+        cnt
+    }
+
+    pub fn check_account_trie(&self) -> usize {
+        if let Some(root) = self.account_trie.get(&Nibbles::new()) {
+            self.check_helper(root.value.clone(), Nibbles::new())
+        } else {
+            0
+        }
+    }
+
     pub fn account_trie_size(&self) -> usize {
         let mut branch_cnt = 0;
         let mut extension_cnt = 0;

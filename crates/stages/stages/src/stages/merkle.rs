@@ -228,11 +228,12 @@ where
         self.save_execution_checkpoint(provider, None)?;
 
         validate_state_root(trie_root, SealedHeader::seal_slow(target_block), to_block)?;
+        let account_trie_size = cache.account_trie_size();
         println!(
             "nested debug: validate_state_root, from {} to {}, account trie size: {}, storage trie size: {}",
             from_block,
             to_block,
-            cache.account_trie_size(),
+            account_trie_size,
             cache.storage_trie_size()
         );
         let tx = provider.tx_ref();
@@ -243,6 +244,11 @@ where
             tx.entries::<tables::AccountsTrieV2>()?,
             tx.entries::<tables::StoragesTrieV2>()?
         );
+        if to_block % 50000 == 0 {
+            let check_size = cache.check_account_trie();
+            println!("nested debug: check size: {}", check_size);
+            assert_eq!(check_size, account_trie_size);
+        }
 
         Ok(ExecOutput {
             checkpoint: StageCheckpoint::new(to_block)
