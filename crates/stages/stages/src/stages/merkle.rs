@@ -210,6 +210,7 @@ where
             let mut entities_checkpoint = if let Some(checkpoint) =
                 checkpoint.as_ref().filter(|c| c.target_block == to_block)
             {
+                println!("debug nested: from {} to {}, hit checkpoint", from_block, to_block);
                 debug!(
                     target: "sync::stages::merkle::exec",
                     current = ?current_block_number,
@@ -232,6 +233,7 @@ where
                 self.save_execution_checkpoint(provider, None)?;
                 provider.tx_ref().clear::<tables::AccountsTrie>()?;
                 provider.tx_ref().clear::<tables::StoragesTrie>()?;
+                println!("debug nested: from {} to {}, clean trie node", from_block, to_block);
 
                 None
             }
@@ -280,6 +282,10 @@ where
                 }
             }
         } else {
+            println!(
+                "debug nested: from {} to {}, incremental_root_with_updates",
+                from_block, to_block
+            );
             debug!(target: "sync::stages::merkle::exec", current = ?current_block_number, target = ?to_block, "Updating trie in chunks");
             let mut final_root = None;
             for start_block in range.step_by(incremental_threshold as usize) {
@@ -327,6 +333,13 @@ where
         self.save_execution_checkpoint(provider, None)?;
 
         validate_state_root(trie_root, SealedHeader::seal_slow(target_block), to_block)?;
+        println!(
+            "debug nested: from {} to {}, account trie size: {}, storage trie size: {}",
+            from_block,
+            to_block,
+            provider.count_entries::<tables::AccountsTrie>()?,
+            provider.count_entries::<tables::StoragesTrie>()?
+        );
 
         Ok(ExecOutput {
             checkpoint: StageCheckpoint::new(to_block)

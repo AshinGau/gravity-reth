@@ -2404,6 +2404,11 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> TrieWriter for DatabaseProvider
         }
 
         num_entries += self.write_storage_trie_updates(trie_updates.storage_tries_ref())?;
+        println!(
+            "debug nested: account trie size: {}, storage trie size: {}",
+            tx.entries::<tables::AccountsTrie>()?,
+            tx.entries::<tables::StoragesTrie>()?
+        );
 
         Ok(num_entries)
     }
