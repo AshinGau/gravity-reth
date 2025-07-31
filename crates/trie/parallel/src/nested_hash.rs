@@ -408,17 +408,24 @@ mod tests {
                         num_update += destruct_account.len();
                     }
                 } else {
+                    let mut remove_storage = false;
                     if let Some(storage) = storage_trie.get_mut(hashed_address) {
                         for path in &storage_trie_update.removed_nodes {
                             if storage.remove(path).is_some() {
                                 num_update += 1;
                             }
                         }
+                        remove_storage = storage.is_empty();
                     }
-                    let storage = storage_trie.entry(*hashed_address).or_default();
-                    for (path, node) in storage_trie_update.storage_nodes.clone() {
-                        storage.insert(path.clone(), node.into());
-                        num_update += 1;
+                    if remove_storage {
+                        storage_trie.remove(hashed_address);
+                    }
+                    if !storage_trie_update.storage_nodes.is_empty() {
+                        let storage = storage_trie.entry(*hashed_address).or_default();
+                        for (path, node) in storage_trie_update.storage_nodes.clone() {
+                            storage.insert(path.clone(), node.into());
+                            num_update += 1;
+                        }
                     }
                 }
             }
@@ -471,14 +478,10 @@ mod tests {
         for _ in 0..num_task {
             let (hashed_address, rlp_account, (trie_output, _)) =
                 rx.recv().expect("Failed to receive storage trie");
-            let storage_trie_update = if is_insert {
-                StorageTrieUpdatesV2 {
-                    is_deleted: false,
-                    storage_nodes: trie_output.update_nodes,
-                    removed_nodes: trie_output.removed_nodes,
-                }
-            } else {
-                StorageTrieUpdatesV2::deleted()
+            let storage_trie_update = StorageTrieUpdatesV2 {
+                is_deleted: false,
+                storage_nodes: trie_output.update_nodes,
+                removed_nodes: trie_output.removed_nodes,
             };
             let nibbles = Nibbles::unpack(hashed_address);
             let index = nibbles.get_unchecked(0) as usize;
@@ -503,15 +506,15 @@ mod tests {
 
     fn random_state() -> HashMap<Address, (Account, HashMap<B256, U256>)> {
         let mut rng = rand::rng();
-        (0..100)
+        (0..10000)
             .map(|_| {
                 let address = Address::random();
                 let account =
                     Account { balance: U256::from(rng.random::<u64>()), ..Default::default() };
                 let mut storage = HashMap::<B256, U256>::default();
-                let has_storage = rng.random_bool(0.7);
+                let has_storage = rng.random_bool(0.1);
                 if has_storage {
-                    for _ in 0..100 {
+                    for _ in 0..1000 {
                         storage.insert(
                             B256::from(U256::from(rng.random::<u64>())),
                             U256::from(rng.random::<u64>()),
