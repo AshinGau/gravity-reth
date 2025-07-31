@@ -106,14 +106,19 @@ where
                     compatible.update_nodes.insert(prefix, Node::convert_node_compact(&children));
                 }
                 let mut convert: [Option<Box<Node>>; 17] = Default::default();
+                let mut child_cnt = 0;
                 for (nibble, child) in children.into_iter().enumerate() {
                     if let Some(child) = child {
+                        child_cnt += 1;
                         let rlp = child.cached_rlp().unwrap().clone();
                         let mut child_path = prefix;
                         child_path.push_unchecked(nibble as u8);
                         self.take_output_inner(*child, child_path);
                         convert[nibble] = Some(Box::new(Node::HashNode(rlp)));
                     }
+                }
+                if child_cnt <= 1 {
+                    panic!("branch node has {} child!", child_cnt);
                 }
                 self.trie_output
                     .update_nodes

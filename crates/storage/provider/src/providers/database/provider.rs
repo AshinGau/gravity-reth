@@ -2313,6 +2313,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> TrieWriterV2 for DatabaseProvid
         let mut account_trie_cursor = tx.cursor_write::<tables::AccountsTrieV2>()?;
         let mut storage_trie_cursor = tx.cursor_dup_write::<tables::StoragesTrieV2>()?;
 
+        println!("nested debug: delete {} account trie nodes", input.removed_nodes.len());
         // Merge updated and removed nodes. Updated nodes must take precedence.
         let mut account_updates = input
             .removed_nodes
@@ -2333,13 +2334,17 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> TrieWriterV2 for DatabaseProvid
             }
         }
 
+        let mut delete_slots = 0;
+        let mut delete_storage = 0;
         for (hashed_address, storage_trie_update) in &input.storage_tries {
             if storage_trie_update.is_deleted {
+                delete_storage += 1;
                 // self-destruct
                 if storage_trie_cursor.seek_exact(*hashed_address)?.is_some() {
                     storage_trie_cursor.delete_current_duplicates()?;
                 }
             } else {
+                delete_slots += storage_trie_update.removed_nodes.len();
                 // Merge updated and removed nodes. Updated nodes must take precedence.
                 let mut storage_updates = storage_trie_update
                     .removed_nodes
@@ -2373,6 +2378,10 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> TrieWriterV2 for DatabaseProvid
                 }
             }
         }
+        println!(
+            "nested debug: read from db, delete slots: {}, delete storage: {}",
+            delete_slots, delete_storage
+        );
 
         Ok(num_updated)
     }

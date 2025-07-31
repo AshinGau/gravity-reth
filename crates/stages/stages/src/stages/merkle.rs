@@ -9,7 +9,7 @@ use reth_db_api::{
 use reth_primitives_traits::{GotExpected, SealedHeader};
 use reth_provider::{
     DBProvider, HeaderProvider, ProviderError, StageCheckpointReader, StageCheckpointWriter,
-    StatsReader, TrieWriter, TrieWriterV2, EXECUTION_MERKLE_CHANNEL,
+    StatsReader, TrieWriter, TrieWriterV2, EXECUTION_MERKLE_CHANNEL, PERSIST_BLOCK_CACHE,
 };
 use reth_stages_api::{
     BlockErrorKind, BoxedConcurrentProvider, EntitiesCheckpoint, ExecInput, ExecOutput,
@@ -193,6 +193,7 @@ where
             .ok_or_else(|| ProviderError::HeaderNotFound(to_block.into()))?;
         let target_block_root = target_block.state_root();
 
+        let cache = (*PERSIST_BLOCK_CACHE).clone();
         let (trie_root, entities_checkpoint) = if range.is_empty() {
             (target_block_root, input.checkpoint().entities_stage_checkpoint().unwrap_or_default())
         } else {
@@ -200,12 +201,13 @@ where
             // Use optimized nested hash algorithm for state root calculation
             let nested_state_root = NestedStateRoot::new(
                 || provider_ro().map(|db| db.into_tx()),
-                None, // No cache for history sync
+                Some(cache.clone()), // No cache for history sync
             );
             // Read the hashed state from database for the specified range
             let hashed_state = EXECUTION_MERKLE_CHANNEL.consume(from_block);
             let (final_root, trie_updates_v2, _compatible_updates) =
                 nested_state_root.calculate(&hashed_state, false)?;
+            cache.write_trie_updates(&trie_updates_v2, to_block);
             provider.write_trie_updatesv2(&trie_updates_v2)?;
 
             let total_hashed_entries = (provider.count_entries::<tables::HashedAccounts>()? +
@@ -227,6 +229,21 @@ where
         self.save_execution_checkpoint(provider, None)?;
 
         validate_state_root(trie_root, SealedHeader::seal_slow(target_block), to_block)?;
+        println!(
+            "nested debug: validate_state_root, from {} to {}, account trie size: {}, storage trie size: {}",
+            from_block,
+            to_block,
+            cache.account_trie_size(),
+            cache.storage_trie_size()
+        );
+        let tx = provider.tx_ref();
+        println!(
+            "nested debug: from {} to {}, in mdbx, account trie size: {}, storage trie size: {}",
+            from_block,
+            to_block,
+            tx.entries::<tables::AccountsTrieV2>()?,
+            tx.entries::<tables::StoragesTrieV2>()?
+        );
 
         Ok(ExecOutput {
             checkpoint: StageCheckpoint::new(to_block)

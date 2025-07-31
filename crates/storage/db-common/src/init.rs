@@ -19,6 +19,7 @@ use reth_provider::{
     DatabaseProviderFactory, ExecutionOutcome, HashingWriter, HeaderProvider, HistoryWriter,
     OriginalValuesKnown, ProviderError, RevertsInit, StageCheckpointReader, StageCheckpointWriter,
     StateWriter, StaticFileProviderFactory, StorageLocation, TrieWriter, TrieWriterV2,
+    PERSIST_BLOCK_CACHE,
 };
 use reth_stages_types::{StageCheckpoint, StageId};
 use reth_static_file_types::StaticFileSegment;
@@ -328,8 +329,15 @@ where
         storages.insert(hashed_address, hashed_storages);
     }
     let hashed_state = HashedPostState { accounts, storages };
-    let nested_hash = NestedStateRoot::new(provider, None);
+    let cache = (*PERSIST_BLOCK_CACHE).clone();
+    let nested_hash = NestedStateRoot::new(provider, Some(cache.clone()));
     let (root_hash, trie_updates, _) = nested_hash.calculate(&hashed_state, false)?;
+    cache.write_trie_updates(&trie_updates, 0);
+    println!(
+        "nested debug: genesis block init, account trie size: {}, storage trie size: {}",
+        cache.account_trie_size(),
+        cache.storage_trie_size()
+    );
 
     writer.write_trie_updatesv2(&trie_updates)?;
     info!(target: "reth::cli",
