@@ -193,7 +193,7 @@ pub type StoredNode = Vec<u8>;
 
 impl From<Node> for StoredNode {
     fn from(node: Node) -> Self {
-        let mut buf = Self::with_capacity(1024);
+        let mut buf = Self::with_capacity(320);
         // version
         buf.push(0u8);
         match node {
@@ -206,7 +206,7 @@ impl From<Node> for StoredNode {
                             buf.push(rlp.len() as u8);
                             buf.extend_from_slice(&rlp);
                         } else {
-                            unreachable!("Only nested HashNode can be serialized!");
+                            unreachable!("Only nested HashNode can be serialized in FullNode!");
                         }
                     } else {
                         buf.push(0u8);
@@ -231,7 +231,9 @@ impl From<Node> for StoredNode {
                         buf.extend_from_slice(&value);
                     }
                     _ => {
-                        unreachable!("Only nested HashNode/ValueNode can be serialized!");
+                        unreachable!(
+                            "Only nested HashNode/ValueNode can be serialized in ShortNode!"
+                        );
                     }
                 }
             }

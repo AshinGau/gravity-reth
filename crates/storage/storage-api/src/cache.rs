@@ -24,6 +24,7 @@ const CACHE_METRIS_INTERVAL: Duration = Duration::from_secs(15); // 15s
 const CACHE_EVICTION_INTERVAL: Duration = Duration::from_secs(300); // 5min
 const CACHE_SIZE_THRESHOLD: usize = 2_000_000;
 const CACHE_CONTRACTS_THRESHOLD: usize = 2_000;
+const PARALLEL_STORAGE_SIZE: usize = 256;
 
 #[derive(Metrics)]
 #[metrics(scope = "storage")]
@@ -492,7 +493,7 @@ impl PersistBlockCache {
             // Append storage changes
             // Note: Assumption is that revert is going to remove whole plain storage from
             // database so we can check if plain state was wiped or not.
-            if account.storage.len() > 256 {
+            if account.storage.len() > PARALLEL_STORAGE_SIZE {
                 account.storage.par_iter().map(|(k, v)| (*k, *v)).for_each(write_slot);
             } else {
                 for kv in account.storage.iter().map(|(k, v)| (*k, *v)) {
@@ -518,8 +519,9 @@ impl PersistBlockCache {
             if storage_trie_update.is_deleted {
                 self.storage_trie.remove(hashed_address);
             } else {
+                let mut remove_storage_trie = false;
                 if let Some(storage) = self.storage_trie.get(hashed_address) {
-                    if storage_trie_update.removed_nodes.len() > 256 {
+                    if storage_trie_update.removed_nodes.len() > PARALLEL_STORAGE_SIZE {
                         storage_trie_update.removed_nodes.par_iter().for_each(|path| {
                             storage.remove(path);
                         });
@@ -528,10 +530,14 @@ impl PersistBlockCache {
                             storage.remove(path);
                         }
                     }
+                    remove_storage_trie = storage.is_empty();
+                }
+                if remove_storage_trie {
+                    self.storage_trie.remove(hashed_address);
                 }
 
                 if let Some(storage) = self.storage_trie.get(hashed_address) {
-                    if storage_trie_update.storage_nodes.len() > 256 {
+                    if storage_trie_update.storage_nodes.len() > PARALLEL_STORAGE_SIZE {
                         storage_trie_update.storage_nodes.par_iter().for_each(|kv| {
                             write_slot(storage.value(), kv);
                         });
@@ -543,7 +549,7 @@ impl PersistBlockCache {
                 } else {
                     match self.storage_trie.entry(*hashed_address) {
                         dashmap::Entry::Occupied(entry) => {
-                            if storage_trie_update.storage_nodes.len() > 256 {
+                            if storage_trie_update.storage_nodes.len() > PARALLEL_STORAGE_SIZE {
                                 storage_trie_update.storage_nodes.par_iter().for_each(|kv| {
                                     write_slot(entry.get(), kv);
                                 });
@@ -555,7 +561,7 @@ impl PersistBlockCache {
                         }
                         dashmap::Entry::Vacant(entry) => {
                             let data = DashMap::new();
-                            if storage_trie_update.storage_nodes.len() > 256 {
+                            if storage_trie_update.storage_nodes.len() > PARALLEL_STORAGE_SIZE {
                                 storage_trie_update.storage_nodes.par_iter().for_each(|kv| {
                                     write_slot(&data, kv);
                                 });

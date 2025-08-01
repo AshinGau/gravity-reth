@@ -2312,14 +2312,25 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> TrieWriterV2 for DatabaseProvid
         let tx = self.tx_ref();
         let mut account_trie_cursor = tx.cursor_write::<tables::AccountsTrieV2>()?;
         let mut storage_trie_cursor = tx.cursor_dup_write::<tables::StoragesTrieV2>()?;
-        for path in &input.removed_nodes {
+
+        // Merge updated and removed nodes. Updated nodes must take precedence.
+        let mut account_updates = input
+            .removed_nodes
+            .iter()
+            .filter_map(|n| (!input.account_nodes.contains_key(n)).then_some((n, None)))
+            .collect::<Vec<_>>();
+        account_updates
+            .extend(input.account_nodes.iter().map(|(nibbles, node)| (nibbles, Some(node))));
+        // Sort trie node updates.
+        account_updates.sort_unstable_by(|a, b| a.0.cmp(b.0));
+        num_updated += account_updates.len();
+        for (path, node) in account_updates {
             if account_trie_cursor.seek_exact((*path).into())?.is_some() {
                 account_trie_cursor.delete_current()?;
             }
-        }
-        for (path, node) in &input.account_nodes {
-            account_trie_cursor.upsert((*path).into(), &node.clone().into())?;
-            num_updated += 1;
+            if let Some(node) = node {
+                account_trie_cursor.upsert((*path).into(), &node.clone().into())?;
+            }
         }
 
         for (hashed_address, storage_trie_update) in &input.storage_tries {
@@ -2329,28 +2340,36 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> TrieWriterV2 for DatabaseProvid
                     storage_trie_cursor.delete_current_duplicates()?;
                 }
             } else {
-                for path in &storage_trie_update.removed_nodes {
+                // Merge updated and removed nodes. Updated nodes must take precedence.
+                let mut storage_updates = storage_trie_update
+                    .removed_nodes
+                    .iter()
+                    .filter_map(|n| {
+                        (!storage_trie_update.storage_nodes.contains_key(n)).then_some((n, None))
+                    })
+                    .collect::<Vec<_>>();
+                storage_updates.extend(
+                    storage_trie_update
+                        .storage_nodes
+                        .iter()
+                        .map(|(nibbles, node)| (nibbles, Some(node))),
+                );
+                // Sort trie node updates.
+                storage_updates.sort_unstable_by(|a, b| a.0.cmp(b.0));
+                num_updated += storage_updates.len();
+                for (path, node) in storage_updates {
                     let path = StoredNibblesSubKey(*path);
-                    if let Some(entry) =
-                        storage_trie_cursor.seek_by_key_subkey(*hashed_address, (*path).into())?
+                    if storage_trie_cursor
+                        .seek_by_key_subkey(*hashed_address, path.clone())?
+                        .filter(|e| e.path == path)
+                        .is_some()
                     {
-                        if entry.path == path {
-                            storage_trie_cursor.delete_current()?;
-                        }
+                        storage_trie_cursor.delete_current()?;
                     }
-                }
-                for (path, node) in &storage_trie_update.storage_nodes {
-                    let path = StoredNibblesSubKey(*path);
-                    if let Some(entry) =
-                        storage_trie_cursor.seek_by_key_subkey(*hashed_address, (*path).into())?
-                    {
-                        if entry.path == path {
-                            storage_trie_cursor.delete_current()?;
-                        }
+                    if let Some(node) = node {
+                        storage_trie_cursor
+                            .upsert(*hashed_address, &StorageNodeEntry::new(path, node.clone()))?;
                     }
-                    storage_trie_cursor
-                        .upsert(*hashed_address, &StorageNodeEntry::new(path, node.clone()))?;
-                    num_updated += 1;
                 }
             }
         }
