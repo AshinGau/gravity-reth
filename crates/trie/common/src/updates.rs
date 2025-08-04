@@ -11,7 +11,7 @@ use alloy_primitives::{
 /// The aggregation of nested trie updates
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct TrieUpdatesV2 {
-    /// Collection of updated intermedidate account nodes indexed by full path.
+    /// Collection of updated intermediate account nodes indexed by full path.
     pub account_nodes: HashMap<Nibbles, Node>,
     /// Collection of removed intermediate account nodes indexed by full path.
     pub removed_nodes: HashSet<Nibbles>,
