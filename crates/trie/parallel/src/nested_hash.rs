@@ -19,9 +19,9 @@ use reth_primitives_traits::Account;
 use reth_provider::{PersistBlockCache, ProviderResult};
 use reth_storage_errors::db::DatabaseError;
 use reth_trie::{
-    nested_trie::{Node, Trie, TrieReader},
-    HashedPostState, HashedStorage, Nibbles, StorageTrieUpdatesV2, StoredNibbles,
-    StoredNibblesSubKey, EMPTY_ROOT_HASH,
+    nested_trie::{Node, NodeFlag, NodeType, Trie, TrieReader},
+    HashedPostState, HashedStorage, Nibbles, RlpNode, StorageTrieUpdatesV2, StoredNibbles,
+    StoredNibblesSubKey, TrieMask, EMPTY_ROOT_HASH,
 };
 use reth_trie_common::updates::TrieUpdatesV2;
 
@@ -51,12 +51,21 @@ where
                 return Ok(value);
             }
         }
-        let path = StoredNibblesSubKey(*path);
-        Ok(self
+        let sub_path = StoredNibblesSubKey(*path);
+        let Some(value) = self
             .cursor
-            .seek_by_key_subkey(self.hashed_address, path.clone())?
-            .filter(|e| e.path == path)
-            .map(|e| e.node.into()))
+            .seek_by_key_subkey(self.hashed_address, sub_path.clone())?
+            .filter(|e| e.path == sub_path)
+            .map(|e| e.node)
+        else {
+            return Ok(None);
+        };
+        parse_nested_trie_node(path, value, |cp| {
+            let cp = StoredNibblesSubKey(cp);
+            self.cursor
+                .seek_by_key_subkey(self.hashed_address, cp.clone())
+                .map(|s| s.filter(|s| s.path == cp).map(|s| s.node))
+        })
     }
 }
 
@@ -82,7 +91,97 @@ where
                 return Ok(value);
             }
         }
-        Ok(self.0.seek_exact(StoredNibbles(*path))?.map(|(_, value)| value.into()))
+        let Some((_, value)) = self.0.seek_exact(StoredNibbles(*path))? else {
+            return Ok(None);
+        };
+        parse_nested_trie_node(path, value, |cp| {
+            self.0.seek_exact(StoredNibbles(cp)).map(|s| s.map(|e| e.1))
+        })
+    }
+}
+
+fn parse_nested_trie_node<F>(
+    path: &Nibbles,
+    value: Vec<u8>,
+    mut f: F,
+) -> Result<Option<Node>, DatabaseError>
+where
+    F: FnMut(Nibbles) -> Result<Option<Vec<u8>>, DatabaseError>,
+{
+    let node_type = NodeType::from_u8(value[0]).unwrap();
+    match node_type {
+        NodeType::FullNode => {
+            let mask = TrieMask::new(u16::from_le_bytes([value[1], value[2]]));
+            let mut children: [Option<Box<Node>>; 17] = Default::default();
+            for i in 0..16 {
+                if mask.is_bit_set(i) {
+                    let mut child_path = *path;
+                    child_path.push_unchecked(i);
+                    let child_value = f(child_path)?.expect("Bad branch node");
+                    children[i as usize] = Some(Box::new(parse_branch_child_node(child_value)));
+                }
+            }
+            Ok(Some(Node::FullNode { children, flags: NodeFlag::new(None) }))
+        }
+        NodeType::ShortNode => {
+            let key_len = value[1] as usize;
+            let key = Nibbles::from_nibbles_unchecked(&value[2..2 + key_len]);
+            let rlp_len = value[2 + key_len] as usize;
+            match NodeType::from_u8(value[3 + key_len + rlp_len]).unwrap() {
+                NodeType::HashNode => {
+                    let mut next_path = *path;
+                    next_path.extend(&key);
+                    let next_value = f(next_path)?.expect("Bad extension node");
+                    let next = parse_short_next_node(next_value);
+                    Ok(Some(Node::ShortNode {
+                        key,
+                        value: Box::new(next),
+                        flags: NodeFlag::new(None),
+                    }))
+                }
+                NodeType::ValueNode => {
+                    Ok(Some(Node::ShortNode {
+                        key,
+                        value: Box::new(Node::ValueNode(value[4 + key_len + rlp_len..].to_vec())),
+                        flags: NodeFlag::new(None),
+                    }))
+                },
+                _ => unreachable!(),
+            }
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn check_branch_path(parent: &Nibbles, child: u8, path: Nibbles) -> bool {
+    let mut parent = *parent;
+    parent.push_unchecked(child);
+    parent == path
+}
+
+fn parse_branch_child_node(value: Vec<u8>) -> Node {
+    match NodeType::from_u8(value[0]).unwrap() {
+        NodeType::FullNode => {
+            let rlp = RlpNode::from_raw(&value[3..]).unwrap();
+            Node::HashNode(rlp)
+        }
+        NodeType::ShortNode => {
+            let key_len = value[1] as usize;
+            let rlp_len = value[2 + key_len] as usize;
+            let rlp = RlpNode::from_raw(&value[3 + key_len.. 3 + key_len + rlp_len]).unwrap();
+            Node::HashNode(rlp)
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn parse_short_next_node(value: Vec<u8>) -> Node {
+    match NodeType::from_u8(value[0]).unwrap() {
+        NodeType::FullNode => {
+            let rlp = RlpNode::from_raw(&value[3..]).unwrap();
+            Node::HashNode(rlp)
+        }
+        _ => unreachable!(),
     }
 }
 
@@ -326,15 +425,15 @@ mod tests {
 
     #[derive(Default)]
     struct InmemoryTrieDB {
-        account_trie: Arc<Mutex<HashMap<Nibbles, Vec<u8>>>>,
-        storage_trie: Arc<Mutex<HashMap<B256, HashMap<Nibbles, Vec<u8>>>>>,
+        account_trie: Arc<Mutex<HashMap<Nibbles, Node>>>,
+        storage_trie: Arc<Mutex<HashMap<B256, HashMap<Nibbles, Node>>>>,
     }
     struct InmemoryAccountTrieReader(Arc<InmemoryTrieDB>);
     struct InmemoryStorageTrieReader(Arc<InmemoryTrieDB>, B256);
 
     impl TrieReader for InmemoryAccountTrieReader {
         fn read(&mut self, path: &Nibbles) -> Result<Option<Node>, DatabaseError> {
-            Ok(self.0.account_trie.lock().unwrap().get(path).map(|v| v.clone().into()))
+            Ok(self.0.account_trie.lock().unwrap().get(path).map(|v| v.clone()))
         }
     }
 
@@ -347,7 +446,7 @@ mod tests {
                 .unwrap()
                 .get(&self.1)
                 .and_then(|storage| storage.get(path))
-                .map(|v| v.clone().into()))
+                .map(|v| v.clone()))
         }
     }
 
@@ -363,7 +462,7 @@ mod tests {
                 }
             }
             for (path, node) in input.account_nodes.clone() {
-                account_trie.insert(path.clone(), node.into());
+                account_trie.insert(path.clone(), node);
                 num_update += 1;
             }
 
@@ -388,7 +487,7 @@ mod tests {
                     if !storage_trie_update.storage_nodes.is_empty() {
                         let storage = storage_trie.entry(*hashed_address).or_default();
                         for (path, node) in storage_trie_update.storage_nodes.clone() {
-                            storage.insert(path.clone(), node.into());
+                            storage.insert(path.clone(), node);
                             num_update += 1;
                         }
                     }

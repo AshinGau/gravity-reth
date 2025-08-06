@@ -64,7 +64,7 @@ pub enum Node {
     /// Branch Node
     FullNode {
         /// Children of each branch + Current node value(always None for ethereum)
-        children: [Option<Box<Node>>; 17],
+        children: [Option<Box<Node>>; 17], // 7 * 33 -> 325B
         /// Node flag to mark dirty and cache node hash
         flags: NodeFlag,
     },
@@ -118,15 +118,20 @@ impl Clone for Node {
 /// Used for custom serialization operations
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(clippy::enum_variant_names)]
-enum NodeType {
+pub enum NodeType {
+    /// full node
     FullNode = 0,
+    /// short node
     ShortNode = 1,
+    /// value node
     ValueNode = 2,
+    /// hash node
     HashNode = 3,
 }
 
 impl NodeType {
-    const fn from_u8(v: u8) -> Option<Self> {
+    /// Get node type
+    pub const fn from_u8(v: u8) -> Option<Self> {
         match v {
             0 => Some(Self::FullNode),
             1 => Some(Self::ShortNode),
@@ -193,131 +198,45 @@ pub type StoredNode = Vec<u8>;
 
 impl From<Node> for StoredNode {
     fn from(node: Node) -> Self {
-        let mut buf = Self::with_capacity(320);
-        // version
-        buf.push(0u8);
+        let mut buf = Self::with_capacity(64);
         match node {
-            Node::FullNode { children, .. } => {
+            Node::FullNode { children, flags } => {
                 buf.push(NodeType::FullNode as u8);
-                for child in children {
-                    if let Some(child) = child {
-                        buf.push(1u8);
-                        if let Node::HashNode(rlp) = *child {
-                            buf.push(rlp.len() as u8);
-                            buf.extend_from_slice(&rlp);
-                        } else {
-                            unreachable!("Only nested HashNode can be serialized in FullNode!");
-                        }
-                    } else {
-                        buf.push(0u8);
+                let mut mask = TrieMask::default();
+                for (index, child) in children.into_iter().enumerate() {
+                    if child.is_some() {
+                        mask.set_bit(index as u8);
                     }
                 }
+                buf.put_u16_le(mask.get());
+                let rlp = flags.rlp.as_ref().unwrap();
+                buf.extend_from_slice(rlp);
             }
-            Node::ShortNode { key, value, .. } => {
+            Node::ShortNode { key, value, flags } => {
                 buf.push(NodeType::ShortNode as u8);
                 buf.push(key.len() as u8);
                 buf.extend(key.to_vec());
+                let rlp = flags.rlp.as_ref().unwrap();
+                buf.push(rlp.len() as u8);
+                buf.extend_from_slice(rlp);
                 match *value {
-                    Node::HashNode(rlp) => {
+                    Node::HashNode(..) => {
                         // extension node
                         buf.push(NodeType::HashNode as u8);
-                        buf.push(rlp.len() as u8);
-                        buf.extend_from_slice(&rlp);
                     }
-                    Node::ValueNode(value) => {
+                    Node::ValueNode(v) => {
                         // leaf node
                         buf.push(NodeType::ValueNode as u8);
-                        buf.push(value.len() as u8);
-                        buf.extend_from_slice(&value);
+                        buf.extend(v);
                     }
                     _ => {
-                        unreachable!(
-                            "Only nested HashNode/ValueNode can be serialized in ShortNode!"
-                        );
+                        unreachable!();
                     }
                 }
             }
-            Node::ValueNode(value) => {
-                buf.push(NodeType::ValueNode as u8);
-                buf.push(value.len() as u8);
-                buf.extend_from_slice(&value);
-            }
-            Node::HashNode(rlp_node) => {
-                buf.push(NodeType::HashNode as u8);
-                buf.push(rlp_node.len() as u8);
-                buf.extend_from_slice(&rlp_node);
-            }
+            _ => unreachable!(),
         }
         buf
-    }
-}
-
-impl From<StoredNode> for Node {
-    fn from(value: StoredNode) -> Self {
-        let mut i = 0;
-        let version = value[i];
-        assert_eq!(version, 0, "Unresolved Node version");
-        i += 1;
-        let node_type = NodeType::from_u8(value[i]);
-        i += 1;
-        match node_type {
-            Some(NodeType::FullNode) => {
-                // FullNode
-                let mut children: [Option<Box<Self>>; 17] = Default::default();
-                for child in &mut children {
-                    let marker = value[i];
-                    i += 1;
-                    if marker == 1 {
-                        let len = value[i] as usize;
-                        i += 1;
-                        let rlp = RlpNode::from_raw(&value[i..i + len]).unwrap();
-                        i += len;
-                        *child = Some(Box::new(Self::HashNode(rlp)));
-                    }
-                }
-                Self::FullNode { children, flags: NodeFlag::new(None) }
-            }
-            Some(NodeType::ShortNode) => {
-                // ShortNode
-                let key_len = value[i] as usize;
-                i += 1;
-                let key = Nibbles::from_nibbles_unchecked(&value[i..i + key_len]);
-                i += key_len;
-                let next_node_type = NodeType::from_u8(value[i]);
-                i += 1;
-                let next_node = match next_node_type {
-                    Some(NodeType::HashNode) => {
-                        // extension node
-                        let rlp_len = value[i] as usize;
-                        i += 1;
-                        Self::HashNode(RlpNode::from_raw(&value[i..i + rlp_len]).unwrap())
-                    }
-                    Some(NodeType::ValueNode) => {
-                        // leaf node
-                        let val_len = value[i] as usize;
-                        i += 1;
-                        Self::ValueNode(value[i..i + val_len].to_vec())
-                    }
-                    _ => unreachable!(),
-                };
-                Self::ShortNode { key, value: Box::new(next_node), flags: NodeFlag::new(None) }
-            }
-            Some(NodeType::ValueNode) => {
-                // ValueNode
-                let val_len = value[i] as usize;
-                i += 1;
-                Self::ValueNode(value[i..i + val_len].to_vec())
-            }
-            Some(NodeType::HashNode) => {
-                // HashNode
-                let rlp_len = value[i] as usize;
-                i += 1;
-                Self::HashNode(RlpNode::from_raw(&value[i..i + rlp_len]).unwrap())
-            }
-            _ => {
-                unreachable!("Unexpected Node type: {:?}", node_type);
-            }
-        }
     }
 }
 
