@@ -214,8 +214,6 @@ impl<Storage: GravityStorage> PipeExecService<Storage> {
     }
 }
 
-const BLOCK_GAS_LIMIT_1G: u64 = 1_000_000_000;
-
 struct ExecuteOrderedBlockResult {
     /// Block without roots and block hash
     block_without_roots: RecoveredBlock<Block>,
@@ -393,7 +391,7 @@ impl<Storage: GravityStorage> Core<Storage> {
                     timestamp: ordered_block.timestamp,
                     suggested_fee_recipient: ordered_block.coinbase,
                     prev_randao: ordered_block.prev_randao,
-                    gas_limit: BLOCK_GAS_LIMIT_1G,
+                    gas_limit: CONFIG.pipe_block_gas_limit,
                     parent_beacon_block_root: Some(ordered_block.parent_id),
                     withdrawals: Some(ordered_block.withdrawals.clone()),
                 },
@@ -407,7 +405,7 @@ impl<Storage: GravityStorage> Core<Storage> {
                 mix_hash: ordered_block.prev_randao,
                 base_fee_per_gas: Some(evm_env.block_env.basefee),
                 number: ordered_block.number,
-                gas_limit: BLOCK_GAS_LIMIT_1G,
+                gas_limit: CONFIG.pipe_block_gas_limit,
                 ommers_hash: EMPTY_OMMER_ROOT_HASH,
                 nonce: BEACON_NONCE.into(),
                 ..Default::default()
