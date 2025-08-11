@@ -9,9 +9,7 @@ pub struct Config {
     pub disable_pipe_execution: bool,
     /// Whether to disable the Grevm executor. default true.
     pub disable_grevm: bool,
-    /// Whether compatible with trie output. default false.
-    pub compatible_trie_output: bool,
-    /// The gas limit for pipe block. default 1_000_000_000.
+    /// The gas limit for pipe block. default `1_000_000_000`.
     pub pipe_block_gas_limit: u64,
 }
 
@@ -20,10 +18,6 @@ pub static CONFIG: LazyLock<Config> = LazyLock::new(|| {
     let config = Config {
         disable_pipe_execution: std::env::var("GRETH_DISABLE_PIPE_EXECUTION").is_ok(),
         disable_grevm: std::env::var("GRETH_DISABLE_GREVM").is_ok(),
-        compatible_trie_output: std::env::var("GRETH_COMPATIBLE_TRIE_OUTPUT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(false),
         pipe_block_gas_limit: std::env::var("GRETH_PIPE_BLOCK_GAS_LIMIT")
             .ok()
             .and_then(|v| v.parse().ok())
