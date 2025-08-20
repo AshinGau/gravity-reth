@@ -278,7 +278,7 @@ where
                         Ok(state) => {
                             let state_with_cache = BlockViewProvider::new(
                                 StateProviderDatabase::new(state),
-                                Some(PERSIST_BLOCK_CACHE.clone()),
+                                None,
                             );
                             *maybe_state = Some(state_with_cache);
                         }
