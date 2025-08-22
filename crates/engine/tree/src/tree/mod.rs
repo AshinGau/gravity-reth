@@ -262,10 +262,6 @@ impl PersistenceWaiters {
     fn is_empty(&self) -> bool {
         self.waiters.is_empty()
     }
-
-    fn largest(&self) -> Option<u64> {
-        self.waiters.keys().next_back().copied()
-    }
 }
 
 /// The engine API tree handler implementation.
