@@ -181,6 +181,12 @@ impl DatabaseArguments {
         self
     }
 
+    /// Set the page size for database.
+    pub const fn with_page_size(mut self, page_size: Option<PageSize>) -> Self {
+        self.geometry.page_size = page_size;
+        self
+    }
+
     /// Returns the client version if any.
     pub const fn client_version(&self) -> &ClientVersion {
         &self.client_version

@@ -34,6 +34,9 @@ pub struct DatabaseArgs {
     /// Database sync mode for commits. Controls the durability vs performance trade-off.
     #[arg(long = "db.sync-mode", default_value = "durable", value_enum)]
     pub sync_mode: SyncModeArg,
+    /// Database page size (e.g., 4KB, 16KB)
+    #[arg(long = "db.page-size", value_parser = parse_byte_size)]
+    pub page_size: Option<usize>,
 }
 
 /// Database sync mode options
@@ -91,6 +94,7 @@ impl DatabaseArgs {
             .with_geometry_max_size(self.max_size)
             .with_growth_step(self.growth_step)
             .with_sync_mode(Some(self.sync_mode.into()))
+            .with_page_size(self.page_size.map(|size| reth_db::mdbx::PageSize::Set(size)))
     }
 }
 
