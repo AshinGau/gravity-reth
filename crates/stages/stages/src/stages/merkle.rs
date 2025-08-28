@@ -179,12 +179,21 @@ where
         provider_ro: BoxedConcurrentProvider<ProviderRO>,
         input: ExecInput,
     ) -> Result<ExecOutput, StageError> {
-        if matches!(self, Self::Unwind) {
-            info!(target: "sync::stages::merkle::unwind", "Stage is always skipped");
-            return Ok(ExecOutput::done(StageCheckpoint::new(input.target())))
-        }
+        let (.., incremental_threshold) = match self {
+            Self::Unwind => {
+                info!(target: "sync::stages::merkle::unwind", "Stage is always skipped");
+                return Ok(ExecOutput::done(StageCheckpoint::new(input.target())))
+            }
+            Self::Execution { rebuild_threshold, incremental_threshold } => {
+                (*rebuild_threshold, *incremental_threshold)
+            }
+            #[cfg(any(test, feature = "test-utils"))]
+            Self::Both { rebuild_threshold, incremental_threshold } => {
+                (*rebuild_threshold, *incremental_threshold)
+            }
+        };
 
-        let range = input.next_block_range();
+        let range = input.next_block_range_with_threshold(incremental_threshold).0;
         let (_from_block, to_block) = range.clone().into_inner();
         let current_block_number = input.checkpoint().block_number;
 
