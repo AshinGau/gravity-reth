@@ -205,7 +205,7 @@ where
         let (trie_root, entities_checkpoint) = if range.is_empty() {
             (target_block_root, input.checkpoint().entities_stage_checkpoint().unwrap_or_default())
         } else {
-            debug!(target: "sync::stages::merkle::exec", current = ?current_block_number, target = ?to_block, "Updating trie in chunks");
+            info!(target: "sync::stages::merkle::exec", current = ?current_block_number, target = ?to_block, "Updating trie in chunks");
             // Use optimized nested hash algorithm for state root calculation
             let nested_state_root =
                 NestedStateRoot::new(|| provider_ro().map(|db| db.into_tx()), None);
