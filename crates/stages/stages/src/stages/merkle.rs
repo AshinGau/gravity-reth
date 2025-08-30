@@ -196,6 +196,7 @@ where
         let range = input.next_block_range_with_threshold(incremental_threshold).0;
         let (_from_block, to_block) = range.clone().into_inner();
         let current_block_number = input.checkpoint().block_number;
+        let max_block = input.target();
 
         let target_block = provider
             .header_by_number(to_block)?
@@ -214,16 +215,12 @@ where
             let (final_root, trie_updates_v2) = nested_state_root.calculate(&hashed_state)?;
             provider.write_trie_updatesv2(&trie_updates_v2)?;
 
-            let total_hashed_entries = (provider.count_entries::<tables::HashedAccounts>()? +
-                provider.count_entries::<tables::HashedStorages>()?)
-                as u64;
-
             let entities_checkpoint = EntitiesCheckpoint {
                 // This is fine because `range` doesn't have an upper bound, so in this `else`
                 // branch we're just hashing all remaining accounts and storage slots we have in the
                 // database.
-                processed: total_hashed_entries,
-                total: total_hashed_entries,
+                processed: to_block,
+                total: max_block,
             };
             // Save the checkpoint
             (final_root, entities_checkpoint)
@@ -232,7 +229,9 @@ where
         // Reset the checkpoint
         self.save_execution_checkpoint(provider, None)?;
 
-        validate_state_root(trie_root, SealedHeader::seal_slow(target_block), to_block)?;
+        if to_block == max_block {
+            validate_state_root(trie_root, SealedHeader::seal_slow(target_block), to_block)?;
+        }
 
         Ok(ExecOutput {
             checkpoint: StageCheckpoint::new(to_block)
