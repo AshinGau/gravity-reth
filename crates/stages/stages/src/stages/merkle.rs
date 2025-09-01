@@ -229,7 +229,6 @@ where
         // Reset the checkpoint
         self.save_execution_checkpoint(provider, None)?;
 
-        info!("Expected state root: {:?}", SealedHeader::seal_slow(target_block.clone()));
         if to_block == max_block {
             info!("to_block == max_block: {}", max_block);
             validate_state_root(trie_root, SealedHeader::seal_slow(target_block), to_block)?;
@@ -238,7 +237,7 @@ where
         Ok(ExecOutput {
             checkpoint: StageCheckpoint::new(to_block)
                 .with_entities_stage_checkpoint(entities_checkpoint),
-            done: true,
+            done: to_block == max_block,
         })
     }
 
