@@ -194,3 +194,6 @@ use aquamarine as _;
 // used in main
 use clap as _;
 use reth_cli_util as _;
+
+#[cfg(all(debug_assertions, feature = "dhat-heap"))]
+use dhat as _;

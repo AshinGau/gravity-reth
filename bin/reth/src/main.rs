@@ -1,5 +1,10 @@
 #![allow(missing_docs)]
 
+#[cfg(all(debug_assertions, feature = "dhat-heap"))]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
+#[cfg(not(all(debug_assertions, feature = "dhat-heap")))]
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
 
@@ -10,8 +15,15 @@ use reth_node_builder::NodeHandle;
 use reth_node_ethereum::EthereumNode;
 use tracing::info;
 
+#[cfg(all(debug_assertions, feature = "dhat-heap"))]
+use dhat;
+
 fn main() {
     reth_cli_util::sigsegv_handler::install();
+
+    // Initialize dhat profiler in debug builds with dhat-heap feature
+    #[cfg(all(debug_assertions, feature = "dhat-heap"))]
+    let _profiler = dhat::Profiler::new_heap();
 
     // Enable backtraces unless a RUST_BACKTRACE value has already been explicitly provided.
     if std::env::var_os("RUST_BACKTRACE").is_none() {
