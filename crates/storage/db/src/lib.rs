@@ -48,8 +48,8 @@ pub use crate::implementation::mdbx::{DatabaseEnv, DatabaseEnvKind, DatabaseArgu
 #[cfg(all(feature = "rocksdb", not(feature = "mdbx")))]
 pub use crate::implementation::rocksdb::{DatabaseEnv, DatabaseEnvKind, DatabaseArguments};
 
-// Import types for rust-analyzer when no features are enabled
-#[cfg(not(any(feature = "mdbx", feature = "rocksdb")))]
+// When both features are enabled, prefer rocksdb
+#[cfg(all(feature = "mdbx", feature = "rocksdb"))]
 pub use crate::implementation::rocksdb::{DatabaseEnv, DatabaseEnvKind, DatabaseArguments};
 
 pub use models::ClientVersion;

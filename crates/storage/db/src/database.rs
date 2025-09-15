@@ -12,8 +12,8 @@ use crate::implementation::mdbx::{DatabaseEnv, DatabaseEnvKind, DatabaseArgument
 #[cfg(all(feature = "rocksdb", not(feature = "mdbx")))]
 use crate::implementation::rocksdb::{DatabaseEnv, DatabaseEnvKind, DatabaseArguments};
 
-// Import types for rust-analyzer when no features are enabled
-#[cfg(not(any(feature = "mdbx", feature = "rocksdb")))]
+// When both features are enabled, prefer rocksdb
+#[cfg(all(feature = "mdbx", feature = "rocksdb"))]
 use crate::implementation::rocksdb::{DatabaseEnv, DatabaseEnvKind, DatabaseArguments};
 
 fn is_database_empty<P: AsRef<Path>>(path: P) -> bool {
