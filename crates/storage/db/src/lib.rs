@@ -1,7 +1,7 @@
-//! MDBX implementation for reth's database abstraction layer.
+//! Database implementations for reth's database abstraction layer.
 //!
-//! This crate is an implementation of `reth-db-api` for MDBX, as well as a few other common
-//! database types.
+//! This crate provides implementations of `reth-db-api` for multiple database backends,
+//! including MDBX and RocksDB.
 //!
 //! # Overview
 //!
@@ -17,7 +17,7 @@
 
 mod implementation;
 pub mod lockfile;
-#[cfg(feature = "mdbx")]
+#[cfg(any(feature = "mdbx", feature = "rocksdb"))]
 mod metrics;
 pub mod static_file;
 #[cfg(feature = "mdbx")]
@@ -27,12 +27,22 @@ pub mod version;
 #[cfg(feature = "mdbx")]
 pub mod mdbx;
 
+#[cfg(feature = "rocksdb")]
+pub mod rocksdb;
+
+pub mod generic;
+
+#[cfg(feature = "rocksdb")]
+use reth_trie_common as _;
+
 pub use reth_storage_errors::db::{DatabaseError, DatabaseWriteOperation};
 #[cfg(feature = "mdbx")]
 pub use utils::is_database_empty;
 
-#[cfg(feature = "mdbx")]
-pub use mdbx::{create_db, init_db, open_db, open_db_read_only, DatabaseEnv, DatabaseEnvKind};
+pub use generic::{
+    create_db, init_db, open_db, open_db_read_only, 
+    DatabaseEnv, DatabaseEnvKind, DatabaseArguments
+};
 
 pub use models::ClientVersion;
 pub use reth_db_api::*;

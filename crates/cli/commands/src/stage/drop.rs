@@ -4,7 +4,7 @@ use clap::Parser;
 use itertools::Itertools;
 use reth_chainspec::EthChainSpec;
 use reth_cli::chainspec::ChainSpecParser;
-use reth_db::{mdbx::tx::Tx, static_file::iter_static_files, DatabaseError};
+use reth_db::{rocksdb::tx::Tx, static_file::iter_static_files, DatabaseError};
 use reth_db_api::{
     tables,
     transaction::{DbTx, DbTxMut},
@@ -171,7 +171,7 @@ impl<C: ChainSpecParser> Command<C> {
 }
 
 fn reset_prune_checkpoint(
-    tx: &Tx<reth_db::mdbx::RW>,
+    tx: &Tx<reth_db::rocksdb::tx::RW>,
     prune_segment: PruneSegment,
 ) -> Result<(), DatabaseError> {
     if let Some(mut prune_checkpoint) = tx.get::<tables::PruneCheckpoints>(prune_segment)? {
@@ -184,7 +184,7 @@ fn reset_prune_checkpoint(
 }
 
 fn reset_stage_checkpoint(
-    tx: &Tx<reth_db::mdbx::RW>,
+    tx: &Tx<reth_db::rocksdb::tx::RW>,
     stage_id: StageId,
 ) -> Result<(), DatabaseError> {
     tx.put::<tables::StageCheckpoints>(stage_id.to_string(), Default::default())?;

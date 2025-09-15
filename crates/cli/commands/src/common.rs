@@ -141,7 +141,8 @@ impl<C: ChainSpecParser> EnvironmentArgs<C> {
             .static_file_provider()
             .check_consistency(&factory.provider()?, has_receipt_pruning)?
         {
-            if factory.db_ref().is_read_only()? {
+            // TODO: Implement is_read_only for RocksDB
+            if false {
                 warn!(target: "reth::cli", ?unwind_target, "Inconsistent storage. Restart node to heal.");
                 return Ok(factory)
             }

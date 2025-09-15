@@ -9,7 +9,7 @@ use clap::{
     Arg, Args, Command, Error, ValueEnum,
 };
 use reth_db::{
-    mdbx::{MaxReadTransactionDuration, SyncMode},
+    rocksdb::DatabaseArguments,
     ClientVersion,
 };
 use reth_storage_errors::db::LogLevel;
@@ -34,47 +34,31 @@ pub struct DatabaseArgs {
     /// Read transaction timeout in seconds, 0 means no timeout.
     #[arg(long = "db.read-transaction-timeout")]
     pub read_transaction_timeout: Option<u64>,
-    /// Database sync mode for commits. Controls the durability vs performance trade-off.
-    #[arg(long = "db.sync-mode", default_value = "durable", value_enum)]
-    pub sync_mode: SyncModeArg,
+    // TODO: Implement sync mode for RocksDB if needed
+    // #[arg(long = "db.sync-mode", default_value = "durable", value_enum)]
+    // pub sync_mode: SyncModeArg,
     /// Database page size (e.g., 4KB, 16KB)
     #[arg(long = "db.page-size", value_parser = parse_byte_size)]
     pub page_size: Option<usize>,
 }
 
-/// Database sync mode options
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum SyncModeArg {
-    /// Default robust and durable sync mode
-    Durable,
-    /// Don't sync the meta-page after commit
-    NoMetaSync,
-    /// Don't sync anything but keep previous steady commits
-    SafeNoSync,
-    /// Don't sync anything and wipe previous steady commits
-    UtterlyNoSync,
-}
-
-impl Default for SyncModeArg {
-    fn default() -> Self {
-        Self::Durable
-    }
-}
-
-impl From<SyncModeArg> for SyncMode {
-    fn from(mode: SyncModeArg) -> Self {
-        match mode {
-            SyncModeArg::Durable => Self::Durable,
-            SyncModeArg::NoMetaSync => Self::NoMetaSync,
-            SyncModeArg::SafeNoSync => Self::SafeNoSync,
-            SyncModeArg::UtterlyNoSync => Self::UtterlyNoSync,
-        }
-    }
-}
+// TODO: Implement sync mode for RocksDB if needed
+// /// Database sync mode options
+// #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+// pub enum SyncModeArg {
+//     /// Default robust and durable sync mode
+//     Durable,
+//     /// Don't sync the meta-page after commit
+//     NoMetaSync,
+//     /// Don't sync anything but keep previous steady commits
+//     SafeNoSync,
+//     /// Don't sync anything and wipe previous steady commits
+//     UtterlyNoSync,
+// }
 
 impl DatabaseArgs {
     /// Returns default database arguments with configured log level and client version.
-    pub fn database_args(&self) -> reth_db::mdbx::DatabaseArguments {
+    pub fn database_args(&self) -> DatabaseArguments {
         self.get_database_args(default_client_version())
     }
 
@@ -83,21 +67,11 @@ impl DatabaseArgs {
     pub fn get_database_args(
         &self,
         client_version: ClientVersion,
-    ) -> reth_db::mdbx::DatabaseArguments {
-        let max_read_transaction_duration = match self.read_transaction_timeout {
-            None => None, // if not specified, use default value
-            Some(0) => Some(MaxReadTransactionDuration::Unbounded), // if 0, disable timeout
-            Some(secs) => Some(MaxReadTransactionDuration::Set(Duration::from_secs(secs))),
-        };
-
-        reth_db::mdbx::DatabaseArguments::new(client_version)
-            .with_log_level(self.log_level)
-            .with_exclusive(self.exclusive)
-            .with_max_read_transaction_duration(max_read_transaction_duration)
-            .with_geometry_max_size(self.max_size)
-            .with_growth_step(self.growth_step)
-            .with_sync_mode(Some(self.sync_mode.into()))
-            .with_page_size(self.page_size.map(reth_db::mdbx::PageSize::Set))
+    ) -> DatabaseArguments {
+        // TODO: Implement RocksDB-specific configuration
+        DatabaseArguments::new(client_version)
+            .log_level(self.log_level)
+            .max_size(self.max_size)
     }
 }
 
