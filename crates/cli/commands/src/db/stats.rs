@@ -5,7 +5,7 @@ use eyre::WrapErr;
 use human_bytes::human_bytes;
 use itertools::Itertools;
 use reth_chainspec::EthereumHardforks;
-use reth_db::{rocksdb, static_file::iter_static_files, DatabaseEnv};
+use reth_db::{static_file::iter_static_files, DatabaseEnv};
 use reth_db_api::{database::Database, TableViewer, Tables};
 use reth_db_common::DbTool;
 use reth_fs_util as fs;

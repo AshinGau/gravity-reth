@@ -5,7 +5,7 @@
 
 use crate::{providers::StaticFileProvider, ProviderFactory};
 use reth_db::{
-    rocksdb::DatabaseArguments,
+    DatabaseArguments,
     open_db_read_only, DatabaseEnv,
 };
 use reth_db_api::{database_metrics::DatabaseMetrics, Database};

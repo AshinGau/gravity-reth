@@ -1,5 +1,6 @@
-#[cfg(feature = "mdbx")]
-pub(crate) mod mdbx;
+// MDBX and RocksDB are mutually exclusive features
+#[cfg(all(feature = "mdbx", not(feature = "rocksdb")))]
+pub mod mdbx;
 
-#[cfg(feature = "rocksdb")]
-pub(crate) mod rocksdb;
+#[cfg(all(feature = "rocksdb", not(feature = "mdbx")))]
+pub mod rocksdb;

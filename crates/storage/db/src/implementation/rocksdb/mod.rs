@@ -54,8 +54,20 @@ impl DatabaseArguments {
         self
     }
 
+    /// Set the log level (alias for log_level for consistency with MDBX).
+    pub fn with_log_level(mut self, log_level: Option<LogLevel>) -> Self {
+        self.log_level = log_level;
+        self
+    }
+
     /// Set the maximum database size.
     pub fn max_size(mut self, max_size: Option<usize>) -> Self {
+        self.max_size = max_size;
+        self
+    }
+
+    /// Set the maximum database size (alias for max_size for consistency with MDBX).
+    pub fn with_geometry_max_size(mut self, max_size: Option<usize>) -> Self {
         self.max_size = max_size;
         self
     }

@@ -1,11 +1,34 @@
 //! Helper functions for initializing and opening a database.
 
-use crate::{is_database_empty, TableSet, Tables};
+use crate::{TableSet, Tables};
 use eyre::Context;
 use std::path::Path;
 
-pub use crate::implementation::mdbx::*;
-pub use reth_libmdbx::*;
+// Import backend-specific types based on enabled features
+// MDBX and RocksDB are mutually exclusive features
+#[cfg(all(feature = "mdbx", not(feature = "rocksdb")))]
+use crate::implementation::mdbx::{DatabaseEnv, DatabaseEnvKind, DatabaseArguments};
+
+#[cfg(all(feature = "rocksdb", not(feature = "mdbx")))]
+use crate::implementation::rocksdb::{DatabaseEnv, DatabaseEnvKind, DatabaseArguments};
+
+// Import types for rust-analyzer when no features are enabled
+#[cfg(not(any(feature = "mdbx", feature = "rocksdb")))]
+use crate::implementation::rocksdb::{DatabaseEnv, DatabaseEnvKind, DatabaseArguments};
+
+fn is_database_empty<P: AsRef<Path>>(path: P) -> bool {
+    let path = path.as_ref();
+
+    if !path.exists() {
+        true
+    } else if path.is_file() {
+        false
+    } else if let Ok(dir) = path.read_dir() {
+        dir.count() == 0
+    } else {
+        true
+    }
+}
 
 /// Creates a new database at the specified path if it doesn't exist. Does NOT create tables. Check
 /// [`init_db`].
@@ -57,8 +80,7 @@ pub fn open_db_read_only(
         .with_context(|| format!("Could not open database at path: {}", path.display()))
 }
 
-/// Opens up an existing database. Read/Write mode with `WriteMap` enabled. It doesn't create it or
-/// create tables if missing.
+/// Opens up an existing database. Read/Write mode. It doesn't create it or create tables if missing.
 pub fn open_db(path: impl AsRef<Path>, args: DatabaseArguments) -> eyre::Result<DatabaseEnv> {
     fn open(path: &Path, args: DatabaseArguments) -> eyre::Result<DatabaseEnv> {
         let client_version = args.client_version().clone();

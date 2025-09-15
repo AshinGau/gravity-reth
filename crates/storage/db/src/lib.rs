@@ -15,34 +15,42 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
+mod database;
 mod implementation;
 pub mod lockfile;
 #[cfg(any(feature = "mdbx", feature = "rocksdb"))]
 mod metrics;
 pub mod static_file;
-#[cfg(feature = "mdbx")]
+#[cfg(all(feature = "mdbx", not(feature = "rocksdb")))]
 mod utils;
 pub mod version;
 
-#[cfg(feature = "mdbx")]
-pub mod mdbx;
-
-#[cfg(feature = "rocksdb")]
-pub mod rocksdb;
+// Backend-specific modules are now handled through the unified database module
 
 pub mod generic;
 
-#[cfg(feature = "rocksdb")]
+#[cfg(all(feature = "rocksdb", not(feature = "mdbx")))]
 use reth_trie_common as _;
 
 pub use reth_storage_errors::db::{DatabaseError, DatabaseWriteOperation};
-#[cfg(feature = "mdbx")]
+#[cfg(all(feature = "mdbx", not(feature = "rocksdb")))]
 pub use utils::is_database_empty;
 
 pub use generic::{
     create_db, init_db, open_db, open_db_read_only, 
-    DatabaseEnv, DatabaseEnvKind, DatabaseArguments
 };
+
+// Re-export backend-specific types based on enabled features
+// MDBX and RocksDB are mutually exclusive features
+#[cfg(all(feature = "mdbx", not(feature = "rocksdb")))]
+pub use crate::implementation::mdbx::{DatabaseEnv, DatabaseEnvKind, DatabaseArguments};
+
+#[cfg(all(feature = "rocksdb", not(feature = "mdbx")))]
+pub use crate::implementation::rocksdb::{DatabaseEnv, DatabaseEnvKind, DatabaseArguments};
+
+// Import types for rust-analyzer when no features are enabled
+#[cfg(not(any(feature = "mdbx", feature = "rocksdb")))]
+pub use crate::implementation::rocksdb::{DatabaseEnv, DatabaseEnvKind, DatabaseArguments};
 
 pub use models::ClientVersion;
 pub use reth_db_api::*;

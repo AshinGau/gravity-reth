@@ -69,6 +69,8 @@ assert_matches.workspace = true
 
 [features]
 default = ["rocksdb"]
+# MDBX and RocksDB are mutually exclusive features
+# When mdbx is enabled, it should disable default features
 mdbx = [
     "dep:reth-libmdbx",
     "dep:eyre",
@@ -77,6 +79,8 @@ mdbx = [
     "dep:metrics",
     "dep:strum",
     "dep:rustc-hash",
+    "reth-storage-errors/std",
+    "alloy-primitives/std",
 ]
 rocksdb = [
     "dep:rocksdb",

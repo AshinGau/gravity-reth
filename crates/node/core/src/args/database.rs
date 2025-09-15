@@ -9,7 +9,7 @@ use clap::{
     Arg, Args, Command, Error, ValueEnum,
 };
 use reth_db::{
-    rocksdb::DatabaseArguments,
+    DatabaseArguments,
     ClientVersion,
 };
 use reth_storage_errors::db::LogLevel;
@@ -70,8 +70,8 @@ impl DatabaseArgs {
     ) -> DatabaseArguments {
         // TODO: Implement RocksDB-specific configuration
         DatabaseArguments::new(client_version)
-            .log_level(self.log_level)
-            .max_size(self.max_size)
+            .with_log_level(self.log_level)
+            .with_geometry_max_size(self.max_size)
     }
 }
 
