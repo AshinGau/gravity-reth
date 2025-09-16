@@ -202,6 +202,8 @@ pub struct DatabaseEnv {
     metrics: Option<Arc<DatabaseEnvMetrics>>,
     /// Write lock for when dealing with a read-write environment.
     _lock_file: Option<StorageLock>,
+    /// Database environment kind (read-only or read-write).
+    kind: DatabaseEnvKind,
 }
 
 impl Database for DatabaseEnv {
@@ -451,9 +453,15 @@ impl DatabaseEnv {
             inner: inner_env.open(path).map_err(|e| DatabaseError::Open(e.into()))?,
             metrics: None,
             _lock_file,
+            kind,
         };
 
         Ok(env)
+    }
+
+    /// Returns `true` if the database is read-only.
+    pub fn is_read_only(&self) -> bool {
+        matches!(self.kind, DatabaseEnvKind::RO)
     }
 
     /// Enables metrics on the database.

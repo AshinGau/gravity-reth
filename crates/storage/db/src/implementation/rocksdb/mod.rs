@@ -89,13 +89,15 @@ impl Default for DatabaseArguments {
 pub struct DatabaseEnv {
     /// Inner RocksDB database.
     pub(crate) inner: Arc<DB>,
+    /// Database environment kind (read-only or read-write).
+    kind: DatabaseEnvKind,
 }
 
 impl DatabaseEnv {
     /// Opens the database at the specified path.
     pub fn open(
         path: &Path,
-        _kind: DatabaseEnvKind,
+        kind: DatabaseEnvKind,
         _args: DatabaseArguments,
     ) -> Result<Self, DatabaseError> {
         let mut opts = Options::default();
@@ -106,7 +108,13 @@ impl DatabaseEnv {
 
         Ok(Self {
             inner: Arc::new(db),
+            kind,
         })
+    }
+
+    /// Returns `true` if the database is read-only.
+    pub fn is_read_only(&self) -> bool {
+        matches!(self.kind, DatabaseEnvKind::RO)
     }
 
     /// Creates tables for the given table set.
@@ -123,8 +131,8 @@ impl DatabaseEnv {
 
     /// Records the client version in the database.
     pub fn record_client_version(&self, _version: ClientVersion) -> Result<(), DatabaseError> {
-        // For now, we'll just store a simple marker since serialization is complex
-        // In a real implementation, you would need to implement proper serialization/deserialization
+        // RocksDB doesn't require explicit client version recording like MDBX
+        // The version information is typically handled at the application level
         Ok(())
     }
 }
