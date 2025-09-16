@@ -82,8 +82,9 @@ impl Command {
             for db_table in db_tables {
                 // TODO: Implement open_db and db_stat for RocksDB
                 // let table_db = tx.open_db(Some(db_table)).wrap_err("Could not open db.")?;
-                // let stats = tx.db_stat(&table_db).wrap_err(format!("Could not find table: {db_table}"))?;
-                
+                // let stats = tx.db_stat(&table_db).wrap_err(format!("Could not find table:
+                // {db_table}"))?;
+
                 // Placeholder values for RocksDB
                 let page_size = 16384; // 16KB default
                 let leaf_pages = 0;

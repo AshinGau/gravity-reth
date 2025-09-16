@@ -1,14 +1,14 @@
 //! RocksDB implementation for the database.
 
-use std::{path::Path, sync::Arc};
-use rocksdb::{DB, Options};
-use reth_db_api::{
-    database_metrics::DatabaseMetrics,
-    models::ClientVersion,
-};
-use reth_storage_errors::db::LogLevel;
 use crate::{DatabaseError, TableSet};
+use reth_db_api::{
+    database_metrics::DatabaseMetrics, models::ClientVersion, table::Table, DatabaseWriteOperation,
+};
+use reth_storage_errors::db::{DatabaseErrorInfo, DatabaseWriteError, LogLevel};
+use rocksdb::{Options, DB};
+use std::{path::Path, sync::Arc};
 
+pub mod cursor;
 pub mod tx;
 
 /// Database environment kind.
@@ -41,11 +41,7 @@ pub struct DatabaseArguments {
 impl DatabaseArguments {
     /// Creates a new instance of [`DatabaseArguments`].
     pub fn new(client_version: ClientVersion) -> Self {
-        Self {
-            client_version,
-            log_level: None,
-            max_size: None,
-        }
+        Self { client_version, log_level: None, max_size: None }
     }
 
     /// Set the log level.
@@ -102,14 +98,11 @@ impl DatabaseEnv {
     ) -> Result<Self, DatabaseError> {
         let mut opts = Options::default();
         opts.create_if_missing(true);
-        
+
         let db = DB::open(&opts, path)
             .map_err(|e| DatabaseError::Other(format!("Failed to open RocksDB: {}", e)))?;
 
-        Ok(Self {
-            inner: Arc::new(db),
-            kind,
-        })
+        Ok(Self { inner: Arc::new(db), kind })
     }
 
     /// Returns `true` if the database is read-only.
@@ -155,4 +148,33 @@ impl reth_db_api::database::Database for DatabaseEnv {
     fn tx_mut(&self) -> Result<Self::TXMut, crate::DatabaseError> {
         Ok(tx::Tx::new(self.inner.clone()))
     }
+}
+
+/// Helper function to convert RocksDB errors to DatabaseError
+fn rocksdb_error_to_database_error(e: rocksdb::Error) -> DatabaseError {
+    DatabaseError::Read(DatabaseErrorInfo { message: e.to_string().into(), code: -1 })
+}
+
+/// Helper function to create a write error
+fn create_write_error<T: Table>(
+    e: rocksdb::Error,
+    operation: DatabaseWriteOperation,
+    key: Vec<u8>,
+) -> DatabaseError {
+    DatabaseError::Write(Box::new(DatabaseWriteError {
+        info: DatabaseErrorInfo { message: e.to_string().into(), code: -1 },
+        operation,
+        table_name: T::NAME,
+        key,
+    }))
+}
+
+/// Helper function to get column family handle with proper error handling
+fn get_cf_handle<T: Table>(db: &DB) -> Result<&rocksdb::ColumnFamily, DatabaseError> {
+    db.cf_handle(T::NAME).ok_or_else(|| {
+        DatabaseError::Open(DatabaseErrorInfo {
+            message: format!("Column family '{}' not found", T::NAME).into(),
+            code: -1,
+        })
+    })
 }

@@ -7,14 +7,14 @@ use std::path::Path;
 // Import backend-specific types based on enabled features
 // MDBX and RocksDB are mutually exclusive features
 #[cfg(all(feature = "mdbx", not(feature = "rocksdb")))]
-use crate::implementation::mdbx::{DatabaseEnv, DatabaseEnvKind, DatabaseArguments};
+use crate::implementation::mdbx::{DatabaseArguments, DatabaseEnv, DatabaseEnvKind};
 
 #[cfg(all(feature = "rocksdb", not(feature = "mdbx")))]
-use crate::implementation::rocksdb::{DatabaseEnv, DatabaseEnvKind, DatabaseArguments};
+use crate::implementation::rocksdb::{DatabaseArguments, DatabaseEnv, DatabaseEnvKind};
 
 // When both features are enabled, prefer rocksdb
 #[cfg(all(feature = "mdbx", feature = "rocksdb"))]
-use crate::implementation::rocksdb::{DatabaseEnv, DatabaseEnvKind, DatabaseArguments};
+use crate::implementation::rocksdb::{DatabaseArguments, DatabaseEnv, DatabaseEnvKind};
 
 fn is_database_empty<P: AsRef<Path>>(path: P) -> bool {
     let path = path.as_ref();
@@ -80,7 +80,8 @@ pub fn open_db_read_only(
         .with_context(|| format!("Could not open database at path: {}", path.display()))
 }
 
-/// Opens up an existing database. Read/Write mode. It doesn't create it or create tables if missing.
+/// Opens up an existing database. Read/Write mode. It doesn't create it or create tables if
+/// missing.
 pub fn open_db(path: impl AsRef<Path>, args: DatabaseArguments) -> eyre::Result<DatabaseEnv> {
     fn open(path: &Path, args: DatabaseArguments) -> eyre::Result<DatabaseEnv> {
         let client_version = args.client_version().clone();

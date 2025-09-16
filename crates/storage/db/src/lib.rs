@@ -36,21 +36,19 @@ pub use reth_storage_errors::db::{DatabaseError, DatabaseWriteOperation};
 #[cfg(all(feature = "mdbx", not(feature = "rocksdb")))]
 pub use utils::is_database_empty;
 
-pub use generic::{
-    create_db, init_db, open_db, open_db_read_only, 
-};
+pub use generic::{create_db, init_db, open_db, open_db_read_only};
 
 // Re-export backend-specific types based on enabled features
 // MDBX and RocksDB are mutually exclusive features
 #[cfg(all(feature = "mdbx", not(feature = "rocksdb")))]
-pub use crate::implementation::mdbx::{DatabaseEnv, DatabaseEnvKind, DatabaseArguments};
+pub use crate::implementation::mdbx::{DatabaseArguments, DatabaseEnv, DatabaseEnvKind};
 
 #[cfg(all(feature = "rocksdb", not(feature = "mdbx")))]
-pub use crate::implementation::rocksdb::{DatabaseEnv, DatabaseEnvKind, DatabaseArguments};
+pub use crate::implementation::rocksdb::{DatabaseArguments, DatabaseEnv, DatabaseEnvKind};
 
 // When both features are enabled, prefer rocksdb
 #[cfg(all(feature = "mdbx", feature = "rocksdb"))]
-pub use crate::implementation::rocksdb::{DatabaseEnv, DatabaseEnvKind, DatabaseArguments};
+pub use crate::implementation::rocksdb::{DatabaseArguments, DatabaseEnv, DatabaseEnvKind};
 
 pub use models::ClientVersion;
 pub use reth_db_api::*;

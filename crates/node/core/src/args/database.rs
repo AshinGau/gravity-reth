@@ -8,10 +8,7 @@ use clap::{
     error::ErrorKind,
     Arg, Args, Command, Error, ValueEnum,
 };
-use reth_db::{
-    DatabaseArguments,
-    ClientVersion,
-};
+use reth_db::{ClientVersion, DatabaseArguments};
 use reth_storage_errors::db::LogLevel;
 
 /// Parameters for database configuration
@@ -64,10 +61,7 @@ impl DatabaseArgs {
 
     /// Returns the database arguments with configured log level, client version,
     /// max read transaction duration, and geometry.
-    pub fn get_database_args(
-        &self,
-        client_version: ClientVersion,
-    ) -> DatabaseArguments {
+    pub fn get_database_args(&self, client_version: ClientVersion) -> DatabaseArguments {
         // TODO: Implement RocksDB-specific configuration
         DatabaseArguments::new(client_version)
             .with_log_level(self.log_level)

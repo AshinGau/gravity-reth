@@ -4,10 +4,7 @@
 //! up to the intended build target.
 
 use crate::{providers::StaticFileProvider, ProviderFactory};
-use reth_db::{
-    DatabaseArguments,
-    open_db_read_only, DatabaseEnv,
-};
+use reth_db::{open_db_read_only, DatabaseArguments, DatabaseEnv};
 use reth_db_api::{database_metrics::DatabaseMetrics, Database};
 use reth_node_types::{NodeTypes, NodeTypesWithDBAdapter};
 use std::{
