@@ -123,9 +123,18 @@ impl<K: TransactionKind, T: Table> Cursor<K, T> {
         key: &[u8],
         value: &[u8],
     ) -> Result<(T::Key, T::Value), DatabaseError> {
-        let decoded_key = T::Key::decode(key).map_err(|_| DatabaseError::Decode)?;
-        let decoded_value = T::Value::decompress(value).map_err(|_| DatabaseError::Decode)?;
-        Ok((decoded_key, decoded_value))
+        if T::DUPSORT {
+            // For DupSort tables, key is composite: key_len + main_key + subkey
+            let (main_key, _subkey) = Self::decode_dupsort_key(key)?;
+            let decoded_key = T::Key::decode(&main_key).map_err(|_| DatabaseError::Decode)?;
+            let decoded_value = T::Value::decompress(value).map_err(|_| DatabaseError::Decode)?;
+            Ok((decoded_key, decoded_value))
+        } else {
+            // For regular tables, decode normally
+            let decoded_key = T::Key::decode(key).map_err(|_| DatabaseError::Decode)?;
+            let decoded_value = T::Value::decompress(value).map_err(|_| DatabaseError::Decode)?;
+            Ok((decoded_key, decoded_value))
+        }
     }
 
     /// Create a new iterator with the specified mode
@@ -150,6 +159,45 @@ impl<K: TransactionKind, T: Table> Cursor<K, T> {
         assert!(self.cached_iterator.ready());
         self.iterator_direction = iterator_direction;
     }
+
+    /// Encode composite key for DupSort table: key_len(u8) + key + subkey
+    fn encode_dupsort_key(key: &[u8], subkey: &[u8]) -> Vec<u8> {
+        let key_len = key.len();
+        assert!(key_len <= 255, "Key length must be <= 255 for DupSort tables");
+        
+        let mut composite_key = Vec::with_capacity(1 + key_len + subkey.len());
+        composite_key.push(key_len as u8);
+        composite_key.extend_from_slice(key);
+        composite_key.extend_from_slice(subkey);
+        composite_key
+    }
+
+    /// Decode composite key for DupSort table: returns (key, subkey)
+    fn decode_dupsort_key(composite_key: &[u8]) -> Result<(Vec<u8>, Vec<u8>), DatabaseError> {
+        if composite_key.is_empty() {
+            return Err(DatabaseError::Decode);
+        }
+
+        let key_len = composite_key[0] as usize;
+        if composite_key.len() < 1 + key_len {
+            return Err(DatabaseError::Decode);
+        }
+
+        let key = composite_key[1..1 + key_len].to_vec();
+        let subkey = composite_key[1 + key_len..].to_vec();
+        Ok((key, subkey))
+    }
+
+    /// Create key prefix for seeking all entries with the same key: key_len(u8) + key
+    fn encode_key_prefix(key: &[u8]) -> Vec<u8> {
+        let key_len = key.len();
+        assert!(key_len <= 255, "Key length must be <= 255 for DupSort tables");
+        
+        let mut prefix = Vec::with_capacity(1 + key_len);
+        prefix.push(key_len as u8);
+        prefix.extend_from_slice(key);
+        prefix
+    }
 }
 
 impl<K: TransactionKind, T: Table> DbCursorRO<T> for Cursor<K, T> {
@@ -167,6 +215,7 @@ impl<K: TransactionKind, T: Table> DbCursorRO<T> for Cursor<K, T> {
                 }
             }
         }
+        self.current_key = None;
         Ok(None)
     }
 
@@ -232,6 +281,7 @@ impl<K: TransactionKind, T: Table> DbCursorRO<T> for Cursor<K, T> {
                 }
             },
         }
+        self.current_key = None;
         Ok(None)
     }
 
@@ -260,6 +310,7 @@ impl<K: TransactionKind, T: Table> DbCursorRO<T> for Cursor<K, T> {
                 }
             },
         }
+        self.current_key = None;
         Ok(None)
     }
 
@@ -277,6 +328,7 @@ impl<K: TransactionKind, T: Table> DbCursorRO<T> for Cursor<K, T> {
                 }
             }
         }
+        self.current_key = None;
         Ok(None)
     }
 
@@ -382,45 +434,120 @@ impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
     }
 }
 
-// DupSort implementations
+// DupSort implementations using key_len + key + subkey encoding
 impl<K: TransactionKind, T: DupSort> DbDupCursorRO<T> for Cursor<K, T> {
     fn next_dup(&mut self) -> PairResult<T> {
-        self.next()
-    }
+        // Get current main key to check if next entry is still a duplicate
+        let current_main_key = if let Some(ref current_key) = self.current_key {
+            let (main_key, _) = Self::decode_dupsort_key(current_key)?;
+            main_key
+        } else {
+            return Ok(None);
+        };
 
-    fn next_no_dup(&mut self) -> PairResult<T> {
-        self.next()
-    }
-
-    fn next_dup_val(&mut self) -> ValueOnlyResult<T> {
-        if let Some((_, value)) = self.next()? {
-            Ok(Some(value))
+        // Use base next() method and check if it's still the same main key
+        if let Some((key, value)) = self.next()? {
+            let returned_key_encoded = key.clone().encode();
+            if returned_key_encoded.as_ref() == current_main_key.as_slice() {
+                Ok(Some((key, value)))
+            } else {
+                // Different main key, no more duplicates
+                Ok(None)
+            }
         } else {
             Ok(None)
         }
+    }
+
+    fn next_no_dup(&mut self) -> PairResult<T> {
+        // Get the current key to skip all its duplicates
+        let current_main_key = if let Some(ref current_key) = self.current_key {
+            let (main_key, _) = Self::decode_dupsort_key(current_key)?;
+            main_key
+        } else {
+            // No current key, just get the first entry
+            return self.first();
+        };
+
+        // Skip all entries with the same main key using raw iterator
+        match self.iterator_direction {
+            rocksdb::Direction::Forward => unsafe {
+                if let Some(iter) = self.get_iterator_mut() {
+                    loop {
+                        if let Some(Ok((composite_key, value_bytes))) = iter.next() {
+                            let composite_key_vec = composite_key.to_vec();
+                            let value_bytes_vec = value_bytes.to_vec();
+                            
+                            // Avoid borrowing self while iter is borrowed
+                            let main_key = {
+                                let key_len = composite_key_vec[0] as usize;
+                                composite_key_vec[1..1 + key_len].to_vec()
+                            };
+                            
+                            if main_key != current_main_key {
+                                // Found entry with different key
+                                self.current_key = Some(composite_key_vec);
+                                let decoded_key = T::Key::decode(&main_key).map_err(|_| DatabaseError::Decode)?;
+                                let decoded_value = T::Value::decompress(&value_bytes_vec).map_err(|_| DatabaseError::Decode)?;
+                                return Ok(Some((decoded_key, decoded_value)));
+                            }
+                            // Continue skipping same key entries
+                        } else {
+                            // No more entries
+                            self.current_key = None;
+                            return Ok(None);
+                        }
+                    }
+                }
+            },
+            _ => {
+                // Handle other directions if needed
+                return Ok(None);
+            }
+        }
+        Ok(None)
+    }
+
+    fn next_dup_val(&mut self) -> ValueOnlyResult<T> {
+        self.next_dup().map(|result| result.map(|(_, value)| value))
     }
 
     fn seek_by_key_subkey(
         &mut self,
         key: T::Key,
-        _subkey: T::SubKey,
+        subkey: T::SubKey,
     ) -> ValueOnlyResult<T> {
-        if let Some((_, value)) = self.seek_exact(key)? {
-            Ok(Some(value))
-        } else {
-            Ok(None)
-        }
+        let encoded_key = key.encode();
+        let encoded_subkey = subkey.encode();
+        let composite_key = Self::encode_dupsort_key(encoded_key.as_ref(), encoded_subkey.as_ref());
+
+        // Set current_key and use next() to find entry >= composite_key
+        self.current_key = Some(composite_key);
+        self.next().map(|result| result.map(|(_, value)| value))
     }
 
     fn walk_dup(
         &mut self,
         key: Option<T::Key>,
-        _subkey: Option<T::SubKey>,
+        subkey: Option<T::SubKey>,
     ) -> Result<reth_db_api::cursor::DupWalker<'_, T, Self>, DatabaseError> {
-        let start = if let Some(key) = key {
-            self.seek_exact(key).transpose()
-        } else {
-            self.first().transpose()
+        let start = match (key, subkey) {
+            (Some(key), Some(subkey)) => {
+                self.seek_by_key_subkey(key.clone(), subkey).transpose().map(|result| {
+                    result.map(|value| (key, value))
+                })
+            }
+            (Some(key), None) => {
+                // Use seek() to find first entry of this key
+                self.seek(key.clone()).transpose()
+            }
+            (None, Some(_subkey)) => {
+                // Start from first entry
+                self.first().transpose()
+            }
+            (None, None) => {
+                self.first().transpose()
+            }
         };
 
         Ok(reth_db_api::cursor::DupWalker { cursor: self, start })
@@ -429,12 +556,62 @@ impl<K: TransactionKind, T: DupSort> DbDupCursorRO<T> for Cursor<K, T> {
 
 impl<T: DupSort> DbDupCursorRW<T> for Cursor<RW, T> {
     fn delete_current_duplicates(&mut self) -> Result<(), DatabaseError> {
-        // Simplified implementation for RocksDB
-        self.delete_current()
+        if let Some(ref current_composite_key) = self.current_key.clone() {
+            let (main_key, _) = Self::decode_dupsort_key(current_composite_key)?;
+            let key_prefix = Self::encode_key_prefix(&main_key);
+            
+            // Find and delete all entries with the same main key
+            let cf_handle = get_cf_handle::<T>(&self.db)?;
+            
+            // Create iterator to find all duplicates
+            let iter = self.db.iterator_cf(cf_handle, rocksdb::IteratorMode::From(&key_prefix, rocksdb::Direction::Forward));
+            let mut keys_to_delete = Vec::new();
+            
+            for result in iter {
+                if let Ok((composite_key, _)) = result {
+                    let (found_main_key, _) = Self::decode_dupsort_key(&composite_key)?;
+                    
+                    if found_main_key == main_key {
+                        keys_to_delete.push(composite_key.to_vec());
+                    } else {
+                        // Different key, stop
+                        break;
+                    }
+                }
+            }
+            
+            // Delete all found keys
+            for key_to_delete in keys_to_delete {
+                self.db.delete_cf(cf_handle, &key_to_delete).map_err(|e| {
+                    create_write_error::<T>(e, DatabaseWriteOperation::Put, key_to_delete)
+                })?;
+            }
+            
+            self.current_key = None;
+        }
+        
+        Ok(())
     }
 
     fn append_dup(&mut self, key: T::Key, value: T::Value) -> Result<(), DatabaseError> {
-        // Simplified implementation for RocksDB
-        self.upsert(key, &value)
+        let cf_handle = get_cf_handle::<T>(&self.db)?;
+        let encoded_key = key.encode();
+        
+        // For DupSort tables, we need to extract the subkey from the value
+        // First compress the value and use it as subkey
+        let value_ref = compress_to_buf_or_ref!(self, &value);
+        let compressed_value = value_ref.unwrap_or(&self.buf);
+        
+        // Use compressed value as subkey for sorting
+        let composite_key = Self::encode_dupsort_key(encoded_key.as_ref(), compressed_value);
+        
+        self.db.put_cf(cf_handle, &composite_key, compressed_value).map_err(|e| {
+            create_write_error::<T>(e, DatabaseWriteOperation::CursorAppendDup, composite_key.clone())
+        })?;
+        
+        // Update current position
+        self.current_key = Some(composite_key);
+        
+        Ok(())
     }
 }
