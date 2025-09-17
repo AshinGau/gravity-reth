@@ -14,29 +14,24 @@ use reth_storage_errors::db::{DatabaseErrorInfo, DatabaseWriteOperation};
 use rocksdb::DB;
 use std::sync::Arc;
 
-/// Transaction mode marker.
-#[derive(Debug)]
-pub struct RO;
-/// Transaction mode marker.
-#[derive(Debug)]
-pub struct RW;
+pub use cursor::{RO, RW};
 
 /// RocksDB transaction.
 #[derive(Debug)]
-pub struct Tx<MODE> {
+pub struct Tx<K: cursor::TransactionKind> {
     db: Arc<DB>,
-    _mode: std::marker::PhantomData<MODE>,
+    _mode: std::marker::PhantomData<K>,
 }
 
-impl<MODE> Tx<MODE> {
+impl<K: cursor::TransactionKind> Tx<K> {
     pub(crate) fn new(db: Arc<DB>) -> Self {
         Self { db, _mode: std::marker::PhantomData }
     }
 }
 
-impl<MODE: std::fmt::Debug + Send + Sync> DbTx for Tx<MODE> {
-    type Cursor<T: Table> = cursor::Cursor<T>;
-    type DupCursor<T: DupSort> = cursor::DupCursor<T>;
+impl<K: cursor::TransactionKind> DbTx for Tx<K> {
+    type Cursor<T: Table> = cursor::Cursor<K, T>;
+    type DupCursor<T: DupSort> = cursor::Cursor<K, T>;
 
     fn get<T: Table>(&self, key: T::Key) -> Result<Option<T::Value>, DatabaseError> {
         let encoded_key = key.encode();
@@ -72,7 +67,7 @@ impl<MODE: std::fmt::Debug + Send + Sync> DbTx for Tx<MODE> {
     }
 
     fn cursor_dup_read<T: DupSort>(&self) -> Result<Self::DupCursor<T>, DatabaseError> {
-        Ok(cursor::DupCursor::new(self.db.clone()))
+        Ok(cursor::Cursor::new(self.db.clone()))
     }
 
     fn entries<T: Table>(&self) -> Result<usize, DatabaseError> {
@@ -100,9 +95,9 @@ impl<MODE: std::fmt::Debug + Send + Sync> DbTx for Tx<MODE> {
     }
 }
 
-impl DbTxMut for Tx<RW> {
-    type CursorMut<T: Table> = cursor::Cursor<T>;
-    type DupCursorMut<T: DupSort> = cursor::DupCursor<T>;
+impl DbTxMut for Tx<cursor::RW> {
+    type CursorMut<T: Table> = cursor::Cursor<cursor::RW, T>;
+    type DupCursorMut<T: DupSort> = cursor::Cursor<cursor::RW, T>;
 
     fn put<T: Table>(&self, key: T::Key, value: T::Value) -> Result<(), DatabaseError> {
         let cf_handle = get_cf_handle::<T>(&self.db)?;
@@ -163,7 +158,7 @@ impl DbTxMut for Tx<RW> {
     }
 
     fn cursor_dup_write<T: DupSort>(&self) -> Result<Self::DupCursorMut<T>, DatabaseError> {
-        Ok(cursor::DupCursor::new(self.db.clone()))
+        Ok(cursor::Cursor::new(self.db.clone()))
     }
 }
 
