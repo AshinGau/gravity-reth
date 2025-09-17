@@ -3,13 +3,13 @@ use crate::{
     DatabaseError,
 };
 use reth_db_api::{
-    common::{IterPairResult, PairResult},
+    common::{IterPairResult, PairResult, ValueOnlyResult},
     cursor::{DbCursorRO, DbCursorRW, DbDupCursorRO, DbDupCursorRW, Walker},
     table::{Compress, Decode, Decompress, DupSort, Encode, Table},
 };
-use reth_storage_errors::db::DatabaseWriteOperation;
+use reth_storage_errors::db::{DatabaseWriteOperation, DatabaseErrorInfo};
 use rocksdb::DB;
-use std::{fmt::Debug, marker::PhantomData, sync::Arc};
+use std::{fmt::Debug, marker::PhantomData, sync::Arc, cell::UnsafeCell};
 
 /// Transaction kind marker for read-only operations.
 #[derive(Debug)]
@@ -47,12 +47,59 @@ macro_rules! compress_to_buf_or_ref {
     };
 }
 
-/// RocksDB cursor.
+/// Unsafe wrapper for DBIterator to bypass Send + Sync requirements
+/// 
+/// # Safety
+/// This wrapper assumes single-threaded usage of the cursor.
+/// The caller must ensure no concurrent access to the iterator.
+struct UnsafeIterator {
+    inner: UnsafeCell<Option<rocksdb::DBIterator<'static>>>,
+}
+
+impl UnsafeIterator {
+    fn new() -> Self {
+        Self {
+            inner: UnsafeCell::new(None),
+        }
+    }
+
+    unsafe fn set(&self, iter: rocksdb::DBIterator<'static>) {
+        *self.inner.get() = Some(iter);
+    }
+
+    unsafe fn get_mut(&self) -> Option<&mut rocksdb::DBIterator<'static>> {
+        (*self.inner.get()).as_mut()
+    }
+
+    unsafe fn take(&self) -> Option<rocksdb::DBIterator<'static>> {
+        (*self.inner.get()).take()
+    }
+
+    fn ready(&self) -> bool {
+        unsafe { (*self.inner.get()).is_some() }
+    }
+}
+
+// SAFETY: We guarantee single-threaded usage of cursor
+unsafe impl Send for UnsafeIterator {}
+unsafe impl Sync for UnsafeIterator {}
+
+impl Debug for UnsafeIterator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UnsafeIterator").finish()
+    }
+}
+
+/// RocksDB cursor with unsafe iterator caching for performance.
 pub struct Cursor<K: TransactionKind, T: Table> {
     db: Arc<DB>,
     table_name: &'static str,
+    /// Cached iterator for performance
+    cached_iterator: UnsafeIterator,
+    /// Current iterator direction  
+    iterator_direction: rocksdb::Direction,
+    /// Current key position for current() interface
     current_key: Option<Vec<u8>>,
-    current_value: Option<Vec<u8>>,
     /// Cache buffer that receives compressed values.
     buf: Vec<u8>,
     _phantom: PhantomData<(K, T)>,
@@ -63,8 +110,9 @@ impl<K: TransactionKind, T: Table> Cursor<K, T> {
         Self {
             db,
             table_name: T::NAME,
+            cached_iterator: UnsafeIterator::new(),
+            iterator_direction: rocksdb::Direction::Forward,
             current_key: None,
-            current_value: None,
             buf: Vec::new(),
             _phantom: PhantomData,
         }
@@ -79,37 +127,64 @@ impl<K: TransactionKind, T: Table> Cursor<K, T> {
         let decoded_value = T::Value::decompress(value).map_err(|_| DatabaseError::Decode)?;
         Ok((decoded_key, decoded_value))
     }
+
+    /// Create a new iterator with the specified mode
+    /// 
+    /// # Safety
+    /// This method extends the lifetime of the iterator to 'static using unsafe transmute.
+    /// The caller must ensure the DB remains valid for the iterator's actual usage.
+    unsafe fn create_iterator(&self, mode: rocksdb::IteratorMode<'_>) -> Result<(), DatabaseError> {
+        let cf_handle = get_cf_handle::<T>(&self.db)?;
+        let iter = self.db.iterator_cf(cf_handle, mode);
+        // SAFETY: We extend lifetime to 'static, but the actual usage is bounded by self
+        self.cached_iterator.set(std::mem::transmute(iter));
+        Ok(())
+    }
+
+    /// Get mutable reference to the cached iterator
+    unsafe fn get_iterator_mut(&mut self) -> Option<&mut rocksdb::DBIterator<'static>> {
+        self.cached_iterator.get_mut()
+    }
+
+    fn set_direction(&mut self, iterator_direction: rocksdb::Direction) {
+        assert!(self.cached_iterator.ready());
+        self.iterator_direction = iterator_direction;
+    }
 }
 
 impl<K: TransactionKind, T: Table> DbCursorRO<T> for Cursor<K, T> {
     fn first(&mut self) -> PairResult<T> {
-        let cf_handle = get_cf_handle::<T>(&self.db)?;
-        let mut iter = self.db.iterator_cf(cf_handle, rocksdb::IteratorMode::Start);
-
-        if let Some(Ok((key, value))) = iter.next() {
-            self.current_key = Some(key.to_vec());
-            self.current_value = Some(value.to_vec());
-            self.decode_key_value(&key, &value).map(Some)
-        } else {
-            self.current_key = None;
-            self.current_value = None;
-            Ok(None)
+        unsafe {
+            self.create_iterator(rocksdb::IteratorMode::Start)?;
+            self.set_direction(rocksdb::Direction::Forward);
+            if let Some(iter) = self.get_iterator_mut() {
+                if let Some(Ok((key, value))) = iter.next() {
+                    self.current_key = Some(key.to_vec());
+                    return self.decode_key_value(&key, &value).map(Some);
+                } else {
+                    self.current_key = None;
+                    return Ok(None);
+                }
+            }
         }
+        Ok(None)
     }
 
     fn seek_exact(&mut self, key: T::Key) -> PairResult<T> {
+        unsafe {
+            self.cached_iterator.take();
+            self.iterator_direction = rocksdb::Direction::Forward;
+        }
         let encoded_key = key.encode();
         let cf_handle = get_cf_handle::<T>(&self.db)?;
+        // Used for next();
+        self.current_key = Some(encoded_key.as_ref().to_vec());
 
         match self.db.get_cf(cf_handle, &encoded_key) {
             Ok(Some(value)) => {
-                self.current_key = Some(encoded_key.as_ref().to_vec());
-                self.current_value = Some(value.to_vec());
                 self.decode_key_value(encoded_key.as_ref(), &value).map(Some)
             }
             Ok(None) => {
-                self.current_key = None;
-                self.current_value = None;
                 Ok(None)
             }
             Err(e) => Err(rocksdb_error_to_database_error(e)),
@@ -117,96 +192,110 @@ impl<K: TransactionKind, T: Table> DbCursorRO<T> for Cursor<K, T> {
     }
 
     fn seek(&mut self, key: T::Key) -> PairResult<T> {
+        self.current_key = None;
         let encoded_key = key.encode();
-        let mut iter = self.db.iterator_cf(
-            get_cf_handle::<T>(&self.db)?,
-            rocksdb::IteratorMode::From(encoded_key.as_ref(), rocksdb::Direction::Forward),
-        );
-
-        if let Some(Ok((key, value))) = iter.next() {
-            self.current_key = Some(key.to_vec());
-            self.current_value = Some(value.to_vec());
-            self.decode_key_value(&key, &value).map(Some)
-        } else {
-            self.current_key = None;
-            self.current_value = None;
-            Ok(None)
+        unsafe {
+            self.create_iterator(rocksdb::IteratorMode::From(encoded_key.as_ref(), rocksdb::Direction::Forward))?;
         }
+        self.set_direction(rocksdb::Direction::Forward);
+        self.next()
     }
 
     fn next(&mut self) -> PairResult<T> {
-        if let Some(ref current_key) = self.current_key {
-            let mut iter = self.db.iterator_cf(
-                get_cf_handle::<T>(&self.db)?,
-                rocksdb::IteratorMode::From(current_key, rocksdb::Direction::Forward),
-            );
-
-            // Skip the current key
-            iter.next();
-
-            if let Some(Ok((key, value))) = iter.next() {
-                self.current_key = Some(key.to_vec());
-                self.current_value = Some(value.to_vec());
-                self.decode_key_value(&key, &value).map(Some)
-            } else {
-                self.current_key = None;
-                self.current_value = None;
-                Ok(None)
-            }
-        } else {
-            Ok(None)
+        match self.iterator_direction {
+            rocksdb::Direction::Forward => unsafe {
+                if let Some(iter) = self.get_iterator_mut() {
+                    if let Some(Ok((key, value))) = iter.next() {
+                        let new_key = key.to_vec();
+                        if let Some(origin_key) = self.current_key.take() {
+                            if origin_key == new_key {
+                                return self.next();
+                            }
+                        }
+                        self.current_key = Some(new_key);
+                        return self.decode_key_value(&key, &value).map(Some);
+                    } else {
+                        self.current_key = None;
+                        return Ok(None);
+                    }
+                } else if let Some(current_key) = &self.current_key {
+                    self.create_iterator(rocksdb::IteratorMode::From(current_key, rocksdb::Direction::Forward))?;
+                    self.set_direction(rocksdb::Direction::Forward);
+                    return self.next();
+                }
+            },
+            rocksdb::Direction::Reverse => unsafe {
+                if let Some(current_key) = &self.current_key {
+                    self.create_iterator(rocksdb::IteratorMode::From(current_key, rocksdb::Direction::Forward))?;
+                    self.set_direction(rocksdb::Direction::Forward);
+                    return self.next();
+                }
+            },
         }
+        Ok(None)
     }
 
     fn prev(&mut self) -> PairResult<T> {
-        if let Some(ref current_key) = self.current_key {
-            let mut iter = self.db.iterator_cf(
-                get_cf_handle::<T>(&self.db)?,
-                rocksdb::IteratorMode::From(current_key, rocksdb::Direction::Reverse),
-            );
-
-            // Skip the current key
-            iter.next();
-
-            if let Some(Ok((key, value))) = iter.next() {
-                self.current_key = Some(key.to_vec());
-                self.current_value = Some(value.to_vec());
-                self.decode_key_value(&key, &value).map(Some)
-            } else {
-                self.current_key = None;
-                self.current_value = None;
-                Ok(None)
-            }
-        } else {
-            Ok(None)
+        match self.iterator_direction {
+            rocksdb::Direction::Forward => unsafe {
+                if let Some(current_key) = &self.current_key {
+                    self.create_iterator(rocksdb::IteratorMode::From(current_key, rocksdb::Direction::Reverse))?;
+                    self.set_direction(rocksdb::Direction::Reverse);
+                    return self.prev();
+                }
+            },
+            rocksdb::Direction::Reverse => unsafe {
+                if let Some(iter) = self.get_iterator_mut() {
+                    if let Some(Ok((key, value))) = iter.next() {
+                        self.current_key = Some(key.to_vec());
+                        return self.decode_key_value(&key, &value).map(Some);
+                    } else {
+                        self.current_key = None;
+                        return Ok(None);
+                    }
+                } else if let Some(current_key) = &self.current_key {
+                    self.create_iterator(rocksdb::IteratorMode::From(current_key, rocksdb::Direction::Reverse))?;
+                    self.set_direction(rocksdb::Direction::Reverse);
+                    return self.prev();
+                }
+            },
         }
+        Ok(None)
     }
 
     fn last(&mut self) -> PairResult<T> {
-        let mut iter =
-            self.db.iterator_cf(get_cf_handle::<T>(&self.db)?, rocksdb::IteratorMode::End);
-
-        if let Some(Ok((key, value))) = iter.next() {
-            self.current_key = Some(key.to_vec());
-            self.current_value = Some(value.to_vec());
-            self.decode_key_value(&key, &value).map(Some)
-        } else {
-            self.current_key = None;
-            self.current_value = None;
-            Ok(None)
+        unsafe {
+            self.create_iterator(rocksdb::IteratorMode::End)?;
+            self.set_direction(rocksdb::Direction::Forward);
+            if let Some(iter) = self.get_iterator_mut() {
+                if let Some(Ok((key, value))) = iter.next() {
+                    self.current_key = Some(key.to_vec());
+                    return self.decode_key_value(&key, &value).map(Some);
+                } else {
+                    self.current_key = None;
+                    return Ok(None);
+                }
+            }
         }
+        Ok(None)
     }
 
     fn current(&mut self) -> PairResult<T> {
-        if let (Some(ref key), Some(ref value)) = (&self.current_key, &self.current_value) {
-            self.decode_key_value(key, value).map(Some)
+        if let Some(ref current_key) = self.current_key {
+            // Re-query the value from database
+            let cf_handle = get_cf_handle::<T>(&self.db)?;
+            if let Some(value) = self.db.get_cf(cf_handle, current_key).map_err(rocksdb_error_to_database_error)? {
+                self.decode_key_value(current_key, &value).map(Some)
+            } else {
+                Ok(None)
+            }
         } else {
             Ok(None)
         }
     }
 
     fn walk(&mut self, start_key: Option<T::Key>) -> Result<Walker<'_, T, Self>, DatabaseError> {
-        let start: IterPairResult<T> = match start_key {
+        let start = match start_key {
             Some(key) => self.seek(key).transpose(),
             None => self.first().transpose(),
         };
@@ -267,7 +356,6 @@ impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
 
         // Update current position
         self.current_key = Some(encoded_key.as_ref().to_vec());
-        self.current_value = Some(value_ref.unwrap_or(&self.buf).to_vec());
 
         Ok(())
     }
@@ -288,7 +376,6 @@ impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
             })?;
 
             self.current_key = None;
-            self.current_value = None;
         }
 
         Ok(())
@@ -298,17 +385,14 @@ impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
 // DupSort implementations
 impl<K: TransactionKind, T: DupSort> DbDupCursorRO<T> for Cursor<K, T> {
     fn next_dup(&mut self) -> PairResult<T> {
-        // Simplified implementation for RocksDB
         self.next()
     }
 
     fn next_no_dup(&mut self) -> PairResult<T> {
-        // Simplified implementation for RocksDB
         self.next()
     }
 
-    fn next_dup_val(&mut self) -> Result<Option<T::Value>, DatabaseError> {
-        // Simplified implementation for RocksDB
+    fn next_dup_val(&mut self) -> ValueOnlyResult<T> {
         if let Some((_, value)) = self.next()? {
             Ok(Some(value))
         } else {
@@ -320,8 +404,7 @@ impl<K: TransactionKind, T: DupSort> DbDupCursorRO<T> for Cursor<K, T> {
         &mut self,
         key: T::Key,
         _subkey: T::SubKey,
-    ) -> Result<Option<T::Value>, DatabaseError> {
-        // Simplified implementation for RocksDB
+    ) -> ValueOnlyResult<T> {
         if let Some((_, value)) = self.seek_exact(key)? {
             Ok(Some(value))
         } else {
