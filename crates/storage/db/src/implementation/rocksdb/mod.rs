@@ -169,6 +169,13 @@ fn create_write_error<T: Table>(
     }))
 }
 
+fn no_seek_error<T: Table>() -> DatabaseError {
+    DatabaseError::Read(DatabaseErrorInfo {
+        message: format!("Should seek '{}' before calling next", T::NAME).into(),
+        code: -1,
+    })
+}
+
 /// Helper function to get column family handle with proper error handling
 fn get_cf_handle<T: Table>(db: &DB) -> Result<&rocksdb::ColumnFamily, DatabaseError> {
     db.cf_handle(T::NAME).ok_or_else(|| {
