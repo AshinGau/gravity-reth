@@ -1,6 +1,6 @@
 use crate::{
     implementation::rocksdb::{
-        create_write_error, get_cf_handle, no_seek_error, rocksdb_error_to_database_error,
+        create_write_error, get_cf_handle, rocksdb_error_to_database_error,
     },
     DatabaseError,
 };
@@ -58,18 +58,35 @@ macro_rules! compress_to_buf_or_ref {
 /// RocksDB cursor with RawIterator caching for performance.
 pub struct Cursor<K: TransactionKind, T: Table> {
     db: Arc<DB>,
-    table_name: &'static str,
-    /// Cached RawIterator for performance - supports bidirectional operations
-    cached_iterator: Option<rocksdb::DBRawIterator<'static>>,
-    /// Current key position for current() interface
-    current_key: Option<Vec<u8>>,
+    /// Iterator for cursor operations - always ready to use
+    iterator: rocksdb::DBRawIterator<'static>,
     /// Cache buffer that receives compressed values.
     buf: Vec<u8>,
     _phantom: PhantomData<(K, T)>,
 }
 
-/// DupSort key utilities - handles fixed-length key composite keys (geth-style)
-impl<K: TransactionKind, T: DupSort> Cursor<K, T> {
+impl<K: TransactionKind, T: Table> Cursor<K, T> {
+    const KEY_LENGTH: usize = mem::size_of::<<T::Key as Encode>::Encoded>();
+
+    pub(crate) fn new(db: Arc<DB>) -> Result<Self, DatabaseError> {
+        let cf_handle = get_cf_handle::<T>(&db)?;
+        
+        // Create iterator at construction time - always ready to use
+        let iterator = unsafe {
+            // SAFETY: We ensure the DB outlives the iterator by holding Arc<DB>
+            std::mem::transmute::<rocksdb::DBRawIterator<'_>, rocksdb::DBRawIterator<'static>>(
+                db.raw_iterator_cf(cf_handle)
+            )
+        };
+        
+        Ok(Self {
+            db,
+            iterator,
+            buf: Vec::new(),
+            _phantom: PhantomData,
+        })
+    }
+
     /// Encode DupSort composite key: key + subkey
     fn encode_dupsort_key(key: &[u8], subkey: &[u8]) -> Vec<u8> {
         let mut composite = Vec::with_capacity(key.len() + subkey.len());
@@ -85,20 +102,17 @@ impl<K: TransactionKind, T: DupSort> Cursor<K, T> {
         }
         Ok((&composite[..Self::KEY_LENGTH], &composite[Self::KEY_LENGTH..]))
     }
-}
 
-impl<K: TransactionKind, T: Table> Cursor<K, T> {
-    const KEY_LENGTH: usize = mem::size_of::<<T::Key as Encode>::Encoded>();
+    /// High-performance point query - doesn't move cursor position
+    fn point_get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, DatabaseError> {
+        let cf_handle = get_cf_handle::<T>(&self.db)?;
+        self.db.get_cf(cf_handle, key).map_err(rocksdb_error_to_database_error)
+    }
 
-    pub(crate) fn new(db: Arc<DB>) -> Self {
-        Self {
-            db,
-            table_name: T::NAME,
-            cached_iterator: None,
-            current_key: None,
-            buf: Vec::new(),
-            _phantom: PhantomData,
-        }
+    /// High-performance point query for DupSort tables - doesn't move cursor position  
+    fn point_get_dupsort(&self, key: &[u8], subkey: &[u8]) -> Result<Option<Vec<u8>>, DatabaseError> {
+        let composite_key = Self::encode_dupsort_key(key, subkey);
+        self.point_get(&composite_key)
     }
 
     fn decode_key_value(key: &[u8], value: &[u8]) -> Result<(T::Key, T::Value), DatabaseError> {
@@ -115,144 +129,97 @@ impl<K: TransactionKind, T: Table> Cursor<K, T> {
         Ok((decoded_key, decoded_value))
     }
 
-    /// Create and cache RawIterator
-    fn create_raw_iterator(&mut self) -> Result<(), DatabaseError> {
-        if self.cached_iterator.is_some() {
-            return Ok(());
-        }
-        let cf_handle = get_cf_handle::<T>(&self.db)?;
-        let iter = self.db.raw_iterator_cf_opt(cf_handle, rocksdb::ReadOptions::default());
-
-        // SAFETY: We transmute the iterator to have a 'static lifetime
-        // This is safe because we manage the iterator's lifetime within this cursor
-        let static_iter: rocksdb::DBRawIterator<'static> = unsafe { std::mem::transmute(iter) };
-        self.cached_iterator = Some(static_iter);
-        Ok(())
-    }
-
-    /// Get mutable reference to the cached RawIterator
-    fn get_raw_iterator_mut(&mut self) -> Option<&mut rocksdb::DBRawIterator<'static>> {
-        self.cached_iterator.as_mut()
-    }
 }
 
 impl<K: TransactionKind, T: Table> DbCursorRO<T> for Cursor<K, T> {
     fn first(&mut self) -> PairResult<T> {
-        self.create_raw_iterator()?;
-        if let Some(iter) = self.get_raw_iterator_mut() {
-            iter.seek_to_first();
-            if iter.valid() {
-                if let (Some(key), Some(value)) = (iter.key(), iter.value()) {
-                    let result = Self::decode_key_value(key, value).map(Some);
-                    self.current_key = Some(key.to_vec());
-                    return result;
-                }
+        self.iterator.seek_to_first();
+        if self.iterator.valid() {
+            if let (Some(key), Some(value)) = (self.iterator.key(), self.iterator.value()) {
+                return Self::decode_key_value(key, value).map(Some);
             }
         }
-        self.current_key = None;
         Ok(None)
     }
 
     fn seek_exact(&mut self, key: T::Key) -> PairResult<T> {
-        self.cached_iterator.take();
+        // For seek_exact, we position the iterator at the exact key
         let encoded_key = key.encode();
-        let cf_handle = get_cf_handle::<T>(&self.db)?;
+        self.iterator.seek(encoded_key.as_ref());
+        
+        if self.iterator.valid() {
+            if let (Some(found_key), Some(value)) = (self.iterator.key(), self.iterator.value()) {
+                if T::DUPSORT {
+                    if found_key.len() >= Self::KEY_LENGTH && &found_key[..Self::KEY_LENGTH] == encoded_key.as_ref() {
+                        return Self::decode_key_value(found_key, value).map(Some);
+                    }
+                } else if found_key == encoded_key.as_ref() {
+                    return Self::decode_key_value(found_key, value).map(Some);
+                }
+            }
+        }
+        Ok(None)
+    }
 
-        match self.db.get_cf(cf_handle, &encoded_key) {
-            Ok(Some(value)) => {
-                let result = Self::decode_key_value(encoded_key.as_ref(), &value).map(Some);
-                self.current_key = Some(encoded_key.into());
-                result
-            }
-            Ok(None) => {
-                self.current_key = None;
-                Ok(None)
-            }
-            Err(e) => Err(rocksdb_error_to_database_error(e)),
+    fn get(&mut self, key: T::Key) -> PairResult<T> {
+        // High-performance point query - doesn't move iterator
+        let encoded_key = key.encode();
+        if let Some(value) = self.point_get(encoded_key.as_ref())? {
+            Self::decode_key_value(encoded_key.as_ref(), &value).map(Some)
+        } else {
+            Ok(None)
         }
     }
 
     fn seek(&mut self, key: T::Key) -> PairResult<T> {
         let encoded_key = key.encode();
-        self.create_raw_iterator()?;
-        if let Some(iter) = self.get_raw_iterator_mut() {
-            iter.seek(encoded_key.as_ref());
-            if iter.valid() {
-                if let (Some(key), Some(value)) = (iter.key(), iter.value()) {
-                    let result = Self::decode_key_value(key, value).map(Some);
-                    self.current_key = Some(key.to_vec());
-                    return result;
-                }
+        self.iterator.seek(encoded_key.as_ref());
+        if self.iterator.valid() {
+            if let (Some(key), Some(value)) = (self.iterator.key(), self.iterator.value()) {
+                return Self::decode_key_value(key, value).map(Some);
             }
         }
-        self.current_key = None;
         Ok(None)
     }
 
     fn next(&mut self) -> PairResult<T> {
-        if let Some(iter) = self.get_raw_iterator_mut() {
-            iter.next();
-            if iter.valid() {
-                if let (Some(key), Some(value)) = (iter.key(), iter.value()) {
-                    let result = Self::decode_key_value(key, value).map(Some);
-                    self.current_key = Some(key.to_vec());
-                    return result;
-                }
+        self.iterator.next();
+        if self.iterator.valid() {
+            if let (Some(key), Some(value)) = (self.iterator.key(), self.iterator.value()) {
+                return Self::decode_key_value(key, value).map(Some);
             }
-        } else {
-            return Err(no_seek_error::<T>());
         }
-        self.current_key = None;
         Ok(None)
     }
 
     fn prev(&mut self) -> PairResult<T> {
-        if let Some(iter) = self.get_raw_iterator_mut() {
-            iter.prev();
-            if iter.valid() {
-                if let (Some(key), Some(value)) = (iter.key(), iter.value()) {
-                    let result = Self::decode_key_value(key, value).map(Some);
-                    self.current_key = Some(key.to_vec());
-                    return result;
-                }
+        self.iterator.prev();
+        if self.iterator.valid() {
+            if let (Some(key), Some(value)) = (self.iterator.key(), self.iterator.value()) {
+                return Self::decode_key_value(key, value).map(Some);
             }
-        } else {
-            return Err(no_seek_error::<T>());
         }
-        self.current_key = None;
         Ok(None)
     }
 
     fn last(&mut self) -> PairResult<T> {
-        self.create_raw_iterator()?;
-        if let Some(iter) = self.get_raw_iterator_mut() {
-            iter.seek_to_last();
-            if iter.valid() {
-                if let (Some(key), Some(value)) = (iter.key(), iter.value()) {
-                    let result = Self::decode_key_value(key, value).map(Some);
-                    self.current_key = Some(key.to_vec());
-                    return result;
-                }
+        self.iterator.seek_to_last();
+        if self.iterator.valid() {
+            if let (Some(key), Some(value)) = (self.iterator.key(), self.iterator.value()) {
+                return Self::decode_key_value(key, value).map(Some);
             }
         }
-        self.current_key = None;
         Ok(None)
     }
 
     fn current(&mut self) -> PairResult<T> {
-        if let Some(ref current_key) = self.current_key {
-            // Re-query the value from database
-            let cf_handle = get_cf_handle::<T>(&self.db)?;
-            if let Some(value) =
-                self.db.get_cf(cf_handle, current_key).map_err(rocksdb_error_to_database_error)?
-            {
-                Self::decode_key_value(current_key, &value).map(Some)
-            } else {
-                Ok(None)
+        // Get current position from iterator
+        if self.iterator.valid() {
+            if let (Some(key), Some(value)) = (self.iterator.key(), self.iterator.value()) {
+                return Self::decode_key_value(key, value).map(Some);
             }
-        } else {
-            Ok(None)
         }
+        Ok(None)
     }
 
     fn walk(&mut self, start_key: Option<T::Key>) -> Result<Walker<'_, T, Self>, DatabaseError> {
@@ -300,7 +267,6 @@ impl<K: TransactionKind, T: Table> DbCursorRO<T> for Cursor<K, T> {
 
 impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
     fn upsert(&mut self, key: T::Key, value: &T::Value) -> Result<(), DatabaseError> {
-        self.current_key.take();
         let cf_handle = get_cf_handle::<T>(&self.db)?;
         let encoded_key = key.encode();
         let value_ref = compress_to_buf_or_ref!(self, value);
@@ -320,49 +286,75 @@ impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
     }
 
     fn delete_current(&mut self) -> Result<(), DatabaseError> {
-        if let Some(ref key) = self.current_key {
-            let cf_handle = get_cf_handle::<T>(&self.db)?;
-            self.db.delete_cf(cf_handle, key).map_err(|e| {
-                create_write_error::<T>(e, DatabaseWriteOperation::Put, key.clone())
-            })?;
-            self.current_key = None;
+        // Get current key from iterator
+        if self.iterator.valid() {
+            if let Some(key) = self.iterator.key() {
+                let cf_handle = get_cf_handle::<T>(&self.db)?;
+                self.db.delete_cf(cf_handle, key).map_err(|e| {
+                    create_write_error::<T>(e, DatabaseWriteOperation::Put, key.to_vec())
+                })?;
+            }
         }
         Ok(())
     }
 }
 
 impl<K: TransactionKind, T: DupSort> DbDupCursorRO<T> for Cursor<K, T> {
-    fn next_dup(&mut self) -> PairResult<T> {
-        // Get current main key to check if next entry is still a duplicate
-        let current_main_key = if let Some(ref current_key) = self.current_key {
-            let (main_key, _) = Self::decode_dupsort_key(current_key)?;
-            main_key.to_vec() // Only clone when we need to store it
-        } else {
-            // No current key, just get the first entry
-            return self.first();
-        };
-
-        // Use base next() method and check if it's still the same main key
-        if let Some((key, value)) = self.next()? {
-            let returned_key_encoded = key.clone().encode();
-            if returned_key_encoded.as_ref() == current_main_key {
-                Ok(Some((key, value)))
-            } else {
-                // Different main key, no more duplicates
-                Ok(None)
-            }
+    fn get_by_key_subkey(&mut self, key: T::Key, subkey: T::SubKey) -> ValueOnlyResult<T> {
+        // High-performance point query for DupSort - doesn't move iterator
+        let encoded_key = key.encode();
+        let encoded_subkey = subkey.encode();
+        
+        let composite_key = Self::encode_dupsort_key(encoded_key.as_ref(), encoded_subkey.as_ref());
+        if let Some(value_bytes) = self.point_get(&composite_key)? {
+            let decompressed_value = T::Value::decompress(&value_bytes).map_err(|_| DatabaseError::Decode)?;
+            Ok(Some(decompressed_value))
         } else {
             Ok(None)
         }
     }
 
-    fn next_no_dup(&mut self) -> PairResult<T> {
-        // Get the current key to skip all its duplicates
-        let mut next_key = if let Some(current_key) = &self.current_key {
-            let (main_key, _) = Self::decode_dupsort_key(current_key)?;
-            main_key.to_vec() // Only clone when we need to store it
+    fn next_dup(&mut self) -> PairResult<T> {
+        // Get current main key from iterator position
+        let current_main_key = if self.iterator.valid() {
+            if let Some(current_key) = self.iterator.key() {
+                if current_key.len() >= Self::KEY_LENGTH {
+                    current_key[..Self::KEY_LENGTH].to_vec()
+                } else {
+                    return Ok(None);
+                }
+            } else {
+                return self.first();
+            }
         } else {
-            // No current key, just get the first entry
+            return self.first();
+        };
+
+        // Move to next and check if it's still the same main key
+        self.iterator.next();
+        if self.iterator.valid() {
+            if let (Some(key), Some(value)) = (self.iterator.key(), self.iterator.value()) {
+                if key.len() >= Self::KEY_LENGTH && &key[..Self::KEY_LENGTH] == &current_main_key {
+                    return Self::decode_key_value(key, value).map(Some);
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn next_no_dup(&mut self) -> PairResult<T> {
+        // Get the current main key from iterator position
+        let mut next_key = if self.iterator.valid() {
+            if let Some(current_key) = self.iterator.key() {
+                if current_key.len() >= Self::KEY_LENGTH {
+                    current_key[..Self::KEY_LENGTH].to_vec()
+                } else {
+                    return Ok(None);
+                }
+            } else {
+                return self.first();
+            }
+        } else {
             return self.first();
         };
         
@@ -385,17 +377,12 @@ impl<K: TransactionKind, T: DupSort> DbDupCursorRO<T> for Cursor<K, T> {
         }
         
         // Seek to the incremented key
-        self.create_raw_iterator()?;
-        if let Some(iter) = self.get_raw_iterator_mut() {
-            iter.seek(&next_key);
-            if iter.valid() {
-                if let (Some(key), Some(value)) = (iter.key(), iter.value()) {
-                    let result = Self::decode_key_value(key, value).map(Some);
-                    self.current_key = Some(key.to_vec());
-                    return result;
-                }
+        self.iterator.seek(&next_key);
+        if self.iterator.valid() {
+            if let (Some(key), Some(value)) = (self.iterator.key(), self.iterator.value()) {
+                return Self::decode_key_value(key, value).map(Some);
             }
-        }     
+        }
         Ok(None)
     }
 
@@ -404,23 +391,20 @@ impl<K: TransactionKind, T: DupSort> DbDupCursorRO<T> for Cursor<K, T> {
     }
 
     fn seek_by_key_subkey(&mut self, key: T::Key, subkey: T::SubKey) -> ValueOnlyResult<T> {
-        let composite_key =
-            Self::encode_dupsort_key(key.encode().as_ref(), subkey.encode().as_ref());
+        let composite_key = Self::encode_dupsort_key(
+            key.encode().as_ref(), 
+            subkey.encode().as_ref()
+        );
 
-        self.cached_iterator.take();
-        let cf_handle = get_cf_handle::<T>(&self.db)?;
-        match self.db.get_cf(cf_handle, &composite_key) {
-            Ok(Some(value)) => {
-                let result = Self::decode_key_value(composite_key.as_ref(), &value).map(Some);
-                self.current_key = Some(composite_key);
-                result.map(|result| result.map(|(_, value)| value))
+        // Position iterator at the exact composite key
+        self.iterator.seek(&composite_key);
+        if self.iterator.valid() {
+            if let (Some(found_key), Some(value)) = (self.iterator.key(), self.iterator.value()) {
+                let (_, decoded_value) = Self::decode_key_value(found_key, value)?;
+                return Ok(Some(decoded_value));
             }
-            Ok(None) => {
-                self.current_key = None;
-                Ok(None)
-            }
-            Err(e) => Err(rocksdb_error_to_database_error(e)),
         }
+        Ok(None)
     }
 
     fn walk_dup(
@@ -450,38 +434,45 @@ impl<K: TransactionKind, T: DupSort> DbDupCursorRO<T> for Cursor<K, T> {
 
 impl<T: DupSort> DbDupCursorRW<T> for Cursor<RW, T> {
     fn delete_current_duplicates(&mut self) -> Result<(), DatabaseError> {
-        if let Some(ref current_composite_key) = self.current_key.take() {
-            let (main_key, _) = Self::decode_dupsort_key(current_composite_key)?;
-            // main_key is used for comparison in the loop below
+        // Get current main key from iterator position
+        if self.iterator.valid() {
+            if let Some(current_composite_key) = self.iterator.key() {
+                if current_composite_key.len() >= Self::KEY_LENGTH {
+                    let main_key = &current_composite_key[..Self::KEY_LENGTH];
+                    
+                    // Find and delete all entries with the same main key
+                    let cf_handle = get_cf_handle::<T>(&self.db)?;
 
-            // Find and delete all entries with the same main key
-            let cf_handle = get_cf_handle::<T>(&self.db)?;
+                    // Create iterator to find all duplicates
+                    let iter = self.db.iterator_cf(
+                        cf_handle,
+                        rocksdb::IteratorMode::From(main_key, rocksdb::Direction::Forward),
+                    );
+                    let mut keys_to_delete = Vec::new();
 
-            // Create iterator to find all duplicates
-            // Use the current composite key as starting point to find all duplicates
-            let iter = self.db.iterator_cf(
-                cf_handle,
-                rocksdb::IteratorMode::From(current_composite_key, rocksdb::Direction::Forward),
-            );
-            let mut keys_to_delete = Vec::new();
+                    for result in iter {
+                        if let Ok((composite_key, _)) = result {
+                            if composite_key.len() >= Self::KEY_LENGTH {
+                                let found_main_key = &composite_key[..Self::KEY_LENGTH];
+                                if found_main_key == main_key {
+                                    keys_to_delete.push(composite_key.to_vec());
+                                } else {
+                                    // Different key, stop
+                                    break;
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                    }
 
-            for result in iter {
-                if let Ok((composite_key, _)) = result {
-                    let (found_main_key, _) = Self::decode_dupsort_key(&composite_key)?;
-                    if found_main_key == main_key {
-                        keys_to_delete.push(composite_key.to_vec());
-                    } else {
-                        // Different key, stop
-                        break;
+                    // Delete all found keys
+                    for key_to_delete in keys_to_delete {
+                        self.db.delete_cf(cf_handle, &key_to_delete).map_err(|e| {
+                            create_write_error::<T>(e, DatabaseWriteOperation::Put, key_to_delete)
+                        })?;
                     }
                 }
-            }
-
-            // Delete all found keys
-            for key_to_delete in keys_to_delete {
-                self.db.delete_cf(cf_handle, &key_to_delete).map_err(|e| {
-                    create_write_error::<T>(e, DatabaseWriteOperation::Put, key_to_delete)
-                })?;
             }
         }
         Ok(())
@@ -507,8 +498,8 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<RW, T> {
             )
         })?;
 
-        // Update current position
-        self.current_key = Some(composite_key);
+        // Position iterator at the newly inserted key
+        self.iterator.seek(&composite_key);
         Ok(())
     }
 }

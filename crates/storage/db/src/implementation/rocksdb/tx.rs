@@ -63,11 +63,11 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
     }
 
     fn cursor_read<T: Table>(&self) -> Result<Self::Cursor<T>, DatabaseError> {
-        Ok(cursor::Cursor::new(self.db.clone()))
+        cursor::Cursor::new(self.db.clone())
     }
 
     fn cursor_dup_read<T: DupSort>(&self) -> Result<Self::DupCursor<T>, DatabaseError> {
-        Ok(cursor::Cursor::new(self.db.clone()))
+        cursor::Cursor::new(self.db.clone())
     }
 
     fn entries<T: Table>(&self) -> Result<usize, DatabaseError> {
@@ -154,11 +154,11 @@ impl DbTxMut for Tx<cursor::RW> {
     }
 
     fn cursor_write<T: Table>(&self) -> Result<Self::CursorMut<T>, DatabaseError> {
-        Ok(cursor::Cursor::new(self.db.clone()))
+        cursor::Cursor::new(self.db.clone())
     }
 
     fn cursor_dup_write<T: DupSort>(&self) -> Result<Self::DupCursorMut<T>, DatabaseError> {
-        Ok(cursor::Cursor::new(self.db.clone()))
+        cursor::Cursor::new(self.db.clone())
     }
 }
 

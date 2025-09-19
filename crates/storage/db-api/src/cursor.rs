@@ -17,6 +17,11 @@ pub trait DbCursorRO<T: Table> {
     /// Seeks to the KV pair exactly at `key`.
     fn seek_exact(&mut self, key: T::Key) -> PairResult<T>;
 
+    /// Get the KV pair exactly at `key`.
+    fn get(&mut self, key: T::Key) -> PairResult<T> {
+        self.seek_exact(key)
+    }
+
     /// Seeks to the KV pair whose key is greater than or equal to `key`.
     fn seek(&mut self, key: T::Key) -> PairResult<T>;
 
@@ -78,6 +83,11 @@ pub trait DbDupCursorRO<T: DupSort> {
     /// The position of the cursor might not correspond to the key/subkey pair if the entry does not
     /// exist.
     fn seek_by_key_subkey(&mut self, key: T::Key, subkey: T::SubKey) -> ValueOnlyResult<T>;
+
+    /// Get the KV pair exactly at `key` + `subkey`.
+    fn get_by_key_subkey(&mut self, key: T::Key, subkey: T::SubKey) -> ValueOnlyResult<T> {
+        self.seek_by_key_subkey(key, subkey)
+    }
 
     /// Get an iterator that walks through the dup table.
     ///
