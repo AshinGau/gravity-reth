@@ -97,10 +97,30 @@ impl<K: TransactionKind, T: Table> Cursor<K, T> {
 
     /// Decode DupSort composite key: split based on fixed key length
     fn decode_dupsort_key(composite: &[u8]) -> Result<(&[u8], &[u8]), DatabaseError> {
-        if composite.len() < Self::KEY_LENGTH {
-            return Err(DatabaseError::Decode);
-        }
+        Self::validate_dupsort_key_length(composite)?;
         Ok((&composite[..Self::KEY_LENGTH], &composite[Self::KEY_LENGTH..]))
+    }
+
+    /// Validate that a composite key has the correct minimum length for DupSort tables
+    fn validate_dupsort_key_length(composite: &[u8]) -> Result<(), DatabaseError> {
+        if composite.len() < Self::KEY_LENGTH {
+            return Err(DatabaseError::Read(reth_storage_errors::db::DatabaseErrorInfo {
+                message: format!(
+                    "Invalid DupSort composite key length: expected at least {} bytes, got {} bytes for table '{}'",
+                    Self::KEY_LENGTH,
+                    composite.len(),
+                    T::NAME
+                ).into(),
+                code: -1,
+            }));
+        }
+        Ok(())
+    }
+
+    /// Extract main key from composite key with validation
+    fn extract_main_key(composite: &[u8]) -> Result<&[u8], DatabaseError> {
+        Self::validate_dupsort_key_length(composite)?;
+        Ok(&composite[..Self::KEY_LENGTH])
     }
 
     /// High-performance point query - doesn't move cursor position
@@ -150,7 +170,8 @@ impl<K: TransactionKind, T: Table> DbCursorRO<T> for Cursor<K, T> {
         if self.iterator.valid() {
             if let (Some(found_key), Some(value)) = (self.iterator.key(), self.iterator.value()) {
                 if T::DUPSORT {
-                    if found_key.len() >= Self::KEY_LENGTH && &found_key[..Self::KEY_LENGTH] == encoded_key.as_ref() {
+                    let main_key = Self::extract_main_key(found_key)?;
+                    if main_key == encoded_key.as_ref() {
                         return Self::decode_key_value(found_key, value).map(Some);
                     }
                 } else if found_key == encoded_key.as_ref() {
@@ -318,11 +339,7 @@ impl<K: TransactionKind, T: DupSort> DbDupCursorRO<T> for Cursor<K, T> {
         // Get current main key from iterator position
         let current_main_key = if self.iterator.valid() {
             if let Some(current_key) = self.iterator.key() {
-                if current_key.len() >= Self::KEY_LENGTH {
-                    current_key[..Self::KEY_LENGTH].to_vec()
-                } else {
-                    return Ok(None);
-                }
+                Self::extract_main_key(current_key)?.to_vec()
             } else {
                 return self.first();
             }
@@ -334,7 +351,8 @@ impl<K: TransactionKind, T: DupSort> DbDupCursorRO<T> for Cursor<K, T> {
         self.iterator.next();
         if self.iterator.valid() {
             if let (Some(key), Some(value)) = (self.iterator.key(), self.iterator.value()) {
-                if key.len() >= Self::KEY_LENGTH && &key[..Self::KEY_LENGTH] == &current_main_key {
+                let main_key = Self::extract_main_key(key)?;
+                if main_key == &current_main_key {
                     return Self::decode_key_value(key, value).map(Some);
                 }
             }
@@ -346,11 +364,7 @@ impl<K: TransactionKind, T: DupSort> DbDupCursorRO<T> for Cursor<K, T> {
         // Get the current main key from iterator position
         let mut next_key = if self.iterator.valid() {
             if let Some(current_key) = self.iterator.key() {
-                if current_key.len() >= Self::KEY_LENGTH {
-                    current_key[..Self::KEY_LENGTH].to_vec()
-                } else {
-                    return Ok(None);
-                }
+                Self::extract_main_key(current_key)?.to_vec()
             } else {
                 return self.first();
             }
@@ -437,41 +451,36 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<RW, T> {
         // Get current main key from iterator position
         if self.iterator.valid() {
             if let Some(current_composite_key) = self.iterator.key() {
-                if current_composite_key.len() >= Self::KEY_LENGTH {
-                    let main_key = &current_composite_key[..Self::KEY_LENGTH];
-                    
-                    // Find and delete all entries with the same main key
-                    let cf_handle = get_cf_handle::<T>(&self.db)?;
+                let main_key = Self::extract_main_key(current_composite_key)?;
+                
+                // Find and delete all entries with the same main key
+                let cf_handle = get_cf_handle::<T>(&self.db)?;
 
-                    // Create iterator to find all duplicates
-                    let iter = self.db.iterator_cf(
-                        cf_handle,
-                        rocksdb::IteratorMode::From(main_key, rocksdb::Direction::Forward),
-                    );
-                    let mut keys_to_delete = Vec::new();
+                // Create iterator to find all duplicates
+                let iter = self.db.iterator_cf(
+                    cf_handle,
+                    rocksdb::IteratorMode::From(main_key, rocksdb::Direction::Forward),
+                );
+                let mut keys_to_delete = Vec::new();
 
-                    for result in iter {
-                        if let Ok((composite_key, _)) = result {
-                            if composite_key.len() >= Self::KEY_LENGTH {
-                                let found_main_key = &composite_key[..Self::KEY_LENGTH];
-                                if found_main_key == main_key {
-                                    keys_to_delete.push(composite_key.to_vec());
-                                } else {
-                                    // Different key, stop
-                                    break;
-                                }
-                            } else {
-                                break;
-                            }
+                for result in iter {
+                    if let Ok((composite_key, _)) = result {
+                        // Validate and extract main key - if invalid, stop processing
+                        let found_main_key = Self::extract_main_key(&composite_key)?;
+                        if found_main_key == main_key {
+                            keys_to_delete.push(composite_key.to_vec());
+                        } else {
+                            // Different key, stop
+                            break;
                         }
                     }
+                }
 
-                    // Delete all found keys
-                    for key_to_delete in keys_to_delete {
-                        self.db.delete_cf(cf_handle, &key_to_delete).map_err(|e| {
-                            create_write_error::<T>(e, DatabaseWriteOperation::Put, key_to_delete)
-                        })?;
-                    }
+                // Delete all found keys
+                for key_to_delete in keys_to_delete {
+                    self.db.delete_cf(cf_handle, &key_to_delete).map_err(|e| {
+                        create_write_error::<T>(e, DatabaseWriteOperation::Put, key_to_delete)
+                    })?;
                 }
             }
         }
