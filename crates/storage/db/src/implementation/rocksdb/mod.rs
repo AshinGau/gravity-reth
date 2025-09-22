@@ -98,6 +98,7 @@ impl DatabaseEnv {
     ) -> Result<Self, DatabaseError> {
         let mut opts = Options::default();
         opts.create_if_missing(true);
+        opts.create_missing_column_families(true);
 
         let db = DB::open(&opts, path)
             .map_err(|e| DatabaseError::Other(format!("Failed to open RocksDB: {}", e)))?;

@@ -9,7 +9,7 @@ use reth_db_api::{
     cursor::{DbCursorRO, DbCursorRW, DbDupCursorRO, DbDupCursorRW, Walker},
     table::{Compress, Decode, Decompress, DupSort, Encode, Table},
 };
-use reth_storage_errors::db::DatabaseWriteOperation;
+use reth_storage_errors::db::{DatabaseErrorInfo, DatabaseWriteOperation};
 use rocksdb::DB;
 use std::{
     fmt::Debug,
@@ -291,11 +291,18 @@ impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
         let cf_handle = get_cf_handle::<T>(&self.db)?;
         let encoded_key = key.encode();
         let value_ref = compress_to_buf_or_ref!(self, value);
-
-        self.db.put_cf(cf_handle, &encoded_key, value_ref.unwrap_or(&self.buf)).map_err(|e| {
-            create_write_error::<T>(e, DatabaseWriteOperation::Put, encoded_key.into())
-        })?;
-        Ok(())
+        let compressed_value = value_ref.unwrap_or(&self.buf);
+        if T::DUPSORT {
+            let subkey = &compressed_value[..value.subkey_compress_length().unwrap()];
+            let composite_key = Self::encode_dupsort_key(encoded_key.as_ref(), subkey);
+            self.db.put_cf(cf_handle, &composite_key, compressed_value).map_err(|e| {
+                create_write_error::<T>(e, DatabaseWriteOperation::Put, encoded_key.into())
+            })
+        } else {
+            self.db.put_cf(cf_handle, &encoded_key, compressed_value).map_err(|e| {
+                create_write_error::<T>(e, DatabaseWriteOperation::Put, encoded_key.into())
+            })
+        }
     }
 
     fn insert(&mut self, key: T::Key, value: &T::Value) -> Result<(), DatabaseError> {
@@ -427,15 +434,36 @@ impl<K: TransactionKind, T: DupSort> DbDupCursorRO<T> for Cursor<K, T> {
         subkey: Option<T::SubKey>,
     ) -> Result<reth_db_api::cursor::DupWalker<'_, T, Self>, DatabaseError> {
         let start = match (key, subkey) {
-            (Some(_key), Some(_subkey)) => {
-                unimplemented!("DupSort walk_dup(Some, Some)")
+            (Some(key), Some(subkey)) => {
+                let composite_key = Self::encode_dupsort_key(
+                    key.encode().as_ref(), 
+                    subkey.encode().as_ref()
+                );
+                self.iterator.seek(&composite_key);
+                let result = if self.iterator.valid() {
+                    if let (Some(key), Some(value)) = (self.iterator.key(), self.iterator.value()) {
+                        Self::decode_key_value(key, value).map(Some)
+                    } else {
+                        Ok(None)
+                    }
+                } else {
+                    Ok(None)
+                };
+                result.transpose()
             }
             (Some(key), None) => {
                 // Seek to first entry of this key
                 self.seek(key).transpose()
             }
-            (None, Some(_subkey)) => {
-                unimplemented!("DupSort walk_dup(None, Some)")
+            (None, Some(subkey)) => {
+                if let Some((key, _)) = self.first()? {
+                    return self.walk_dup(Some(key), Some(subkey));
+                } else {
+                    Some(Err(DatabaseError::Read(DatabaseErrorInfo{
+                        message: "Not Found".into(),
+                        code: -1,
+                    })))
+                }
             }
             (None, None) => {
                 self.first().transpose()
@@ -496,8 +524,8 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<RW, T> {
         let value_ref = compress_to_buf_or_ref!(self, &value);
         let compressed_value = value_ref.unwrap_or(&self.buf);
 
-        // Use compressed value as subkey for sorting
-        let composite_key = Self::encode_dupsort_key(encoded_key.as_ref(), compressed_value);
+        let subkey = &compressed_value[..value.subkey_compress_length().unwrap()];
+        let composite_key = Self::encode_dupsort_key(encoded_key.as_ref(), subkey);
 
         self.db.put_cf(cf_handle, &composite_key, compressed_value).map_err(|e| {
             create_write_error::<T>(
@@ -505,10 +533,6 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<RW, T> {
                 DatabaseWriteOperation::CursorAppendDup,
                 composite_key.clone(),
             )
-        })?;
-
-        // Position iterator at the newly inserted key
-        self.iterator.seek(&composite_key);
-        Ok(())
+        })
     }
 }

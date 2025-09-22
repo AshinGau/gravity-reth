@@ -54,7 +54,7 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
     }
 
     fn commit(self) -> Result<bool, DatabaseError> {
-        // For RocksDB, there's no explicit commit for read operations
+        // For RocksDB, there's no explicit commit
         Ok(true)
     }
 
@@ -134,21 +134,42 @@ impl DbTxMut for Tx<cursor::RW> {
     fn clear<T: Table>(&self) -> Result<(), DatabaseError> {
         let cf_handle = get_cf_handle::<T>(&self.db)?;
 
-        // Get the range of all keys in the column family
-        let mut iter = self.db.iterator_cf(cf_handle, rocksdb::IteratorMode::Start);
-
-        if let Some(Ok((first_key, _))) = iter.next() {
-            // Find the last key
-            let mut last_key = first_key.clone();
-            while let Some(Ok((key, _))) = iter.next() {
-                last_key = key;
+        // Get first and last keys using separate iterators to avoid borrowing conflicts
+        let (first_key, last_key) = {
+            let mut iter = self.db.raw_iterator_cf(cf_handle);
+            iter.seek_to_first();
+            if !iter.valid() {
+                // No data in this column family, nothing to clear
+                return Ok(());
             }
-
-            // Delete the range
-            self.db.delete_range_cf(cf_handle, &first_key, &last_key).map_err(|e| {
-                create_write_error::<T>(e, DatabaseWriteOperation::Put, first_key.to_vec())
-            })?;
-        }
+            let first_key = iter.key().ok_or_else(|| DatabaseError::Read(DatabaseErrorInfo {
+                message: "Failed to get first key".into(),
+                code: -1,
+            }))?.to_vec();
+            
+            iter.seek_to_last();
+            if !iter.valid() {
+                // This shouldn't happen if we found a first key, but handle it gracefully
+                return Ok(());
+            }
+            let last_key = iter.key().ok_or_else(|| DatabaseError::Read(DatabaseErrorInfo {
+                message: "Failed to get last key".into(),
+                code: -1,
+            }))?.to_vec();
+            
+            (first_key, last_key)
+        };
+        
+        // Delete the range [first_key, last_key] - note that delete_range_cf is [start, end)
+        // so we need to handle the last key separately
+        self.db.delete_range_cf(cf_handle, &first_key, &last_key).map_err(|e| {
+            create_write_error::<T>(e, DatabaseWriteOperation::Put, first_key.clone())
+        })?;
+        
+        // Delete the last key separately since delete_range_cf is [start, end)
+        self.db.delete_cf(cf_handle, &last_key).map_err(|e| {
+            create_write_error::<T>(e, DatabaseWriteOperation::Put, last_key.clone())
+        })?;
 
         Ok(())
     }
