@@ -68,7 +68,7 @@ proptest.workspace = true
 assert_matches.workspace = true
 
 [features]
-default = ["rocksdb"]
+default = []
 # MDBX and RocksDB are mutually exclusive features
 # When mdbx is enabled, it should disable default features
 mdbx = [

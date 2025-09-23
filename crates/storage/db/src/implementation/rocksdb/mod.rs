@@ -3,6 +3,7 @@
 use crate::{DatabaseError, TableSet};
 use reth_db_api::{
     database_metrics::DatabaseMetrics, models::ClientVersion, table::Table, DatabaseWriteOperation,
+    Tables,
 };
 use reth_storage_errors::db::{DatabaseErrorInfo, DatabaseWriteError, LogLevel};
 use rocksdb::{Options, DB};
@@ -100,9 +101,15 @@ impl DatabaseEnv {
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
 
-        let db = DB::open(&opts, path)
+        let mut db = DB::open(&opts, path)
             .map_err(|e| DatabaseError::Other(format!("Failed to open RocksDB: {}", e)))?;
-
+        for table in Tables::tables() {
+            let cf_name = table.name();
+            if db.cf_handle(&cf_name).is_none() {
+                db.create_cf(&cf_name, &rocksdb::Options::default())
+                    .map_err(rocksdb_error_to_database_error)?;
+            }
+        }
         Ok(Self { inner: Arc::new(db), kind })
     }
 
@@ -112,14 +119,12 @@ impl DatabaseEnv {
     }
 
     /// Creates tables for the given table set.
-    pub fn create_tables<T: TableSet>(&self) -> Result<(), DatabaseError> {
-        // RocksDB doesn't need explicit table creation
-        Ok(())
+    pub fn create_tables(&self) -> Result<(), DatabaseError> {
+        self.create_tables_for::<Tables>()
     }
 
     /// Creates tables for the given table set.
-    pub fn create_tables_for<T: TableSet>(&self) -> Result<(), DatabaseError> {
-        // RocksDB doesn't need explicit table creation
+    pub fn create_tables_for<TS: TableSet>(&self) -> Result<(), DatabaseError> {
         Ok(())
     }
 

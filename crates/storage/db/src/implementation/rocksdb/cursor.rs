@@ -1,7 +1,5 @@
 use crate::{
-    implementation::rocksdb::{
-        create_write_error, get_cf_handle, rocksdb_error_to_database_error,
-    },
+    implementation::rocksdb::{create_write_error, get_cf_handle, rocksdb_error_to_database_error},
     DatabaseError,
 };
 use reth_db_api::{
@@ -70,21 +68,16 @@ impl<K: TransactionKind, T: Table> Cursor<K, T> {
 
     pub(crate) fn new(db: Arc<DB>) -> Result<Self, DatabaseError> {
         let cf_handle = get_cf_handle::<T>(&db)?;
-        
+
         // Create iterator at construction time - always ready to use
         let iterator = unsafe {
             // SAFETY: We ensure the DB outlives the iterator by holding Arc<DB>
             std::mem::transmute::<rocksdb::DBRawIterator<'_>, rocksdb::DBRawIterator<'static>>(
-                db.raw_iterator_cf(cf_handle)
+                db.raw_iterator_cf(cf_handle),
             )
         };
-        
-        Ok(Self {
-            db,
-            iterator,
-            buf: Vec::new(),
-            _phantom: PhantomData,
-        })
+
+        Ok(Self { db, iterator, buf: Vec::new(), _phantom: PhantomData })
     }
 
     /// Encode DupSort composite key: key + subkey
@@ -130,7 +123,11 @@ impl<K: TransactionKind, T: Table> Cursor<K, T> {
     }
 
     /// High-performance point query for DupSort tables - doesn't move cursor position  
-    fn point_get_dupsort(&self, key: &[u8], subkey: &[u8]) -> Result<Option<Vec<u8>>, DatabaseError> {
+    fn point_get_dupsort(
+        &self,
+        key: &[u8],
+        subkey: &[u8],
+    ) -> Result<Option<Vec<u8>>, DatabaseError> {
         let composite_key = Self::encode_dupsort_key(key, subkey);
         self.point_get(&composite_key)
     }
@@ -148,7 +145,6 @@ impl<K: TransactionKind, T: Table> Cursor<K, T> {
         let decoded_value = T::Value::decompress(value).map_err(|_| DatabaseError::Decode)?;
         Ok((decoded_key, decoded_value))
     }
-
 }
 
 impl<K: TransactionKind, T: Table> DbCursorRO<T> for Cursor<K, T> {
@@ -166,7 +162,7 @@ impl<K: TransactionKind, T: Table> DbCursorRO<T> for Cursor<K, T> {
         // For seek_exact, we position the iterator at the exact key
         let encoded_key = key.encode();
         self.iterator.seek(encoded_key.as_ref());
-        
+
         if self.iterator.valid() {
             if let (Some(found_key), Some(value)) = (self.iterator.key(), self.iterator.value()) {
                 if T::DUPSORT {
@@ -332,10 +328,11 @@ impl<K: TransactionKind, T: DupSort> DbDupCursorRO<T> for Cursor<K, T> {
         // High-performance point query for DupSort - doesn't move iterator
         let encoded_key = key.encode();
         let encoded_subkey = subkey.encode();
-        
+
         let composite_key = Self::encode_dupsort_key(encoded_key.as_ref(), encoded_subkey.as_ref());
         if let Some(value_bytes) = self.point_get(&composite_key)? {
-            let decompressed_value = T::Value::decompress(&value_bytes).map_err(|_| DatabaseError::Decode)?;
+            let decompressed_value =
+                T::Value::decompress(&value_bytes).map_err(|_| DatabaseError::Decode)?;
             Ok(Some(decompressed_value))
         } else {
             Ok(None)
@@ -378,7 +375,7 @@ impl<K: TransactionKind, T: DupSort> DbDupCursorRO<T> for Cursor<K, T> {
         } else {
             return self.first();
         };
-        
+
         // Increment the key to find the next different key
         let mut carry = true;
         for byte in next_key.iter_mut().rev() {
@@ -391,12 +388,12 @@ impl<K: TransactionKind, T: DupSort> DbDupCursorRO<T> for Cursor<K, T> {
                     break;
                 }
             }
-        }  
+        }
         if carry {
             // Overflow: no next key possible
             return Ok(None);
         }
-        
+
         // Seek to the incremented key
         self.iterator.seek(&next_key);
         if self.iterator.valid() {
@@ -412,10 +409,8 @@ impl<K: TransactionKind, T: DupSort> DbDupCursorRO<T> for Cursor<K, T> {
     }
 
     fn seek_by_key_subkey(&mut self, key: T::Key, subkey: T::SubKey) -> ValueOnlyResult<T> {
-        let composite_key = Self::encode_dupsort_key(
-            key.encode().as_ref(), 
-            subkey.encode().as_ref()
-        );
+        let composite_key =
+            Self::encode_dupsort_key(key.encode().as_ref(), subkey.encode().as_ref());
 
         // Position iterator at the exact composite key
         self.iterator.seek(&composite_key);
@@ -435,10 +430,8 @@ impl<K: TransactionKind, T: DupSort> DbDupCursorRO<T> for Cursor<K, T> {
     ) -> Result<reth_db_api::cursor::DupWalker<'_, T, Self>, DatabaseError> {
         let start = match (key, subkey) {
             (Some(key), Some(subkey)) => {
-                let composite_key = Self::encode_dupsort_key(
-                    key.encode().as_ref(), 
-                    subkey.encode().as_ref()
-                );
+                let composite_key =
+                    Self::encode_dupsort_key(key.encode().as_ref(), subkey.encode().as_ref());
                 self.iterator.seek(&composite_key);
                 let result = if self.iterator.valid() {
                     if let (Some(key), Some(value)) = (self.iterator.key(), self.iterator.value()) {
@@ -459,15 +452,13 @@ impl<K: TransactionKind, T: DupSort> DbDupCursorRO<T> for Cursor<K, T> {
                 if let Some((key, _)) = self.first()? {
                     return self.walk_dup(Some(key), Some(subkey));
                 } else {
-                    Some(Err(DatabaseError::Read(DatabaseErrorInfo{
+                    Some(Err(DatabaseError::Read(DatabaseErrorInfo {
                         message: "Not Found".into(),
                         code: -1,
                     })))
                 }
             }
-            (None, None) => {
-                self.first().transpose()
-            }
+            (None, None) => self.first().transpose(),
         };
 
         Ok(reth_db_api::cursor::DupWalker { cursor: self, start })
@@ -480,7 +471,7 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<RW, T> {
         if self.iterator.valid() {
             if let Some(current_composite_key) = self.iterator.key() {
                 let main_key = Self::extract_main_key(current_composite_key)?;
-                
+
                 // Find and delete all entries with the same main key
                 let cf_handle = get_cf_handle::<T>(&self.db)?;
 

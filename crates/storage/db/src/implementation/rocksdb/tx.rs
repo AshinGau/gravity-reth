@@ -27,6 +27,30 @@ impl<K: cursor::TransactionKind> Tx<K> {
     pub(crate) fn new(db: Arc<DB>) -> Self {
         Self { db, _mode: std::marker::PhantomData }
     }
+
+    pub fn table_entries(&self, name: &str) -> Result<usize, DatabaseError> {
+        let cf_handle = self.db.cf_handle(name).ok_or_else(|| {
+            DatabaseError::Open(DatabaseErrorInfo {
+                message: format!("Column family '{}' not found", name).into(),
+                code: -1,
+            })
+        })?;
+
+        // Use property_value_cf to get estimated number of keys
+        match self.db.property_value_cf(cf_handle, "rocksdb.estimate-num-keys") {
+            Ok(Some(value)) => {
+                // Parse the string value to usize
+                value.parse::<usize>().map_err(|_| {
+                    DatabaseError::Read(DatabaseErrorInfo {
+                        message: "Failed to parse estimated number of keys".into(),
+                        code: -1,
+                    })
+                })
+            }
+            Ok(None) => Ok(0),
+            Err(e) => Err(rocksdb_error_to_database_error(e)),
+        }
+    }
 }
 
 impl<K: cursor::TransactionKind> DbTx for Tx<K> {
@@ -71,22 +95,7 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
     }
 
     fn entries<T: Table>(&self) -> Result<usize, DatabaseError> {
-        let cf_handle = get_cf_handle::<T>(&self.db)?;
-
-        // Use property_value_cf to get estimated number of keys
-        match self.db.property_value_cf(cf_handle, "rocksdb.estimate-num-keys") {
-            Ok(Some(value)) => {
-                // Parse the string value to usize
-                value.parse::<usize>().map_err(|_| {
-                    DatabaseError::Read(DatabaseErrorInfo {
-                        message: "Failed to parse estimated number of keys".into(),
-                        code: -1,
-                    })
-                })
-            }
-            Ok(None) => Ok(0),
-            Err(e) => Err(rocksdb_error_to_database_error(e)),
-        }
+        self.table_entries(T::NAME)
     }
 
     fn disable_long_read_transaction_safety(&mut self) {
@@ -142,30 +151,40 @@ impl DbTxMut for Tx<cursor::RW> {
                 // No data in this column family, nothing to clear
                 return Ok(());
             }
-            let first_key = iter.key().ok_or_else(|| DatabaseError::Read(DatabaseErrorInfo {
-                message: "Failed to get first key".into(),
-                code: -1,
-            }))?.to_vec();
-            
+            let first_key = iter
+                .key()
+                .ok_or_else(|| {
+                    DatabaseError::Read(DatabaseErrorInfo {
+                        message: "Failed to get first key".into(),
+                        code: -1,
+                    })
+                })?
+                .to_vec();
+
             iter.seek_to_last();
             if !iter.valid() {
                 // This shouldn't happen if we found a first key, but handle it gracefully
                 return Ok(());
             }
-            let last_key = iter.key().ok_or_else(|| DatabaseError::Read(DatabaseErrorInfo {
-                message: "Failed to get last key".into(),
-                code: -1,
-            }))?.to_vec();
-            
+            let last_key = iter
+                .key()
+                .ok_or_else(|| {
+                    DatabaseError::Read(DatabaseErrorInfo {
+                        message: "Failed to get last key".into(),
+                        code: -1,
+                    })
+                })?
+                .to_vec();
+
             (first_key, last_key)
         };
-        
+
         // Delete the range [first_key, last_key] - note that delete_range_cf is [start, end)
         // so we need to handle the last key separately
         self.db.delete_range_cf(cf_handle, &first_key, &last_key).map_err(|e| {
             create_write_error::<T>(e, DatabaseWriteOperation::Put, first_key.clone())
         })?;
-        
+
         // Delete the last key separately since delete_range_cf is [start, end)
         self.db.delete_cf(cf_handle, &last_key).map_err(|e| {
             create_write_error::<T>(e, DatabaseWriteOperation::Put, last_key.clone())

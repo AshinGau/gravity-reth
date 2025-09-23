@@ -9,12 +9,11 @@ use alloy_genesis::GenesisAccount;
 use alloy_primitives::{Address, Bytes, Log, B256, U256};
 use reth_codecs::{add_arbitrary_tests, Compact};
 use reth_ethereum_primitives::{Receipt, TransactionSigned, TxType};
-use reth_primitives_traits::{Account, Bytecode, StorageEntry};
+use reth_primitives_traits::{Account, Bytecode, StorageEntry, SubkeyContainedValue};
 use reth_prune_types::{PruneCheckpoint, PruneSegment};
 use reth_stages_types::StageCheckpoint;
 use reth_trie_common::{nested_trie::StorageNodeEntry, StoredNibbles, StoredNibblesSubKey, *};
 use serde::{Deserialize, Serialize};
-use reth_primitives_traits::SubkeyContainedValue;
 
 pub mod accounts;
 pub mod blocks;

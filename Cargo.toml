@@ -43,10 +43,6 @@ gravity-storage.workspace = true
 reth-metrics.workspace = true
 gravity-primitives.workspace = true
 
-[features]
-default = ["rocksdb"]
-rocksdb = ["reth-db/rocksdb"]
-
 [workspace.package]
 version = "1.6.0"
 edition = "2021"
