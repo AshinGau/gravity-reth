@@ -46,6 +46,7 @@ gravity-primitives.workspace = true
 [features]
 default = ["rocksdb"]
 rocksdb = ["reth-db/rocksdb"]
+mdbx = ["reth-db/mdbx"]
 
 [workspace.package]
 version = "1.6.0"

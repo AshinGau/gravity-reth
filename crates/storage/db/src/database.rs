@@ -12,10 +12,6 @@ use crate::implementation::mdbx::{DatabaseArguments, DatabaseEnv, DatabaseEnvKin
 #[cfg(all(feature = "rocksdb", not(feature = "mdbx")))]
 use crate::implementation::rocksdb::{DatabaseArguments, DatabaseEnv, DatabaseEnvKind};
 
-// When both features are enabled, prefer rocksdb
-#[cfg(all(feature = "mdbx", feature = "rocksdb"))]
-use crate::implementation::rocksdb::{DatabaseArguments, DatabaseEnv, DatabaseEnvKind};
-
 fn is_database_empty<P: AsRef<Path>>(path: P) -> bool {
     let path = path.as_ref();
 
