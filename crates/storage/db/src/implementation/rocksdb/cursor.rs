@@ -122,16 +122,6 @@ impl<K: TransactionKind, T: Table> Cursor<K, T> {
         self.db.get_cf(cf_handle, key).map_err(rocksdb_error_to_database_error)
     }
 
-    /// High-performance point query for DupSort tables - doesn't move cursor position  
-    fn point_get_dupsort(
-        &self,
-        key: &[u8],
-        subkey: &[u8],
-    ) -> Result<Option<Vec<u8>>, DatabaseError> {
-        let composite_key = Self::encode_dupsort_key(key, subkey);
-        self.point_get(&composite_key)
-    }
-
     fn decode_key_value(key: &[u8], value: &[u8]) -> Result<(T::Key, T::Value), DatabaseError> {
         let decoded_key = if T::DUPSORT {
             // For DupSort tables, key is composite: main_key + subkey
@@ -409,15 +399,21 @@ impl<K: TransactionKind, T: DupSort> DbDupCursorRO<T> for Cursor<K, T> {
     }
 
     fn seek_by_key_subkey(&mut self, key: T::Key, subkey: T::SubKey) -> ValueOnlyResult<T> {
+        let encoded_key = key.encode();
+        let encoded_subkey = subkey.encode();
         let composite_key =
-            Self::encode_dupsort_key(key.encode().as_ref(), subkey.encode().as_ref());
+            Self::encode_dupsort_key(encoded_key.as_ref(), encoded_subkey.as_ref());
 
         // Position iterator at the exact composite key
         self.iterator.seek(&composite_key);
         if self.iterator.valid() {
             if let (Some(found_key), Some(value)) = (self.iterator.key(), self.iterator.value()) {
-                let (_, decoded_value) = Self::decode_key_value(found_key, value)?;
-                return Ok(Some(decoded_value));
+                let main_key = Self::extract_main_key(found_key)?;
+                if main_key == encoded_key.as_ref() {
+                    let decompressed_value =
+                        T::Value::decompress(value).map_err(|_| DatabaseError::Decode)?;
+                    return Ok(Some(decompressed_value));
+                }
             }
         }
         Ok(None)
