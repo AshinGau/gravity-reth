@@ -46,6 +46,10 @@ pub use crate::implementation::mdbx::{DatabaseArguments, DatabaseEnv, DatabaseEn
 #[cfg(all(feature = "rocksdb", not(feature = "mdbx")))]
 pub use crate::implementation::rocksdb::{DatabaseArguments, DatabaseEnv, DatabaseEnvKind};
 
+// When both features are enabled, prefer rocksdb
+#[cfg(all(feature = "mdbx", feature = "rocksdb"))]
+pub use crate::implementation::rocksdb::{DatabaseArguments, DatabaseEnv, DatabaseEnvKind};
+
 pub use models::ClientVersion;
 pub use reth_db_api::*;
 
