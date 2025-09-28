@@ -141,7 +141,8 @@ impl<C: ChainSpecParser> EnvironmentArgs<C> {
             .static_file_provider()
             .check_consistency(&factory.provider()?, has_receipt_pruning)?
         {
-            if factory.db_ref().is_read_only()? {
+            // Check if database is read-only to avoid destructive operations
+            if factory.db_ref().is_read_only() {
                 warn!(target: "reth::cli", ?unwind_target, "Inconsistent storage. Restart node to heal.");
                 return Ok(factory)
             }
