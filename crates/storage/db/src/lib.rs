@@ -1,7 +1,7 @@
-//! MDBX implementation for reth's database abstraction layer.
+//! Database implementations for reth's database abstraction layer.
 //!
-//! This crate is an implementation of `reth-db-api` for MDBX, as well as a few other common
-//! database types.
+//! This crate provides implementations of `reth-db-api` for multiple database backends,
+//! including MDBX and RocksDB.
 //!
 //! # Overview
 //!
@@ -15,24 +15,25 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
+mod database;
 mod implementation;
 pub mod lockfile;
-#[cfg(feature = "mdbx")]
 mod metrics;
 pub mod static_file;
-#[cfg(feature = "mdbx")]
-mod utils;
 pub mod version;
 
-#[cfg(feature = "mdbx")]
-pub mod mdbx;
+// Backend-specific modules are now handled through the unified database module
+
+pub mod generic;
+
+use reth_trie_common as _;
 
 pub use reth_storage_errors::db::{DatabaseError, DatabaseWriteOperation};
-#[cfg(feature = "mdbx")]
-pub use utils::is_database_empty;
 
-#[cfg(feature = "mdbx")]
-pub use mdbx::{create_db, init_db, open_db, open_db_read_only, DatabaseEnv, DatabaseEnvKind};
+pub use generic::{create_db, init_db, open_db, open_db_read_only};
+
+// Always use RocksDB implementation
+pub use crate::implementation::rocksdb::{DatabaseArguments, DatabaseEnv, DatabaseEnvKind};
 
 pub use models::ClientVersion;
 pub use reth_db_api::*;
@@ -41,7 +42,7 @@ pub use reth_db_api::*;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils {
     use super::*;
-    use crate::mdbx::DatabaseArguments;
+    use crate::DatabaseArguments;
     use parking_lot::RwLock;
     use reth_db_api::{
         database::Database, database_metrics::DatabaseMetrics, models::ClientVersion,
@@ -213,7 +214,7 @@ pub mod test_utils {
 mod tests {
     use crate::{
         init_db,
-        mdbx::DatabaseArguments,
+        DatabaseArguments,
         open_db, tables,
         version::{db_version_file_path, DatabaseVersionError},
     };
