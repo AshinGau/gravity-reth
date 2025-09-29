@@ -6,7 +6,7 @@ use reth_db_api::{
     Tables,
 };
 use reth_storage_errors::db::{DatabaseErrorInfo, DatabaseWriteError, LogLevel};
-use rocksdb::{Options, DB};
+use rocksdb::{Options, TransactionDB, TransactionDBOptions};
 use std::{path::Path, sync::Arc};
 
 pub mod cursor;
@@ -82,12 +82,20 @@ impl Default for DatabaseArguments {
 }
 
 /// RocksDB database environment.
-#[derive(Debug)]
 pub struct DatabaseEnv {
-    /// Inner RocksDB database.
-    pub(crate) inner: Arc<DB>,
+    /// Inner RocksDB transaction database.
+    pub(crate) inner: Arc<TransactionDB>,
     /// Database environment kind (read-only or read-write).
     kind: DatabaseEnvKind,
+}
+
+impl std::fmt::Debug for DatabaseEnv {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DatabaseEnv")
+            .field("inner", &"<TransactionDB>")
+            .field("kind", &self.kind)
+            .finish()
+    }
 }
 
 impl DatabaseEnv {
@@ -103,9 +111,14 @@ impl DatabaseEnv {
 
         // Get all required table names
         let required_tables: Vec<String> = Tables::tables().map(|t| t.name().to_string()).collect();
-        let db = DB::open_cf(&opts, path, &required_tables)
-            .map_err(|e| DatabaseError::Other(format!("Failed to open RocksDB: {}", e)))?;
-        
+
+        // Use TransactionDB for proper transaction support
+        let txn_db_opts = TransactionDBOptions::default();
+        let db =
+            TransactionDB::open_cf(&opts, &txn_db_opts, path, &required_tables).map_err(|e| {
+                DatabaseError::Other(format!("Failed to open RocksDB TransactionDB: {}", e))
+            })?;
+
         Ok(Self { inner: Arc::new(db), kind })
     }
 
@@ -172,7 +185,7 @@ fn create_write_error<T: Table>(
 }
 
 /// Helper function to get column family handle with proper error handling
-fn get_cf_handle<T: Table>(db: &DB) -> Result<&rocksdb::ColumnFamily, DatabaseError> {
+fn get_cf_handle<T: Table>(db: &TransactionDB) -> Result<&rocksdb::ColumnFamily, DatabaseError> {
     db.cf_handle(T::NAME).ok_or_else(|| {
         DatabaseError::Open(DatabaseErrorInfo {
             message: format!("Column family '{}' not found", T::NAME).into(),

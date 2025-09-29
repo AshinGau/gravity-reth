@@ -2,13 +2,14 @@ use crate::{
     implementation::rocksdb::{create_write_error, get_cf_handle, rocksdb_error_to_database_error},
     DatabaseError,
 };
+use parking_lot::Mutex;
 use reth_db_api::{
     common::{IterPairResult, PairResult, ValueOnlyResult},
     cursor::{DbCursorRO, DbCursorRW, DbDupCursorRO, DbDupCursorRW, Walker},
     table::{Compress, Decode, Decompress, DupSort, Encode, Table},
 };
 use reth_storage_errors::db::{DatabaseErrorInfo, DatabaseWriteOperation};
-use rocksdb::DB;
+use rocksdb::{Transaction, TransactionDB};
 use std::{
     fmt::Debug,
     marker::PhantomData,
@@ -55,9 +56,11 @@ macro_rules! compress_to_buf_or_ref {
 
 /// RocksDB cursor with RawIterator caching for performance.
 pub struct Cursor<K: TransactionKind, T: Table> {
-    db: Arc<DB>,
+    db: Arc<TransactionDB>,
     /// Iterator for cursor operations - always ready to use
-    iterator: rocksdb::DBRawIterator<'static>,
+    iterator: rocksdb::DBRawIteratorWithThreadMode<'static, TransactionDB>,
+    /// Transaction for write operations
+    transaction: Arc<Mutex<Transaction<'static, TransactionDB>>>,
     /// Cache buffer that receives compressed values.
     buf: Vec<u8>,
     _phantom: PhantomData<(K, T)>,
@@ -66,18 +69,26 @@ pub struct Cursor<K: TransactionKind, T: Table> {
 impl<K: TransactionKind, T: Table> Cursor<K, T> {
     const KEY_LENGTH: usize = mem::size_of::<<T::Key as Encode>::Encoded>();
 
-    pub(crate) fn new(db: Arc<DB>) -> Result<Self, DatabaseError> {
+    /// Create cursor with existing transaction
+    pub(crate) fn new(
+        db: Arc<TransactionDB>,
+        transaction: Arc<Mutex<Transaction<'static, TransactionDB>>>,
+    ) -> Result<Self, DatabaseError> {
         let cf_handle = get_cf_handle::<T>(&db)?;
 
-        // Create iterator at construction time - always ready to use
-        let iterator = unsafe {
-            // SAFETY: We ensure the DB outlives the iterator by holding Arc<DB>
-            std::mem::transmute::<rocksdb::DBRawIterator<'_>, rocksdb::DBRawIterator<'static>>(
-                db.raw_iterator_cf(cf_handle),
-            )
+        // Create iterator using transaction to ensure consistency with writes
+        let iterator = {
+            let txn = transaction.lock();
+            unsafe {
+                // SAFETY: We ensure the Transaction outlives the iterator by holding Arc<Mutex<Transaction>>
+                std::mem::transmute::<
+                    rocksdb::DBRawIteratorWithThreadMode<'_, Transaction<'_, TransactionDB>>,
+                    rocksdb::DBRawIteratorWithThreadMode<'static, TransactionDB>,
+                >(txn.raw_iterator_cf(cf_handle))
+            }
         };
 
-        Ok(Self { db, iterator, buf: Vec::new(), _phantom: PhantomData })
+        Ok(Self { db, iterator, transaction, buf: Vec::new(), _phantom: PhantomData })
     }
 
     /// Encode DupSort composite key: key + subkey
@@ -278,14 +289,16 @@ impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
         let encoded_key = key.encode();
         let value_ref = compress_to_buf_or_ref!(self, value);
         let compressed_value = value_ref.unwrap_or(&self.buf);
+
+        let transaction = self.transaction.lock();
         if T::DUPSORT {
             let subkey = &compressed_value[..value.subkey_compress_length().unwrap()];
             let composite_key = Self::encode_dupsort_key(encoded_key.as_ref(), subkey);
-            self.db.put_cf(cf_handle, &composite_key, compressed_value).map_err(|e| {
+            transaction.put_cf(cf_handle, &composite_key, compressed_value).map_err(|e| {
                 create_write_error::<T>(e, DatabaseWriteOperation::Put, encoded_key.into())
             })
         } else {
-            self.db.put_cf(cf_handle, &encoded_key, compressed_value).map_err(|e| {
+            transaction.put_cf(cf_handle, &encoded_key, compressed_value).map_err(|e| {
                 create_write_error::<T>(e, DatabaseWriteOperation::Put, encoded_key.into())
             })
         }
@@ -304,7 +317,9 @@ impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
         if self.iterator.valid() {
             if let Some(key) = self.iterator.key() {
                 let cf_handle = get_cf_handle::<T>(&self.db)?;
-                self.db.delete_cf(cf_handle, key).map_err(|e| {
+
+                let transaction = self.transaction.lock();
+                transaction.delete_cf(cf_handle, key).map_err(|e| {
                     create_write_error::<T>(e, DatabaseWriteOperation::Put, key.to_vec())
                 })?;
             }
@@ -401,8 +416,7 @@ impl<K: TransactionKind, T: DupSort> DbDupCursorRO<T> for Cursor<K, T> {
     fn seek_by_key_subkey(&mut self, key: T::Key, subkey: T::SubKey) -> ValueOnlyResult<T> {
         let encoded_key = key.encode();
         let encoded_subkey = subkey.encode();
-        let composite_key =
-            Self::encode_dupsort_key(encoded_key.as_ref(), encoded_subkey.as_ref());
+        let composite_key = Self::encode_dupsort_key(encoded_key.as_ref(), encoded_subkey.as_ref());
 
         // Position iterator at the exact composite key
         self.iterator.seek(&composite_key);
@@ -491,9 +505,9 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<RW, T> {
                     }
                 }
 
-                // Delete all found keys
+                let transaction = self.transaction.lock();
                 for key_to_delete in keys_to_delete {
-                    self.db.delete_cf(cf_handle, &key_to_delete).map_err(|e| {
+                    transaction.delete_cf(cf_handle, &key_to_delete).map_err(|e| {
                         create_write_error::<T>(e, DatabaseWriteOperation::Put, key_to_delete)
                     })?;
                 }
@@ -514,7 +528,8 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<RW, T> {
         let subkey = &compressed_value[..value.subkey_compress_length().unwrap()];
         let composite_key = Self::encode_dupsort_key(encoded_key.as_ref(), subkey);
 
-        self.db.put_cf(cf_handle, &composite_key, compressed_value).map_err(|e| {
+        let transaction = self.transaction.lock();
+        transaction.put_cf(cf_handle, &composite_key, compressed_value).map_err(|e| {
             create_write_error::<T>(
                 e,
                 DatabaseWriteOperation::CursorAppendDup,
