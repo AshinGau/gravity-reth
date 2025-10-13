@@ -9,7 +9,7 @@ use reth_db_api::{
     table::{Compress, Decode, Decompress, DupSort, Encode, Table},
 };
 use reth_storage_errors::db::{DatabaseErrorInfo, DatabaseWriteOperation};
-use rocksdb::{Transaction, TransactionDB};
+use rocksdb::{MultiThreaded, Transaction, TransactionDB};
 use std::{
     fmt::Debug,
     marker::PhantomData,
@@ -56,11 +56,11 @@ macro_rules! compress_to_buf_or_ref {
 
 /// RocksDB cursor with RawIterator caching for performance.
 pub struct Cursor<K: TransactionKind, T: Table> {
-    db: Arc<TransactionDB>,
+    db: Arc<TransactionDB<MultiThreaded>>,
     /// Iterator for cursor operations - always ready to use
-    iterator: rocksdb::DBRawIteratorWithThreadMode<'static, TransactionDB>,
+    iterator: rocksdb::DBRawIteratorWithThreadMode<'static, TransactionDB<MultiThreaded>>,
     /// Transaction for write operations
-    transaction: Arc<Mutex<Transaction<'static, TransactionDB>>>,
+    transaction: Arc<Mutex<Transaction<'static, TransactionDB<MultiThreaded>>>>,
     /// Cache buffer that receives compressed values.
     buf: Vec<u8>,
     _phantom: PhantomData<(K, T)>,
@@ -71,10 +71,12 @@ impl<K: TransactionKind, T: Table> Cursor<K, T> {
 
     /// Create cursor with existing transaction
     pub(crate) fn new(
-        db: Arc<TransactionDB>,
-        transaction: Arc<Mutex<Transaction<'static, TransactionDB>>>,
+        db: Arc<TransactionDB<MultiThreaded>>,
+        transaction: Arc<Mutex<Transaction<'static, TransactionDB<MultiThreaded>>>>,
     ) -> Result<Self, DatabaseError> {
-        let cf_handle = get_cf_handle::<T>(&db)?;
+        // Clone db Arc to extend cf_handle lifetime
+        let db_for_cf = Arc::clone(&db);
+        let cf_handle = get_cf_handle::<T>(&db_for_cf)?;
 
         // Create iterator using transaction to ensure consistency with writes
         let iterator = {
@@ -82,9 +84,9 @@ impl<K: TransactionKind, T: Table> Cursor<K, T> {
             unsafe {
                 // SAFETY: We ensure the Transaction outlives the iterator by holding Arc<Mutex<Transaction>>
                 std::mem::transmute::<
-                    rocksdb::DBRawIteratorWithThreadMode<'_, Transaction<'_, TransactionDB>>,
-                    rocksdb::DBRawIteratorWithThreadMode<'static, TransactionDB>,
-                >(txn.raw_iterator_cf(cf_handle))
+                    rocksdb::DBRawIteratorWithThreadMode<'_, Transaction<'_, TransactionDB<MultiThreaded>>>,
+                    rocksdb::DBRawIteratorWithThreadMode<'static, TransactionDB<MultiThreaded>>,
+                >(txn.raw_iterator_cf(&cf_handle))
             }
         };
 
@@ -130,7 +132,7 @@ impl<K: TransactionKind, T: Table> Cursor<K, T> {
     /// High-performance point query - doesn't move cursor position
     fn point_get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, DatabaseError> {
         let cf_handle = get_cf_handle::<T>(&self.db)?;
-        self.db.get_cf(cf_handle, key).map_err(rocksdb_error_to_database_error)
+        self.db.get_cf(&cf_handle, key).map_err(rocksdb_error_to_database_error)
     }
 
     fn decode_key_value(key: &[u8], value: &[u8]) -> Result<(T::Key, T::Value), DatabaseError> {
@@ -294,11 +296,11 @@ impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
         if T::DUPSORT {
             let subkey = &compressed_value[..value.subkey_compress_length().unwrap()];
             let composite_key = Self::encode_dupsort_key(encoded_key.as_ref(), subkey);
-            transaction.put_cf(cf_handle, &composite_key, compressed_value).map_err(|e| {
+            transaction.put_cf(&cf_handle, &composite_key, compressed_value).map_err(|e| {
                 create_write_error::<T>(e, DatabaseWriteOperation::Put, encoded_key.into())
             })
         } else {
-            transaction.put_cf(cf_handle, &encoded_key, compressed_value).map_err(|e| {
+            transaction.put_cf(&cf_handle, &encoded_key, compressed_value).map_err(|e| {
                 create_write_error::<T>(e, DatabaseWriteOperation::Put, encoded_key.into())
             })
         }
@@ -319,7 +321,7 @@ impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
                 let cf_handle = get_cf_handle::<T>(&self.db)?;
 
                 let transaction = self.transaction.lock();
-                transaction.delete_cf(cf_handle, key).map_err(|e| {
+                transaction.delete_cf(&cf_handle, key).map_err(|e| {
                     create_write_error::<T>(e, DatabaseWriteOperation::Put, key.to_vec())
                 })?;
             }
@@ -487,7 +489,7 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<RW, T> {
 
                 // Create iterator to find all duplicates
                 let iter = self.db.iterator_cf(
-                    cf_handle,
+                    &cf_handle,
                     rocksdb::IteratorMode::From(main_key, rocksdb::Direction::Forward),
                 );
                 let mut keys_to_delete = Vec::new();
@@ -507,7 +509,7 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<RW, T> {
 
                 let transaction = self.transaction.lock();
                 for key_to_delete in keys_to_delete {
-                    transaction.delete_cf(cf_handle, &key_to_delete).map_err(|e| {
+                    transaction.delete_cf(&cf_handle, &key_to_delete).map_err(|e| {
                         create_write_error::<T>(e, DatabaseWriteOperation::Put, key_to_delete)
                     })?;
                 }
@@ -529,7 +531,7 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<RW, T> {
         let composite_key = Self::encode_dupsort_key(encoded_key.as_ref(), subkey);
 
         let transaction = self.transaction.lock();
-        transaction.put_cf(cf_handle, &composite_key, compressed_value).map_err(|e| {
+        transaction.put_cf(&cf_handle, &composite_key, compressed_value).map_err(|e| {
             create_write_error::<T>(
                 e,
                 DatabaseWriteOperation::CursorAppendDup,

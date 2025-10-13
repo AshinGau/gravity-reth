@@ -12,15 +12,15 @@ use reth_db_api::{
     transaction::{DbTx, DbTxMut},
 };
 use reth_storage_errors::db::DatabaseWriteOperation;
-use rocksdb::{Transaction, TransactionDB};
+use rocksdb::{MultiThreaded, Transaction, TransactionDB};
 use std::sync::Arc;
 
 pub use cursor::{RO, RW};
 
 /// RocksDB transaction.
 pub struct Tx<K: cursor::TransactionKind> {
-    db: Arc<TransactionDB>,
-    transaction: Arc<Mutex<Transaction<'static, TransactionDB>>>,
+    db: Arc<TransactionDB<MultiThreaded>>,
+    transaction: Arc<Mutex<Transaction<'static, TransactionDB<MultiThreaded>>>>,
     _mode: std::marker::PhantomData<K>,
 }
 
@@ -35,11 +35,11 @@ impl<K: cursor::TransactionKind> std::fmt::Debug for Tx<K> {
 }
 
 impl<K: cursor::TransactionKind> Tx<K> {
-    pub(crate) fn new(db: Arc<TransactionDB>) -> Self {
+    pub(crate) fn new(db: Arc<TransactionDB<MultiThreaded>>) -> Self {
         let transaction = unsafe {
             // SAFETY: We ensure the TransactionDB outlives the transaction by holding
-            // Arc<TransactionDB>
-            std::mem::transmute::<Transaction<'_, TransactionDB>, Transaction<'static, TransactionDB>>(
+            // Arc<TransactionDB<MultiThreaded>>
+            std::mem::transmute::<Transaction<'_, TransactionDB<MultiThreaded>>, Transaction<'static, TransactionDB<MultiThreaded>>>(
                 db.transaction(),
             )
         };
@@ -69,7 +69,7 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
         let transaction = self.transaction.lock();
 
         // Use transaction for read operations to ensure consistency
-        match transaction.get_cf(cf_handle, key) {
+        match transaction.get_cf(&cf_handle, key) {
             Ok(Some(value)) => {
                 T::Value::decompress(&value).map(Some).map_err(|_| DatabaseError::Decode)
             }
@@ -121,7 +121,7 @@ impl DbTxMut for Tx<cursor::RW> {
         let encoded_key = key.encode();
         let encoded_value = value.compress();
 
-        transaction.put_cf(cf_handle, &encoded_key, &encoded_value).map_err(|e| {
+        transaction.put_cf(&cf_handle, &encoded_key, &encoded_value).map_err(|e| {
             create_write_error::<T>(e, DatabaseWriteOperation::Put, encoded_key.as_ref().to_vec())
         })?;
 
@@ -137,7 +137,7 @@ impl DbTxMut for Tx<cursor::RW> {
         let transaction = self.transaction.lock();
 
         let encoded_key = key.encode();
-        match transaction.delete_cf(cf_handle, &encoded_key) {
+        match transaction.delete_cf(&cf_handle, &encoded_key) {
             Ok(()) => Ok(true),
             Err(e) => Err(create_write_error::<T>(
                 e,
@@ -147,24 +147,17 @@ impl DbTxMut for Tx<cursor::RW> {
         }
     }
 
-    fn clear<T: Table>(&self) -> Result<(), DatabaseError> {
-        let cf_handle = get_cf_handle::<T>(&self.db)?;
-        let transaction = self.transaction.lock();
-
-        // Simple iteration and delete
-        let mut iter = self.db.raw_iterator_cf(cf_handle);
-        iter.seek_to_first();
-
-        while iter.valid() {
-            if let Some(key) = iter.key() {
-                transaction.delete_cf(cf_handle, key).map_err(|e| {
-                    create_write_error::<T>(e, DatabaseWriteOperation::Put, key.to_vec())
-                })?;
-                iter.next();
-            } else {
-                break;
-            }
-        }
+    fn clear<T: Table>(&self) -> Result<(), DatabaseError> {        
+        let table_name = T::NAME;
+        // Drop the column family
+        self.db.drop_cf(table_name).map_err(|e| {
+            DatabaseError::Other(format!("Failed to drop column family {}: {}", table_name, e))
+        })?;
+        // Recreate the column family with default options
+        let opts = rocksdb::Options::default();
+        self.db.create_cf(table_name, &opts).map_err(|e| {
+            DatabaseError::Other(format!("Failed to create column family {}: {}", table_name, e))
+        })?;
 
         Ok(())
     }

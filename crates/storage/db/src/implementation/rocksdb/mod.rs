@@ -6,7 +6,7 @@ use reth_db_api::{
     Tables,
 };
 use reth_storage_errors::db::{DatabaseErrorInfo, DatabaseWriteError, LogLevel};
-use rocksdb::{Options, TransactionDB, TransactionDBOptions};
+use rocksdb::{MultiThreaded, Options, TransactionDB, TransactionDBOptions};
 use std::{path::Path, sync::Arc};
 
 pub mod cursor;
@@ -84,7 +84,7 @@ impl Default for DatabaseArguments {
 /// RocksDB database environment.
 pub struct DatabaseEnv {
     /// Inner RocksDB transaction database.
-    pub(crate) inner: Arc<TransactionDB>,
+    pub(crate) inner: Arc<TransactionDB<MultiThreaded>>,
     /// Database environment kind (read-only or read-write).
     kind: DatabaseEnvKind,
 }
@@ -115,7 +115,7 @@ impl DatabaseEnv {
         // Use TransactionDB for proper transaction support
         let txn_db_opts = TransactionDBOptions::default();
         let db =
-            TransactionDB::open_cf(&opts, &txn_db_opts, path, &required_tables).map_err(|e| {
+            TransactionDB::<MultiThreaded>::open_cf(&opts, &txn_db_opts, path, &required_tables).map_err(|e| {
                 DatabaseError::Other(format!("Failed to open RocksDB TransactionDB: {}", e))
             })?;
 
@@ -185,7 +185,7 @@ fn create_write_error<T: Table>(
 }
 
 /// Helper function to get column family handle with proper error handling
-fn get_cf_handle<T: Table>(db: &TransactionDB) -> Result<&rocksdb::ColumnFamily, DatabaseError> {
+fn get_cf_handle<T: Table>(db: &TransactionDB<MultiThreaded>) -> Result<Arc<rocksdb::BoundColumnFamily<'_>>, DatabaseError> {
     db.cf_handle(T::NAME).ok_or_else(|| {
         DatabaseError::Open(DatabaseErrorInfo {
             message: format!("Column family '{}' not found", T::NAME).into(),
