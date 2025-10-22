@@ -12,7 +12,7 @@ use reth_static_file_types::StaticFileSegment;
 use reth_storage_api::{DBProvider, StageCheckpointWriter, TransactionsProviderExt};
 use reth_storage_errors::writer::UnifiedStorageWriterError;
 use revm_database::OriginalValuesKnown;
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 use tracing::debug;
 
 /// [`UnifiedStorageWriter`] is responsible for managing the writing to storage with both database
@@ -150,6 +150,7 @@ where
         let first_number = first_block.number();
         let last_block_number = last_block.number();
 
+        let block_count = blocks.len();
         debug!(target: "provider::storage_writer", block_count = %blocks.len(), "Writing blocks and execution data to storage");
 
         // TODO: Do performant / batched writes for each type of object
@@ -169,9 +170,12 @@ where
         {
             let block_hash = recovered_block.hash();
 
+            let start = Instant::now();
             #[cfg(not(feature = "pipe_test"))]
             self.database()
                 .insert_block(Arc::unwrap_or_clone(recovered_block), StorageLocation::Both)?;
+            metrics::histogram!("write_insert_block_time").record(start.elapsed());
+            let start = Instant::now();
             // Write state and changesets to the database.
             // Must be written after blocks because of the receipt lookup.
             self.database().write_state(
@@ -179,15 +183,21 @@ where
                 OriginalValuesKnown::No,
                 StorageLocation::StaticFiles,
             )?;
-
+            metrics::histogram!("write_state_time").record(start.elapsed());
+            let start = Instant::now();
             // insert hashes and intermediate merkle nodes
             self.database()
                 .write_hashed_state(&Arc::unwrap_or_clone(hashed_state).into_sorted())?;
+            metrics::histogram!("write_hashed_state_time").record(start.elapsed());
+            let start = Instant::now();
             let _ = self.database().write_trie_updatesv2(triev2.as_ref())?;
+            metrics::histogram!("write_trie_updatesv2_time").record(start.elapsed());
         }
 
+        let start = Instant::now();
         // update history indices
         self.database().update_history_indices(first_number..=last_block_number)?;
+        metrics::histogram!("update_history_indices_time").record(start.elapsed() / block_count as u32);
 
         // Update pipeline progress
         self.database().update_pipeline_stages(last_block_number, false)?;
