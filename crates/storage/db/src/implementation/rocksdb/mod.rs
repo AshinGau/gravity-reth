@@ -8,6 +8,7 @@ use reth_db_api::{
 use reth_storage_errors::db::{DatabaseErrorInfo, DatabaseWriteError, LogLevel};
 use rocksdb::{Options, DB};
 use std::{path::Path, sync::Arc};
+use metrics::Label;
 
 pub mod cursor;
 pub mod tx;
@@ -133,8 +134,127 @@ impl DatabaseEnv {
 }
 
 impl DatabaseMetrics for DatabaseEnv {
-    fn report_metrics(&self) {
-        // TODO: Implement metrics reporting for RocksDB
+    fn histogram_metrics(&self) -> Vec<(&'static str, f64, Vec<Label>)> {
+        let mut metrics = Vec::new();
+        
+        // 1. rocksdb.actual-delayed-write-rate
+        // Gets the actual delayed write rate (bytes/sec) when write stall occurs
+        if let Ok(Some(value)) = self.inner.property_value("rocksdb.actual-delayed-write-rate") {
+            if let Ok(rate) = value.parse::<u64>() {
+                metrics.push((
+                    "rocksdb.actual_delayed_write_rate",
+                    rate as f64,
+                    vec![],
+                ));
+            }
+        }
+        
+        // 2. rocksdb.is-write-stopped
+        // Indicates whether writes are completely stopped (0 = no, 1 = yes)
+        if let Ok(Some(value)) = self.inner.property_value("rocksdb.is-write-stopped") {
+            if let Ok(stopped) = value.parse::<u64>() {
+                metrics.push((
+                    "rocksdb.is_write_stopped",
+                    stopped as f64,
+                    vec![],
+                ));
+            }
+        }
+        
+        // 3. rocksdb.cfstats.stall-micros
+        // Collect stall statistics for each column family
+        for table_name in Tables::tables().map(|t| t.name()) {
+            if let Some(cf) = self.inner.cf_handle(table_name) {
+                // Get cfstats string and parse stall-related microseconds
+                if let Ok(Some(cfstats)) = self.inner.property_value_cf(cf, "rocksdb.cfstats") {
+                    // Parse stall metrics from cfstats
+                    // The cfstats format contains multiple lines, we need to find lines with "Stall"
+                    let stall_micros = parse_stall_micros_from_cfstats(&cfstats);
+                    
+                    if let Some(total_stall) = stall_micros.total {
+                        metrics.push((
+                            "rocksdb.cfstats.stall_micros",
+                            total_stall as f64,
+                            vec![
+                                Label::new("cf", table_name),
+                                Label::new("type", "total"),
+                            ],
+                        ));
+                    }
+                    
+                    if let Some(level0_slowdown) = stall_micros.level0_slowdown {
+                        metrics.push((
+                            "rocksdb.cfstats.stall_micros",
+                            level0_slowdown as f64,
+                            vec![
+                                Label::new("cf", table_name),
+                                Label::new("type", "level0_slowdown"),
+                            ],
+                        ));
+                    }
+                    
+                    if let Some(level0_numfiles) = stall_micros.level0_numfiles {
+                        metrics.push((
+                            "rocksdb.cfstats.stall_micros",
+                            level0_numfiles as f64,
+                            vec![
+                                Label::new("cf", table_name),
+                                Label::new("type", "level0_numfiles"),
+                            ],
+                        ));
+                    }
+                    
+                    if let Some(pending_compaction) = stall_micros.pending_compaction_bytes {
+                        metrics.push((
+                            "rocksdb.cfstats.stall_micros",
+                            pending_compaction as f64,
+                            vec![
+                                Label::new("cf", table_name),
+                                Label::new("type", "pending_compaction_bytes"),
+                            ],
+                        ));
+                    }
+                }
+            }
+        }
+        
+        // 4. rocksdb.cur-size-all-mem-tables
+        // Total size of all memory tables in bytes
+        if let Ok(Some(value)) = self.inner.property_value("rocksdb.cur-size-all-mem-tables") {
+            if let Ok(size) = value.parse::<u64>() {
+                metrics.push((
+                    "rocksdb.cur_size_all_mem_tables",
+                    size as f64,
+                    vec![],
+                ));
+            }
+        }
+        
+        // 5. rocksdb.num-running-compactions
+        // Number of currently running compactions
+        if let Ok(Some(value)) = self.inner.property_value("rocksdb.num-running-compactions") {
+            if let Ok(num) = value.parse::<u64>() {
+                metrics.push((
+                    "rocksdb.num_running_compactions",
+                    num as f64,
+                    vec![],
+                ));
+            }
+        }
+        
+        // 6. rocksdb.num-running-flushes
+        // Number of currently running flushes
+        if let Ok(Some(value)) = self.inner.property_value("rocksdb.num-running-flushes") {
+            if let Ok(num) = value.parse::<u64>() {
+                metrics.push((
+                    "rocksdb.num_running_flushes",
+                    num as f64,
+                    vec![],
+                ));
+            }
+        }
+        
+        metrics
     }
 }
 
@@ -179,4 +299,80 @@ fn get_cf_handle<T: Table>(db: &DB) -> Result<&rocksdb::ColumnFamily, DatabaseEr
             code: -1,
         })
     })
+}
+
+/// Stall-related statistics in microseconds
+#[derive(Debug, Default)]
+struct StallMicros {
+    /// Total stall time
+    total: Option<u64>,
+    /// Stall time caused by level0 slowdown
+    level0_slowdown: Option<u64>,
+    /// Stall time caused by level0 file number limit
+    level0_numfiles: Option<u64>,
+    /// Stall time caused by pending compaction bytes limit
+    pending_compaction_bytes: Option<u64>,
+}
+
+/// Parses stall-related microseconds from RocksDB cfstats string
+/// 
+/// Example cfstats format:
+/// ```
+/// ** Compaction Stats [default] **
+/// Level    Files   Size     ...
+/// Stall(count): level0_slowdown: 5, level0_numfiles: 0, ...
+/// Stall(us): level0_slowdown: 1234567, level0_numfiles: 0, ...
+/// ```
+fn parse_stall_micros_from_cfstats(cfstats: &str) -> StallMicros {
+    let mut result = StallMicros::default();
+    
+    // Find lines containing "Stall(us):"
+    for line in cfstats.lines() {
+        let line = line.trim();
+        
+        if line.starts_with("Stall(us):") || line.contains("Stall(us):") {
+            // Parse format: "Stall(us): level0_slowdown: 1234, level0_numfiles: 5678, ..."
+            // Remove "Stall(us):" prefix
+            let content = line.strip_prefix("Stall(us):").unwrap_or(line);
+            
+            // Split by different stall types
+            for part in content.split(',') {
+                let part = part.trim();
+                if let Some((key, value)) = part.split_once(':') {
+                    let key = key.trim();
+                    let value = value.trim();
+                    
+                    if let Ok(micros) = value.parse::<u64>() {
+                        match key {
+                            "level0_slowdown" => result.level0_slowdown = Some(micros),
+                            "level0_numfiles" | "level0_numfiles_limit" => {
+                                result.level0_numfiles = Some(micros)
+                            }
+                            "pending_compaction_bytes" | "pending_compaction_bytes_limit" => {
+                                result.pending_compaction_bytes = Some(micros)
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            
+            // Calculate total stall time
+            let mut total = 0u64;
+            if let Some(v) = result.level0_slowdown {
+                total += v;
+            }
+            if let Some(v) = result.level0_numfiles {
+                total += v;
+            }
+            if let Some(v) = result.pending_compaction_bytes {
+                total += v;
+            }
+            if total > 0 {
+                result.total = Some(total);
+            }
+        }
+    }
+    
+    result
 }
