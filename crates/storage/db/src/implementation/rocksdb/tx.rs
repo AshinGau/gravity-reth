@@ -11,21 +11,94 @@ use reth_db_api::{
     transaction::{DbTx, DbTxMut},
 };
 use reth_storage_errors::db::{DatabaseErrorInfo, DatabaseWriteOperation};
-use rocksdb::DB;
-use std::sync::Arc;
+use rocksdb::{DB, WriteBatch};
+use std::{cell::UnsafeCell, sync::Arc};
 
 pub use cursor::{RO, RW};
+
+/// Single-threaded WriteBatch container.
+///
+/// # Safety
+/// Caller MUST ensure that only one thread accesses this at a time.
+/// This is guaranteed by the business layer using the database in a single thread.
+pub(crate) struct SingleThreadedBatch {
+    inner: UnsafeCell<WriteBatch>,
+}
+
+// SAFETY: Business layer guarantees single-threaded access
+unsafe impl Send for SingleThreadedBatch {}
+unsafe impl Sync for SingleThreadedBatch {}
+
+impl SingleThreadedBatch {
+    fn new() -> Self {
+        Self { inner: UnsafeCell::new(WriteBatch::default()) }
+    }
+
+    /// Get mutable pointer to the WriteBatch.
+    ///
+    /// # Safety
+    /// Caller MUST ensure single-threaded access
+    #[inline]
+    unsafe fn get_ptr(&self) -> *mut WriteBatch {
+        self.inner.get()
+    }
+
+    /// Take ownership of the inner WriteBatch.
+    ///
+    /// # Safety
+    /// This consumes self, so it's safe
+    #[inline]
+    fn into_inner(self) -> WriteBatch {
+        self.inner.into_inner()
+    }
+}
+
+impl std::fmt::Debug for SingleThreadedBatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SingleThreadedBatch").finish()
+    }
+}
+
+/// Write mode for transactions
+#[derive(Debug)]
+pub(crate) enum WriteMode {
+    /// Direct write mode - writes directly to DB
+    Direct,
+    /// Batch write mode - accumulates writes in a single WriteBatch
+    /// All Tx and Cursor operations share the same WriteBatch
+    /// 
+    /// SAFETY: Business layer guarantees single-threaded access and Tx outlives all Cursors
+    Batch(SingleThreadedBatch),
+}
 
 /// RocksDB transaction.
 #[derive(Debug)]
 pub struct Tx<K: cursor::TransactionKind> {
     db: Arc<DB>,
+    write_mode: WriteMode,
     _mode: std::marker::PhantomData<K>,
 }
 
 impl<K: cursor::TransactionKind> Tx<K> {
     pub(crate) fn new(db: Arc<DB>) -> Self {
-        Self { db, _mode: std::marker::PhantomData }
+        Self { db, write_mode: WriteMode::Direct, _mode: std::marker::PhantomData }
+    }
+
+    pub(crate) fn new_batch(db: Arc<DB>) -> Self {
+        let batch = SingleThreadedBatch::new();
+        Self { db, write_mode: WriteMode::Batch(batch), _mode: std::marker::PhantomData }
+    }
+
+    /// Get a mutable pointer to the shared WriteBatch
+    ///
+    /// # Safety
+    /// Caller must ensure single-threaded access
+    #[inline]
+    unsafe fn get_batch_ptr(&self) -> Option<*mut WriteBatch> {
+        match &self.write_mode {
+            WriteMode::Direct => None,
+            WriteMode::Batch(batch) => Some(batch.get_ptr()),
+        }
     }
 
     pub fn table_entries(&self, name: &str) -> Result<usize, DatabaseError> {
@@ -78,7 +151,21 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
     }
 
     fn commit(self) -> Result<bool, DatabaseError> {
-        // For RocksDB, there's no explicit commit
+        // For batch mode, write the shared WriteBatch to DB
+        if let WriteMode::Batch(batch) = self.write_mode {
+            let batch = batch.into_inner();
+            self.db.write(batch).map_err(|e| {
+                DatabaseError::Write(Box::new(reth_storage_errors::db::DatabaseWriteError {
+                    info: DatabaseErrorInfo {
+                        message: format!("Failed to commit batch: {}", e).into(),
+                        code: -1,
+                    },
+                    operation: DatabaseWriteOperation::Put,
+                    table_name: "<batch>",
+                    key: vec![],
+                }))
+            })?;
+        }
         Ok(true)
     }
 
@@ -87,11 +174,11 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
     }
 
     fn cursor_read<T: Table>(&self) -> Result<Self::Cursor<T>, DatabaseError> {
-        cursor::Cursor::new(self.db.clone())
+        cursor::Cursor::new_read(self.db.clone())
     }
 
     fn cursor_dup_read<T: DupSort>(&self) -> Result<Self::DupCursor<T>, DatabaseError> {
-        cursor::Cursor::new(self.db.clone())
+        cursor::Cursor::new_read(self.db.clone())
     }
 
     fn entries<T: Table>(&self) -> Result<usize, DatabaseError> {
@@ -114,9 +201,24 @@ impl DbTxMut for Tx<cursor::RW> {
         let encoded_key = key.encode();
         let encoded_value = value.compress();
 
-        self.db.put_cf(cf_handle, &encoded_key, &encoded_value).map_err(|e| {
-            create_write_error::<T>(e, DatabaseWriteOperation::Put, encoded_key.as_ref().to_vec())
-        })?;
+        match &self.write_mode {
+            WriteMode::Direct => {
+                self.db.put_cf(cf_handle, &encoded_key, &encoded_value).map_err(|e| {
+                    create_write_error::<T>(
+                        e,
+                        DatabaseWriteOperation::Put,
+                        encoded_key.as_ref().to_vec(),
+                    )
+                })?;
+            }
+            WriteMode::Batch(_) => {
+                // SAFETY: Business layer guarantees single-threaded access
+                unsafe {
+                    let batch = self.get_batch_ptr().unwrap();
+                    (*batch).put_cf(cf_handle, &encoded_key, &encoded_value);
+                }
+            }
+        }
 
         Ok(())
     }
@@ -130,13 +232,25 @@ impl DbTxMut for Tx<cursor::RW> {
 
         let encoded_key = key.encode();
 
-        match self.db.delete_cf(cf_handle, &encoded_key) {
-            Ok(()) => Ok(true),
-            Err(e) => Err(create_write_error::<T>(
-                e,
-                DatabaseWriteOperation::Put,
-                encoded_key.as_ref().to_vec(),
-            )),
+        match &self.write_mode {
+            WriteMode::Direct => {
+                match self.db.delete_cf(cf_handle, &encoded_key) {
+                    Ok(()) => Ok(true),
+                    Err(e) => Err(create_write_error::<T>(
+                        e,
+                        DatabaseWriteOperation::Put,
+                        encoded_key.as_ref().to_vec(),
+                    )),
+                }
+            }
+            WriteMode::Batch(_) => {
+                // SAFETY: Business layer guarantees single-threaded access
+                unsafe {
+                    let batch = self.get_batch_ptr().unwrap();
+                    (*batch).delete_cf(cf_handle, &encoded_key);
+                }
+                Ok(true)
+            }
         }
     }
 
@@ -179,26 +293,44 @@ impl DbTxMut for Tx<cursor::RW> {
             (first_key, last_key)
         };
 
-        // Delete the range [first_key, last_key] - note that delete_range_cf is [start, end)
-        // so we need to handle the last key separately
-        self.db.delete_range_cf(cf_handle, &first_key, &last_key).map_err(|e| {
-            create_write_error::<T>(e, DatabaseWriteOperation::Put, first_key.clone())
-        })?;
+        match &self.write_mode {
+            WriteMode::Direct => {
+                // Delete the range [first_key, last_key] - note that delete_range_cf is [start,
+                // end) so we need to handle the last key separately
+                self.db.delete_range_cf(cf_handle, &first_key, &last_key).map_err(|e| {
+                    create_write_error::<T>(e, DatabaseWriteOperation::Put, first_key.clone())
+                })?;
 
-        // Delete the last key separately since delete_range_cf is [start, end)
-        self.db.delete_cf(cf_handle, &last_key).map_err(|e| {
-            create_write_error::<T>(e, DatabaseWriteOperation::Put, last_key.clone())
-        })?;
+                // Delete the last key separately since delete_range_cf is [start, end)
+                self.db.delete_cf(cf_handle, &last_key).map_err(|e| {
+                    create_write_error::<T>(e, DatabaseWriteOperation::Put, last_key.clone())
+                })?;
+            }
+            WriteMode::Batch(_) => {
+                // SAFETY: Business layer guarantees single-threaded access
+                unsafe {
+                    let batch = self.get_batch_ptr().unwrap();
+                    (*batch).delete_range_cf(cf_handle, &first_key, &last_key);
+                    (*batch).delete_cf(cf_handle, &last_key);
+                }
+            }
+        }
 
         Ok(())
     }
 
     fn cursor_write<T: Table>(&self) -> Result<Self::CursorMut<T>, DatabaseError> {
-        cursor::Cursor::new(self.db.clone())
+        // Share the same WriteBatch pointer with cursor
+        // SAFETY: Business layer guarantees single-threaded access and Tx outlives Cursor
+        let batch_ptr = unsafe { self.get_batch_ptr() };
+        cursor::Cursor::new_write(self.db.clone(), batch_ptr)
     }
 
     fn cursor_dup_write<T: DupSort>(&self) -> Result<Self::DupCursorMut<T>, DatabaseError> {
-        cursor::Cursor::new(self.db.clone())
+        // Share the same WriteBatch pointer with cursor
+        // SAFETY: Business layer guarantees single-threaded access and Tx outlives Cursor
+        let batch_ptr = unsafe { self.get_batch_ptr() };
+        cursor::Cursor::new_write(self.db.clone(), batch_ptr)
     }
 }
 

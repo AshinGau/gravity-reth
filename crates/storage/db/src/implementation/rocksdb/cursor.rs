@@ -53,6 +53,22 @@ macro_rules! compress_to_buf_or_ref {
     };
 }
 
+/// Wrapper for WriteBatch pointer that is Send + Sync
+/// 
+/// SAFETY: Business layer guarantees single-threaded access
+struct BatchPtr(*mut rocksdb::WriteBatch);
+
+// SAFETY: Business layer guarantees single-threaded access
+unsafe impl Send for BatchPtr {}
+unsafe impl Sync for BatchPtr {}
+
+impl BatchPtr {
+    #[inline]
+    fn as_ptr(&self) -> *mut rocksdb::WriteBatch {
+        self.0
+    }
+}
+
 /// RocksDB cursor with RawIterator caching for performance.
 pub struct Cursor<K: TransactionKind, T: Table> {
     db: Arc<DB>,
@@ -60,13 +76,18 @@ pub struct Cursor<K: TransactionKind, T: Table> {
     iterator: rocksdb::DBRawIterator<'static>,
     /// Cache buffer that receives compressed values.
     buf: Vec<u8>,
+    /// Pointer to this cursor's WriteBatch (for write cursors in batch mode)
+    /// 
+    /// SAFETY: Business layer guarantees Tx outlives all Cursors, so this pointer remains valid
+    batch_ptr: Option<BatchPtr>,
     _phantom: PhantomData<(K, T)>,
 }
 
 impl<K: TransactionKind, T: Table> Cursor<K, T> {
     const KEY_LENGTH: usize = mem::size_of::<<T::Key as Encode>::Encoded>();
 
-    pub(crate) fn new(db: Arc<DB>) -> Result<Self, DatabaseError> {
+    /// Create a read-only cursor
+    pub(crate) fn new_read(db: Arc<DB>) -> Result<Self, DatabaseError> {
         let cf_handle = get_cf_handle::<T>(&db)?;
 
         // Create iterator at construction time - always ready to use
@@ -77,7 +98,34 @@ impl<K: TransactionKind, T: Table> Cursor<K, T> {
             )
         };
 
-        Ok(Self { db, iterator, buf: Vec::new(), _phantom: PhantomData })
+        Ok(Self { db, iterator, buf: Vec::new(), batch_ptr: None, _phantom: PhantomData })
+    }
+
+    /// Create a write cursor with optional WriteBatch pointer
+    /// 
+    /// # Safety
+    /// If batch_ptr is Some, caller must ensure Tx outlives this Cursor
+    pub(crate) fn new_write(
+        db: Arc<DB>,
+        batch_ptr: Option<*mut rocksdb::WriteBatch>,
+    ) -> Result<Self, DatabaseError> {
+        let cf_handle = get_cf_handle::<T>(&db)?;
+
+        // Create iterator at construction time - always ready to use
+        let iterator = unsafe {
+            // SAFETY: We ensure the DB outlives the iterator by holding Arc<DB>
+            std::mem::transmute::<rocksdb::DBRawIterator<'_>, rocksdb::DBRawIterator<'static>>(
+                db.raw_iterator_cf(cf_handle),
+            )
+        };
+
+        Ok(Self {
+            db,
+            iterator,
+            buf: Vec::new(),
+            batch_ptr: batch_ptr.map(BatchPtr),
+            _phantom: PhantomData,
+        })
     }
 
     /// Encode DupSort composite key: key + subkey
@@ -278,16 +326,34 @@ impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
         let encoded_key = key.encode();
         let value_ref = compress_to_buf_or_ref!(self, value);
         let compressed_value = value_ref.unwrap_or(&self.buf);
+
         if T::DUPSORT {
             let subkey = &compressed_value[..value.subkey_compress_length().unwrap()];
             let composite_key = Self::encode_dupsort_key(encoded_key.as_ref(), subkey);
-            self.db.put_cf(cf_handle, &composite_key, compressed_value).map_err(|e| {
-                create_write_error::<T>(e, DatabaseWriteOperation::Put, encoded_key.into())
-            })
+
+            if let Some(ref batch_ptr) = self.batch_ptr {
+                // SAFETY: Business layer guarantees single-threaded access and Tx outlives Cursor
+                unsafe {
+                    (*batch_ptr.as_ptr()).put_cf(cf_handle, &composite_key, compressed_value);
+                }
+                Ok(())
+            } else {
+                self.db.put_cf(cf_handle, &composite_key, compressed_value).map_err(|e| {
+                    create_write_error::<T>(e, DatabaseWriteOperation::Put, encoded_key.into())
+                })
+            }
         } else {
-            self.db.put_cf(cf_handle, &encoded_key, compressed_value).map_err(|e| {
-                create_write_error::<T>(e, DatabaseWriteOperation::Put, encoded_key.into())
-            })
+            if let Some(ref batch_ptr) = self.batch_ptr {
+                // SAFETY: Business layer guarantees single-threaded access and Tx outlives Cursor
+                unsafe {
+                    (*batch_ptr.as_ptr()).put_cf(cf_handle, &encoded_key, compressed_value);
+                }
+                Ok(())
+            } else {
+                self.db.put_cf(cf_handle, &encoded_key, compressed_value).map_err(|e| {
+                    create_write_error::<T>(e, DatabaseWriteOperation::Put, encoded_key.into())
+                })
+            }
         }
     }
 
@@ -304,9 +370,17 @@ impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
         if self.iterator.valid() {
             if let Some(key) = self.iterator.key() {
                 let cf_handle = get_cf_handle::<T>(&self.db)?;
-                self.db.delete_cf(cf_handle, key).map_err(|e| {
-                    create_write_error::<T>(e, DatabaseWriteOperation::Put, key.to_vec())
-                })?;
+
+                if let Some(ref batch_ptr) = self.batch_ptr {
+                    // SAFETY: Business layer guarantees single-threaded access and Tx outlives Cursor
+                    unsafe {
+                        (*batch_ptr.as_ptr()).delete_cf(cf_handle, key);
+                    }
+                } else {
+                    self.db.delete_cf(cf_handle, key).map_err(|e| {
+                        create_write_error::<T>(e, DatabaseWriteOperation::Put, key.to_vec())
+                    })?;
+                }
             }
         }
         Ok(())
@@ -492,10 +566,19 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<RW, T> {
                 }
 
                 // Delete all found keys
-                for key_to_delete in keys_to_delete {
-                    self.db.delete_cf(cf_handle, &key_to_delete).map_err(|e| {
-                        create_write_error::<T>(e, DatabaseWriteOperation::Put, key_to_delete)
-                    })?;
+                if let Some(ref batch_ptr) = self.batch_ptr {
+                    // SAFETY: Business layer guarantees single-threaded access and Tx outlives Cursor
+                    unsafe {
+                        for key_to_delete in keys_to_delete {
+                            (*batch_ptr.as_ptr()).delete_cf(cf_handle, &key_to_delete);
+                        }
+                    }
+                } else {
+                    for key_to_delete in keys_to_delete {
+                        self.db.delete_cf(cf_handle, &key_to_delete).map_err(|e| {
+                            create_write_error::<T>(e, DatabaseWriteOperation::Put, key_to_delete)
+                        })?;
+                    }
                 }
             }
         }
@@ -514,12 +597,20 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<RW, T> {
         let subkey = &compressed_value[..value.subkey_compress_length().unwrap()];
         let composite_key = Self::encode_dupsort_key(encoded_key.as_ref(), subkey);
 
-        self.db.put_cf(cf_handle, &composite_key, compressed_value).map_err(|e| {
-            create_write_error::<T>(
-                e,
-                DatabaseWriteOperation::CursorAppendDup,
-                composite_key.clone(),
-            )
-        })
+        if let Some(ref batch_ptr) = self.batch_ptr {
+            // SAFETY: Business layer guarantees single-threaded access and Tx outlives Cursor
+            unsafe {
+                (*batch_ptr.as_ptr()).put_cf(cf_handle, &composite_key, compressed_value);
+            }
+            Ok(())
+        } else {
+            self.db.put_cf(cf_handle, &composite_key, compressed_value).map_err(|e| {
+                create_write_error::<T>(
+                    e,
+                    DatabaseWriteOperation::CursorAppendDup,
+                    composite_key.clone(),
+                )
+            })
+        }
     }
 }

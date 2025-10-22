@@ -270,6 +270,10 @@ impl reth_db_api::database::Database for DatabaseEnv {
     fn tx_mut(&self) -> Result<Self::TXMut, crate::DatabaseError> {
         Ok(tx::Tx::new(self.inner.clone()))
     }
+
+    fn tx_batch(&self) -> Result<Self::TXMut, DatabaseError> {
+        Ok(tx::Tx::new_batch(self.inner.clone()))
+    }
 }
 
 /// Helper function to convert RocksDB errors to DatabaseError

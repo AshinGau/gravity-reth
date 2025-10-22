@@ -157,6 +157,11 @@ pub trait DatabaseProviderFactory: Send + Sync {
 
     /// Create new read-write database provider.
     fn database_provider_rw(&self) -> ProviderResult<Self::ProviderRW>;
+
+    /// Create new read-write databasd provider with batch buffer.
+    fn database_provider_batch(&self) -> ProviderResult<Self::ProviderRW> {
+        self.database_provider_rw()
+    }
 }
 
 /// Helper type alias to get the associated transaction type from a [`DatabaseProviderFactory`].

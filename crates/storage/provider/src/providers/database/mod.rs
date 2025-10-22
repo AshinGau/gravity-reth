@@ -166,6 +166,21 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
         )))
     }
 
+    /// Returns a provider with a created `DbTxMut` inside, which allows fetching and updating
+    /// data from the database using different types of providers. Example: [`HeaderProvider`]
+    /// [`BlockHashReader`].  This may fail if the inner read/write database transaction fails to
+    /// open. With batch buffer.
+    #[track_caller]
+    pub fn provider_batch(&self) -> ProviderResult<DatabaseProviderRW<N::DB, N>> {
+        Ok(DatabaseProviderRW(DatabaseProvider::new_rw(
+            self.db.tx_batch()?,
+            self.chain_spec.clone(),
+            self.static_file_provider.clone(),
+            self.prune_modes.clone(),
+            self.storage.clone(),
+        )))
+    }
+
     /// State provider for latest block
     #[track_caller]
     pub fn latest(&self) -> ProviderResult<StateProviderBox> {
@@ -212,6 +227,10 @@ impl<N: ProviderNodeTypes> DatabaseProviderFactory for ProviderFactory<N> {
 
     fn database_provider_rw(&self) -> ProviderResult<Self::ProviderRW> {
         self.provider_rw().map(|provider| provider.0)
+    }
+
+    fn database_provider_batch(&self) -> ProviderResult<Self::ProviderRW> {
+        self.provider_batch().map(|provider| provider.0)
     }
 }
 

@@ -153,7 +153,7 @@ where
 
         let num_blocks = blocks.len();
         if let Some(last_block_hn) = &last_block_hash_num {
-            let provider_rw = self.provider.database_provider_rw()?;
+            let provider_rw = self.provider.database_provider_batch()?;
             let static_file_provider = self.provider.static_file_provider();
 
             UnifiedStorageWriter::from(&provider_rw, &static_file_provider).save_blocks(blocks)?;

@@ -22,6 +22,12 @@ pub trait Database: Send + Sync + Debug {
     #[track_caller]
     fn tx_mut(&self) -> Result<Self::TXMut, DatabaseError>;
 
+    /// Create read write transaction with batch buffer
+    #[track_caller]
+    fn tx_batch(&self) -> Result<Self::TXMut, DatabaseError> {
+        self.tx_mut()
+    }
+
     /// Takes a function and passes a read-only transaction into it, making sure it's closed in the
     /// end of the execution.
     fn view<T, F>(&self, f: F) -> Result<T, DatabaseError>
