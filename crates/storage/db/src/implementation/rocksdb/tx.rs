@@ -11,7 +11,7 @@ use reth_db_api::{
     transaction::{DbTx, DbTxMut},
 };
 use reth_storage_errors::db::{DatabaseErrorInfo, DatabaseWriteOperation};
-use rocksdb::{DB, WriteBatch};
+use rocksdb::{WriteBatch, WriteOptions, DB};
 use std::{cell::UnsafeCell, sync::Arc};
 
 pub use cursor::{RO, RW};
@@ -154,7 +154,9 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
         // For batch mode, write the shared WriteBatch to DB
         if let WriteMode::Batch(batch) = self.write_mode {
             let batch = batch.into_inner();
-            self.db.write(batch).map_err(|e| {
+            let mut write_opts = WriteOptions::default();
+            write_opts.set_sync(false);
+            self.db.write_opt(batch, &write_opts).map_err(|e| {
                 DatabaseError::Write(Box::new(reth_storage_errors::db::DatabaseWriteError {
                     info: DatabaseErrorInfo {
                         message: format!("Failed to commit batch: {}", e).into(),

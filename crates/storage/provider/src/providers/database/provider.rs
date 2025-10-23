@@ -77,6 +77,8 @@ use std::{
     sync::{mpsc, Arc},
 };
 use tracing::{debug, trace};
+use std::time::Instant;
+use ::metrics::histogram;
 
 /// A [`DatabaseProvider`] that holds a read-only database transaction.
 pub type DatabaseProviderRO<DB, N> = DatabaseProvider<<DB as Database>::TX, N>;
@@ -2032,6 +2034,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
     fn write_hashed_state(&self, hashed_state: &HashedPostStateSorted) -> ProviderResult<()> {
         // Write hashed account updates.
         let mut hashed_accounts_cursor = self.tx_ref().cursor_write::<tables::HashedAccounts>()?;
+        histogram!("table_kv_entries", &[("table", "HashedAccounts")]).record(hashed_state.accounts().accounts.len() as f64);
         for (hashed_address, account) in hashed_state.accounts().accounts_sorted() {
             if let Some(account) = account {
                 hashed_accounts_cursor.upsert(hashed_address, &account)?;
@@ -2044,11 +2047,12 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
         let sorted_storages = hashed_state.account_storages().iter().sorted_by_key(|(key, _)| *key);
         let mut hashed_storage_cursor =
             self.tx_ref().cursor_dup_write::<tables::HashedStorages>()?;
+        let mut entries = 0;
         for (hashed_address, storage) in sorted_storages {
             if storage.is_wiped() && hashed_storage_cursor.seek_exact(*hashed_address)?.is_some() {
                 hashed_storage_cursor.delete_current_duplicates()?;
             }
-
+            entries += storage.non_zero_valued_slots.len();
             for (hashed_slot, value) in storage.storage_slots_sorted() {
                 let entry = StorageEntry { key: hashed_slot, value };
                 if let Some(db_entry) =
@@ -2064,6 +2068,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
                 }
             }
         }
+        histogram!("table_kv_entries", &[("table", "HashedStorages")]).record(entries as f64);
 
         Ok(())
     }
@@ -2313,6 +2318,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> TrieWriterV2 for DatabaseProvid
         let mut account_trie_cursor = tx.cursor_write::<tables::AccountsTrieV2>()?;
         let mut storage_trie_cursor = tx.cursor_dup_write::<tables::StoragesTrieV2>()?;
 
+        let start = Instant::now();
         let mut account_updates = input
             .removed_nodes
             .iter()
@@ -2321,6 +2327,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> TrieWriterV2 for DatabaseProvid
         account_updates.extend(input.account_nodes.iter().map(|(p, n)| (p, Some(n))));
         // Sort trie node updates.
         account_updates.sort_unstable_by(|a, b| a.0.cmp(b.0));
+        histogram!("table_kv_entries", &[("table", "AccountsTrieV2")]).record(account_updates.len() as f64);
         for (path, node) in account_updates {
             let path = StoredNibbles(*path);
             num_updated += 1;
@@ -2335,7 +2342,10 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> TrieWriterV2 for DatabaseProvid
                 }
             }
         }
+        histogram!("save_blocks_time", &[("process", "AccountsTrieV2")]).record(start.elapsed());
+        let start = Instant::now();
 
+        let mut storage_entries = 0;
         for (hashed_address, storage_trie_update) in &input.storage_tries {
             if storage_trie_update.is_deleted {
                 // self-destruct
@@ -2352,6 +2362,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> TrieWriterV2 for DatabaseProvid
                     .collect::<Vec<_>>();
                 storage_updates
                     .extend(storage_trie_update.storage_nodes.iter().map(|(p, n)| (p, Some(n))));
+                storage_entries += storage_updates.len();
                 for (path, node) in storage_updates {
                     num_updated += 1;
                     let path = StoredNibblesSubKey(*path);
@@ -2369,6 +2380,8 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> TrieWriterV2 for DatabaseProvid
                 }
             }
         }
+        histogram!("table_kv_entries", &[("table", "StoragesTrieV2")]).record(storage_entries as f64);
+        histogram!("save_blocks_time", &[("process", "StoragesTrieV2")]).record(start.elapsed());
 
         Ok(num_updated)
     }

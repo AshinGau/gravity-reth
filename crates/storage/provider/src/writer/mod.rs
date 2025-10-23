@@ -174,7 +174,7 @@ where
             #[cfg(not(feature = "pipe_test"))]
             self.database()
                 .insert_block(Arc::unwrap_or_clone(recovered_block), StorageLocation::Both)?;
-            metrics::histogram!("write_insert_block_time").record(start.elapsed());
+            metrics::histogram!("save_blocks_time", &[("process", "insert_block")]).record(start.elapsed());
             let start = Instant::now();
             // Write state and changesets to the database.
             // Must be written after blocks because of the receipt lookup.
@@ -183,21 +183,21 @@ where
                 OriginalValuesKnown::No,
                 StorageLocation::StaticFiles,
             )?;
-            metrics::histogram!("write_state_time").record(start.elapsed());
+            metrics::histogram!("save_blocks_time", &[("process", "write_state")]).record(start.elapsed());
             let start = Instant::now();
             // insert hashes and intermediate merkle nodes
             self.database()
                 .write_hashed_state(&Arc::unwrap_or_clone(hashed_state).into_sorted())?;
-            metrics::histogram!("write_hashed_state_time").record(start.elapsed());
+            metrics::histogram!("save_blocks_time", &[("process", "write_hashed_state")]).record(start.elapsed());
             let start = Instant::now();
             let _ = self.database().write_trie_updatesv2(triev2.as_ref())?;
-            metrics::histogram!("write_trie_updatesv2_time").record(start.elapsed());
+            metrics::histogram!("save_blocks_time", &[("process", "write_trie_updatesv2")]).record(start.elapsed());
         }
 
         let start = Instant::now();
         // update history indices
         self.database().update_history_indices(first_number..=last_block_number)?;
-        metrics::histogram!("update_history_indices_time").record(start.elapsed() / block_count as u32);
+        metrics::histogram!("save_blocks_time", &[("process", "update_history_indices")]).record(start.elapsed() / block_count as u32);
 
         // Update pipeline progress
         self.database().update_pipeline_stages(last_block_number, false)?;

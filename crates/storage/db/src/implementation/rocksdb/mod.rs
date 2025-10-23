@@ -6,7 +6,7 @@ use reth_db_api::{
     Tables,
 };
 use reth_storage_errors::db::{DatabaseErrorInfo, DatabaseWriteError, LogLevel};
-use rocksdb::{Options, DB};
+use rocksdb::{BlockBasedOptions, Options, DB};
 use std::{path::Path, sync::Arc};
 use metrics::Label;
 
@@ -101,6 +101,15 @@ impl DatabaseEnv {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);  // Fast compression
+        opts.set_write_buffer_size(128 * 1024 * 1024);  // write buffer
+        opts.set_max_write_buffer_number(4);  // Allow more memtables
+        opts.set_max_background_jobs(8);  // Background threads for flush/compaction
+        // Bloom filter for better read performance
+        let mut block_opts = BlockBasedOptions::default();
+        block_opts.set_bloom_filter(10.0, true);  // 10 bits per key, block-based
+        opts.set_block_based_table_factory(&block_opts);
+        opts.set_use_fsync(false);
 
         // Get all required table names
         let required_tables: Vec<String> = Tables::tables().map(|t| t.name().to_string()).collect();
