@@ -20,6 +20,74 @@ use thiserror::Error;
 use tokio::sync::oneshot;
 use tracing::{debug, error};
 
+/// 打印性能统计摘要
+fn print_perf_stats(stats: &reth_db::PerfStats) {
+    if stats.upsert_count == 0 {
+        eprintln!("  [WARN] No upsert calls detected!");
+        return;
+    }
+    
+    // 计算总耗时
+    let total_ns = stats.get_cf_handle_ns 
+        + stats.key_encode_ns 
+        + stats.compress_value_ns 
+        + stats.encode_dupsort_key_ns 
+        + stats.batch_put_cf_ns
+        + stats.db_put_cf_ns;
+    let total_ms = total_ns as f64 / 1_000_000.0;
+    
+    // 准备数据（名称，耗时ns，调用次数）
+    let mut items = vec![
+        ("get_cf_handle", stats.get_cf_handle_ns, stats.upsert_count),
+        ("key_encode", stats.key_encode_ns, stats.upsert_count),
+        ("compress_value", stats.compress_value_ns, stats.upsert_count),
+        ("encode_dupsort_key", stats.encode_dupsort_key_ns, stats.upsert_count),
+        ("batch_put_cf", stats.batch_put_cf_ns, stats.upsert_count),
+        ("db_put_cf", stats.db_put_cf_ns, stats.upsert_count),
+    ];
+    
+    // 按耗时降序排序
+    items.sort_by(|a, b| b.1.cmp(&a.1));
+    
+    eprintln!("  {:<20} | {:>6} | {:>10} | {:>8} | {:>10}",
+        "Operation", "Count", "Total(ms)", "Avg(us)", "of_total%");
+    eprintln!("  {}", "-".repeat(70));
+    
+    for (name, duration_ns, count) in items {       
+        let total_ms = duration_ns as f64 / 1_000_000.0;
+        let avg_us = duration_ns as f64 / count as f64 / 1000.0;
+        let percentage = (duration_ns as f64 / total_ns as f64) * 100.0;
+        
+        let percentage_str = if percentage > 50.0 {
+            format!("{:>5.1}% [HOT]", percentage)
+        } else if percentage > 25.0 {
+            format!("{:>5.1}% [WARN]", percentage)
+        } else {
+            format!("{:>5.1}%", percentage)
+        };
+        
+        eprintln!("  {:<20} | {:>6} | {:>10.3} | {:>8.2} | {}",
+            name, count, total_ms, avg_us, percentage_str);
+    }
+    
+    eprintln!("  {}", "-".repeat(70));
+    eprintln!("  {:<20} | {:>6} | {:>10.3} | {:>8.2} |",
+        "TOTAL", stats.upsert_count, total_ms, total_ns as f64 / stats.upsert_count as f64 / 1000.0);
+    
+    // 打印 key/value 平均长度
+    let avg_key_bytes = stats.total_key_bytes as f64 / stats.upsert_count as f64;
+    let avg_value_bytes = stats.total_value_bytes as f64 / stats.upsert_count as f64;
+    let total_data_mb = (stats.total_key_bytes + stats.total_value_bytes) as f64 / 1024.0 / 1024.0;
+    
+    eprintln!("\n  Data Size Stats:");
+    eprintln!("    Avg Key Size:    {:>8.2} bytes", avg_key_bytes);
+    eprintln!("    Avg Value Size:  {:>8.2} bytes", avg_value_bytes);
+    eprintln!("    Total Data:      {:>8.2} MB ({} KB keys + {} KB values)",
+        total_data_mb,
+        stats.total_key_bytes / 1024,
+        stats.total_value_bytes / 1024);
+}
+
 /// Writes parts of reth's in memory tree state to the database and static files.
 ///
 /// This is meant to be a spawned service that listens for various incoming persistence operations,
@@ -156,7 +224,22 @@ where
             let provider_rw = self.provider.database_provider_batch()?;
             let static_file_provider = self.provider.static_file_provider();
 
+            // 开始追踪这次 save_blocks 调用
+            // 重置性能统计
+            reth_db::PerfStats::reset();
+            
             UnifiedStorageWriter::from(&provider_rw, &static_file_provider).save_blocks(blocks)?;
+            
+            // save_blocks 完成，获取性能统计
+            let perf_stats = reth_db::PerfStats::get();
+            
+            if perf_stats.upsert_count > 0 {
+                eprintln!("\n=== save_blocks trace (block={}, count={}) ===", 
+                    last_block_hn.number, num_blocks);
+                print_perf_stats(&perf_stats);
+                eprintln!("=====================================\n");
+            }
+            
             let start_time = Instant::now();
             UnifiedStorageWriter::commit(provider_rw)?;
             self.metrics

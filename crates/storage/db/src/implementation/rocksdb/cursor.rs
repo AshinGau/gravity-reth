@@ -15,7 +15,36 @@ use std::{
     mem,
     ops::{Bound, RangeBounds},
     sync::Arc,
+    time::Instant,
 };
+
+// 线程局部的性能统计
+thread_local! {
+    static PERF_STATS: std::cell::RefCell<PerfStats> = std::cell::RefCell::new(PerfStats::default());
+}
+
+#[derive(Default, Clone, Debug)]
+pub struct PerfStats {
+    pub get_cf_handle_ns: u64,
+    pub key_encode_ns: u64,
+    pub compress_value_ns: u64,
+    pub encode_dupsort_key_ns: u64,
+    pub batch_put_cf_ns: u64,
+    pub db_put_cf_ns: u64,
+    pub upsert_count: usize,
+    pub total_key_bytes: u64,
+    pub total_value_bytes: u64,
+}
+
+impl PerfStats {
+    pub fn reset() {
+        PERF_STATS.with(|stats| *stats.borrow_mut() = Self::default());
+    }
+    
+    pub fn get() -> Self {
+        PERF_STATS.with(|stats| stats.borrow().clone())
+    }
+}
 
 /// Transaction kind marker for read-only operations.
 #[derive(Debug)]
@@ -322,37 +351,87 @@ impl<K: TransactionKind, T: Table> DbCursorRO<T> for Cursor<K, T> {
 
 impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
     fn upsert(&mut self, key: T::Key, value: &T::Value) -> Result<(), DatabaseError> {
+        // 统计 upsert 调用次数
+        PERF_STATS.with(|stats| stats.borrow_mut().upsert_count += 1);
+        
+        let start = Instant::now();
         let cf_handle = get_cf_handle::<T>(&self.db)?;
+        PERF_STATS.with(|stats| stats.borrow_mut().get_cf_handle_ns += start.elapsed().as_nanos() as u64);
+        
+        let start = Instant::now();
         let encoded_key = key.encode();
+        PERF_STATS.with(|stats| stats.borrow_mut().key_encode_ns += start.elapsed().as_nanos() as u64);
+        
+        let start = Instant::now();
         let value_ref = compress_to_buf_or_ref!(self, value);
         let compressed_value = value_ref.unwrap_or(&self.buf);
+        PERF_STATS.with(|stats| stats.borrow_mut().compress_value_ns += start.elapsed().as_nanos() as u64);
 
         if T::DUPSORT {
             let subkey = &compressed_value[..value.subkey_compress_length().unwrap()];
+            
+            let start = Instant::now();
             let composite_key = Self::encode_dupsort_key(encoded_key.as_ref(), subkey);
+            PERF_STATS.with(|stats| stats.borrow_mut().encode_dupsort_key_ns += start.elapsed().as_nanos() as u64);
 
+            let key_len = composite_key.len() as u64;
+            let value_len = compressed_value.len() as u64;
+            
             if let Some(ref batch_ptr) = self.batch_ptr {
+                let start = Instant::now();
                 // SAFETY: Business layer guarantees single-threaded access and Tx outlives Cursor
                 unsafe {
                     (*batch_ptr.as_ptr()).put_cf(cf_handle, &composite_key, compressed_value);
                 }
+                PERF_STATS.with(|stats| {
+                    let mut s = stats.borrow_mut();
+                    s.batch_put_cf_ns += start.elapsed().as_nanos() as u64;
+                    s.total_key_bytes += key_len;
+                    s.total_value_bytes += value_len;
+                });
                 Ok(())
             } else {
-                self.db.put_cf(cf_handle, &composite_key, compressed_value).map_err(|e| {
+                let start = Instant::now();
+                let result = self.db.put_cf(cf_handle, &composite_key, compressed_value).map_err(|e| {
                     create_write_error::<T>(e, DatabaseWriteOperation::Put, encoded_key.into())
-                })
+                });
+                PERF_STATS.with(|stats| {
+                    let mut s = stats.borrow_mut();
+                    s.db_put_cf_ns += start.elapsed().as_nanos() as u64;
+                    s.total_key_bytes += key_len;
+                    s.total_value_bytes += value_len;
+                });
+                result
             }
         } else {
+            let key_len = encoded_key.as_ref().len() as u64;
+            let value_len = compressed_value.len() as u64;
+            
             if let Some(ref batch_ptr) = self.batch_ptr {
+                let start = Instant::now();
                 // SAFETY: Business layer guarantees single-threaded access and Tx outlives Cursor
                 unsafe {
                     (*batch_ptr.as_ptr()).put_cf(cf_handle, &encoded_key, compressed_value);
                 }
+                PERF_STATS.with(|stats| {
+                    let mut s = stats.borrow_mut();
+                    s.batch_put_cf_ns += start.elapsed().as_nanos() as u64;
+                    s.total_key_bytes += key_len;
+                    s.total_value_bytes += value_len;
+                });
                 Ok(())
             } else {
-                self.db.put_cf(cf_handle, &encoded_key, compressed_value).map_err(|e| {
+                let start = Instant::now();
+                let result = self.db.put_cf(cf_handle, &encoded_key, compressed_value).map_err(|e| {
                     create_write_error::<T>(e, DatabaseWriteOperation::Put, encoded_key.into())
-                })
+                });
+                PERF_STATS.with(|stats| {
+                    let mut s = stats.borrow_mut();
+                    s.db_put_cf_ns += start.elapsed().as_nanos() as u64;
+                    s.total_key_bytes += key_len;
+                    s.total_value_bytes += value_len;
+                });
+                result
             }
         }
     }
