@@ -108,7 +108,7 @@ pub(crate) const MIN_BLOCKS_FOR_PIPELINE_RUN: u64 = EPOCH_SLOTS;
 /// The max number of blocks to persist in batch.
 /// Memory is released after blocks are persisted in a batch, so limiting the batch size
 /// prevents memory accumulation and ensures timely cleanup in high-throughput scenarios.
-const MAX_BLOCKS_TO_PERSIST: u64 = 128;
+const MAX_BLOCKS_TO_PERSIST: u64 = 8;
 
 /// A builder for creating state providers that can be used across threads.
 #[derive(Clone, Debug)]

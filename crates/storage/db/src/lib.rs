@@ -44,11 +44,11 @@ pub use generic::{create_db, init_db, open_db, open_db_read_only};
 pub use crate::implementation::mdbx::{DatabaseArguments, DatabaseEnv, DatabaseEnvKind};
 
 #[cfg(all(feature = "rocksdb", not(feature = "mdbx")))]
-pub use crate::implementation::rocksdb::{cursor::PerfStats, DatabaseArguments, DatabaseEnv, DatabaseEnvKind};
+pub use crate::implementation::rocksdb::{DatabaseArguments, DatabaseEnv, DatabaseEnvKind};
 
 // When both features are enabled, prefer rocksdb
 #[cfg(all(feature = "mdbx", feature = "rocksdb"))]
-pub use crate::implementation::rocksdb::{cursor::PerfStats, DatabaseArguments, DatabaseEnv, DatabaseEnvKind};
+pub use crate::implementation::rocksdb::{DatabaseArguments, DatabaseEnv, DatabaseEnvKind};
 
 pub use models::ClientVersion;
 pub use reth_db_api::*;

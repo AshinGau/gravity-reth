@@ -12,7 +12,7 @@ use reth_db_api::{
 };
 use reth_storage_errors::db::{DatabaseErrorInfo, DatabaseWriteOperation};
 use rocksdb::{WriteBatch, WriteOptions, DB};
-use std::{cell::UnsafeCell, sync::Arc, time::Instant};
+use std::{cell::UnsafeCell, sync::Arc};
 
 pub use cursor::{RO, RW};
 
@@ -153,7 +153,6 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
     fn commit(self) -> Result<bool, DatabaseError> {
         // For batch mode, write the shared WriteBatch to DB
         if let WriteMode::Batch(batch) = self.write_mode {
-            let start = Instant::now();
             let batch = batch.into_inner();
             let mut write_opts = WriteOptions::default();
             write_opts.set_sync(false);
@@ -168,7 +167,6 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
                     key: vec![],
                 }))
             })?;
-            println!("commit time: {}ms", start.elapsed().as_millis());
         }
         Ok(true)
     }
