@@ -24,6 +24,8 @@ use reth_stages_api::{
 use reth_static_file_types::StaticFileSegment;
 use std::{
     cmp::Ordering,
+    fs::File,
+    io::Write,
     ops::RangeInclusive,
     sync::Arc,
     task::{ready, Context, Poll},
@@ -399,6 +401,23 @@ where
         // prepare execution output for writing
         let time = Instant::now();
         let mut state = ExecutionOutcome::from_blocks(start_block, executor.take_bundle(), results);
+        if std::env::var("DUMP_BLOCK_STATE").map_or(false, |s| s.parse().unwrap_or(false)) {
+            if let Ok(json_str) = serde_json::to_string_pretty(&state.bundle) {
+                let filename = format!("bundle_state_{}_{}.json", start_block, stage_progress);
+                if let Ok(mut file) = File::create(&filename) {
+                    if let Err(e) = file.write_all(json_str.as_bytes()) {
+                        warn!("Failed to write bundle state to file {}: {}", filename, e);
+                    } else {
+                        info!("Bundle state written to file: {}", filename);
+                    }
+                } else {
+                    warn!("Failed to create file: {}", filename);
+                }
+            } else {
+                warn!("Failed to serialize bundle state to JSON");
+            }
+        }
+
         let write_preparation_duration = time.elapsed();
 
         // log the gas per second for the range we just executed

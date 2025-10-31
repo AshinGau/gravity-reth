@@ -4222,7 +4222,7 @@ dependencies = [
 [[package]]
 name = "grevm"
 version = "2.2.1"
-source = "git+https://github.com/Galxe/grevm?tag=v2.2.1#73ec77da8857a6875ec02dcef5858b9ac5e1be95"
+source = "git+https://github.com/AshinGau/grevm?rev=f1b2f87#f1b2f87b1febd22cb4c0e52857529afa982aac9c"
 dependencies = [
  "ahash",
  "alloy-evm",
@@ -4242,6 +4242,7 @@ dependencies = [
  "revm-inspector",
  "revm-primitives",
  "revm-state",
+ "tracing",
 ]
 
 [[package]]
@@ -10474,6 +10475,7 @@ dependencies = [
  "reth-trie-db",
  "reth-trie-parallel",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.12",
  "tokio",
