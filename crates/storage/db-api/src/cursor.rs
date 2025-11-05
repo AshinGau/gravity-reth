@@ -127,6 +127,11 @@ pub trait DbCursorRW<T: Table> {
 
     /// Delete current value that cursor points to
     fn delete_current(&mut self) -> Result<(), DatabaseError>;
+
+    /// Delete by key
+    fn delete_by_key(&mut self, _key: T::Key) -> Result<(), DatabaseError> {
+        unimplemented!("not support")
+    }
 }
 
 /// Read Write Cursor over `DupSorted` table.
@@ -138,6 +143,11 @@ pub trait DbDupCursorRW<T: DupSort> {
     ///
     /// This is efficient for pre-sorted data. If the data is not pre-sorted, use `insert`.
     fn append_dup(&mut self, key: T::Key, value: T::Value) -> Result<(), DatabaseError>;
+
+    /// Delete by key and subkey
+    fn delete_by_key_subkey(&mut self, _key: T::Key, _subkey: T::SubKey) -> Result<(), DatabaseError> {
+        unimplemented!("not support")
+    }
 }
 
 /// Provides an iterator to `Cursor` when handling `Table`.

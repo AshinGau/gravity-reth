@@ -1,9 +1,7 @@
 //! Transaction implementation for RocksDB.
 
 use crate::{
-    implementation::rocksdb::{
-        create_write_error, cursor, get_cf_handle, rocksdb_error_to_database_error,
-    },
+    implementation::rocksdb::{cursor, delete_error, get_cf_handle, read_error, write_error},
     DatabaseError,
 };
 use reth_db_api::{
@@ -48,7 +46,7 @@ impl<K: cursor::TransactionKind> Tx<K> {
                 })
             }
             Ok(None) => Ok(0),
-            Err(e) => Err(rocksdb_error_to_database_error(e)),
+            Err(e) => Err(read_error(e)),
         }
     }
 }
@@ -73,7 +71,7 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
                 T::Value::decompress(&value).map(Some).map_err(|_| DatabaseError::Decode)
             }
             Ok(None) => Ok(None),
-            Err(e) => Err(rocksdb_error_to_database_error(e)),
+            Err(e) => Err(read_error(e)),
         }
     }
 
@@ -115,7 +113,7 @@ impl DbTxMut for Tx<cursor::RW> {
         let encoded_value = value.compress();
 
         self.db.put_cf(cf_handle, &encoded_key, &encoded_value).map_err(|e| {
-            create_write_error::<T>(e, DatabaseWriteOperation::Put, encoded_key.as_ref().to_vec())
+            write_error::<T>(e, DatabaseWriteOperation::Put, encoded_key.as_ref().to_vec())
         })?;
 
         Ok(())
@@ -130,14 +128,8 @@ impl DbTxMut for Tx<cursor::RW> {
 
         let encoded_key = key.encode();
 
-        match self.db.delete_cf(cf_handle, &encoded_key) {
-            Ok(()) => Ok(true),
-            Err(e) => Err(create_write_error::<T>(
-                e,
-                DatabaseWriteOperation::Put,
-                encoded_key.as_ref().to_vec(),
-            )),
-        }
+        self.db.delete_cf(cf_handle, &encoded_key).map_err(delete_error)?;
+        Ok(true)
     }
 
     fn clear<T: Table>(&self) -> Result<(), DatabaseError> {
@@ -181,14 +173,10 @@ impl DbTxMut for Tx<cursor::RW> {
 
         // Delete the range [first_key, last_key] - note that delete_range_cf is [start, end)
         // so we need to handle the last key separately
-        self.db.delete_range_cf(cf_handle, &first_key, &last_key).map_err(|e| {
-            create_write_error::<T>(e, DatabaseWriteOperation::Put, first_key.clone())
-        })?;
+        self.db.delete_range_cf(cf_handle, &first_key, &last_key).map_err(delete_error)?;
 
         // Delete the last key separately since delete_range_cf is [start, end)
-        self.db.delete_cf(cf_handle, &last_key).map_err(|e| {
-            create_write_error::<T>(e, DatabaseWriteOperation::Put, last_key.clone())
-        })?;
+        self.db.delete_cf(cf_handle, &last_key).map_err(delete_error)?;
 
         Ok(())
     }

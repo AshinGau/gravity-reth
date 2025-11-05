@@ -152,19 +152,29 @@ impl reth_db_api::database::Database for DatabaseEnv {
     }
 }
 
-/// Helper function to convert RocksDB errors to DatabaseError
-fn rocksdb_error_to_database_error(e: rocksdb::Error) -> DatabaseError {
-    DatabaseError::Read(DatabaseErrorInfo { message: e.to_string().into(), code: -1 })
+/// Convert RocksDB error to DatabaseErrorInfo
+fn to_error_info(e: rocksdb::Error) -> DatabaseErrorInfo {
+    DatabaseErrorInfo { message: e.to_string().into(), code: -1 }
 }
 
-/// Helper function to create a write error
-fn create_write_error<T: Table>(
+/// Create a read error from RocksDB error
+fn read_error(e: rocksdb::Error) -> DatabaseError {
+    DatabaseError::Read(to_error_info(e))
+}
+
+/// Create a delete error from RocksDB error
+fn delete_error(e: rocksdb::Error) -> DatabaseError {
+    DatabaseError::Delete(to_error_info(e))
+}
+
+/// Create a write error from RocksDB error with operation context
+fn write_error<T: Table>(
     e: rocksdb::Error,
     operation: DatabaseWriteOperation,
     key: Vec<u8>,
 ) -> DatabaseError {
     DatabaseError::Write(Box::new(DatabaseWriteError {
-        info: DatabaseErrorInfo { message: e.to_string().into(), code: -1 },
+        info: to_error_info(e),
         operation,
         table_name: T::NAME,
         key,

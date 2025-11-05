@@ -2035,8 +2035,8 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
         for (hashed_address, account) in hashed_state.accounts().accounts_sorted() {
             if let Some(account) = account {
                 hashed_accounts_cursor.upsert(hashed_address, &account)?;
-            } else if hashed_accounts_cursor.seek_exact(hashed_address)?.is_some() {
-                hashed_accounts_cursor.delete_current()?;
+            } else {
+                hashed_accounts_cursor.delete_by_key(hashed_address)?;
             }
         }
 
@@ -2050,16 +2050,10 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
             }
 
             for (hashed_slot, value) in storage.storage_slots_sorted() {
-                let entry = StorageEntry { key: hashed_slot, value };
-                if let Some(db_entry) =
-                    hashed_storage_cursor.seek_by_key_subkey(*hashed_address, entry.key)?
-                {
-                    if db_entry.key == entry.key {
-                        hashed_storage_cursor.delete_current()?;
-                    }
-                }
-
-                if !entry.value.is_zero() {
+                if value.is_zero() {
+                    hashed_storage_cursor.delete_by_key_subkey(*hashed_address, hashed_slot)?;
+                } else {
+                    let entry = StorageEntry { key: hashed_slot, value };
                     hashed_storage_cursor.upsert(*hashed_address, &entry)?;
                 }
             }
@@ -2312,28 +2306,12 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> TrieWriterV2 for DatabaseProvid
         let tx = self.tx_ref();
         let mut account_trie_cursor = tx.cursor_write::<tables::AccountsTrieV2>()?;
         let mut storage_trie_cursor = tx.cursor_dup_write::<tables::StoragesTrieV2>()?;
-
-        let mut account_updates = input
-            .removed_nodes
-            .iter()
-            .filter_map(|n| (!input.account_nodes.contains_key(n)).then_some((n, None)))
-            .collect::<Vec<_>>();
-        account_updates.extend(input.account_nodes.iter().map(|(p, n)| (p, Some(n))));
-        // Sort trie node updates.
-        account_updates.sort_unstable_by(|a, b| a.0.cmp(b.0));
-        for (path, node) in account_updates {
-            let path = StoredNibbles(*path);
+        for path in &input.removed_nodes {
+            account_trie_cursor.delete_by_key((*path).into())?
+        }
+        for (path, node) in &input.account_nodes {
+            account_trie_cursor.upsert((*path).into(), &node.clone().into())?;
             num_updated += 1;
-            match node {
-                Some(node) => {
-                    account_trie_cursor.upsert(path, &node.clone().into())?;
-                }
-                None => {
-                    if account_trie_cursor.seek_exact(path)?.is_some() {
-                        account_trie_cursor.delete_current()?;
-                    }
-                }
-            }
         }
 
         for (hashed_address, storage_trie_update) in &input.storage_tries {
@@ -2343,29 +2321,15 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> TrieWriterV2 for DatabaseProvid
                     storage_trie_cursor.delete_current_duplicates()?;
                 }
             } else {
-                let mut storage_updates = storage_trie_update
-                    .removed_nodes
-                    .iter()
-                    .filter_map(|n| {
-                        (!storage_trie_update.storage_nodes.contains_key(n)).then_some((n, None))
-                    })
-                    .collect::<Vec<_>>();
-                storage_updates
-                    .extend(storage_trie_update.storage_nodes.iter().map(|(p, n)| (p, Some(n))));
-                for (path, node) in storage_updates {
-                    num_updated += 1;
+                for path in &storage_trie_update.removed_nodes {
                     let path = StoredNibblesSubKey(*path);
-                    if let Some(entry) =
-                        storage_trie_cursor.seek_by_key_subkey(*hashed_address, path.clone())?
-                    {
-                        if entry.path == path {
-                            storage_trie_cursor.delete_current()?;
-                        }
-                    }
-                    if let Some(node) = node {
-                        storage_trie_cursor
-                            .upsert(*hashed_address, &StorageNodeEntry::new(path, node.clone()))?;
-                    }
+                    storage_trie_cursor.delete_by_key_subkey(*hashed_address, path)?;
+                }
+                for (path, node) in &storage_trie_update.storage_nodes {
+                    let path = StoredNibblesSubKey(*path);
+                    storage_trie_cursor
+                        .upsert(*hashed_address, &StorageNodeEntry::new(path, node.clone()))?;
+                    num_updated += 1;
                 }
             }
         }

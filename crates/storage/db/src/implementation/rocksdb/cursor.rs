@@ -1,5 +1,5 @@
 use crate::{
-    implementation::rocksdb::{create_write_error, get_cf_handle, rocksdb_error_to_database_error},
+    implementation::rocksdb::{delete_error, get_cf_handle, read_error, write_error},
     DatabaseError,
 };
 use reth_db_api::{
@@ -90,36 +90,20 @@ impl<K: TransactionKind, T: Table> Cursor<K, T> {
 
     /// Decode DupSort composite key: split based on fixed key length
     fn decode_dupsort_key(composite: &[u8]) -> Result<(&[u8], &[u8]), DatabaseError> {
-        Self::validate_dupsort_key_length(composite)?;
+        assert!(composite.len() >= Self::KEY_LENGTH);
         Ok((&composite[..Self::KEY_LENGTH], &composite[Self::KEY_LENGTH..]))
-    }
-
-    /// Validate that a composite key has the correct minimum length for DupSort tables
-    fn validate_dupsort_key_length(composite: &[u8]) -> Result<(), DatabaseError> {
-        if composite.len() < Self::KEY_LENGTH {
-            return Err(DatabaseError::Read(reth_storage_errors::db::DatabaseErrorInfo {
-                message: format!(
-                    "Invalid DupSort composite key length: expected at least {} bytes, got {} bytes for table '{}'",
-                    Self::KEY_LENGTH,
-                    composite.len(),
-                    T::NAME
-                ).into(),
-                code: -1,
-            }));
-        }
-        Ok(())
     }
 
     /// Extract main key from composite key with validation
     fn extract_main_key(composite: &[u8]) -> Result<&[u8], DatabaseError> {
-        Self::validate_dupsort_key_length(composite)?;
+        assert!(composite.len() >= Self::KEY_LENGTH);
         Ok(&composite[..Self::KEY_LENGTH])
     }
 
     /// High-performance point query - doesn't move cursor position
     fn point_get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, DatabaseError> {
         let cf_handle = get_cf_handle::<T>(&self.db)?;
-        self.db.get_cf(cf_handle, key).map_err(rocksdb_error_to_database_error)
+        self.db.get_cf(cf_handle, key).map_err(read_error)
     }
 
     fn decode_key_value(key: &[u8], value: &[u8]) -> Result<(T::Key, T::Value), DatabaseError> {
@@ -282,11 +266,11 @@ impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
             let subkey = &compressed_value[..value.subkey_compress_length().unwrap()];
             let composite_key = Self::encode_dupsort_key(encoded_key.as_ref(), subkey);
             self.db.put_cf(cf_handle, &composite_key, compressed_value).map_err(|e| {
-                create_write_error::<T>(e, DatabaseWriteOperation::Put, encoded_key.into())
+                write_error::<T>(e, DatabaseWriteOperation::Put, encoded_key.into())
             })
         } else {
             self.db.put_cf(cf_handle, &encoded_key, compressed_value).map_err(|e| {
-                create_write_error::<T>(e, DatabaseWriteOperation::Put, encoded_key.into())
+                write_error::<T>(e, DatabaseWriteOperation::Put, encoded_key.into())
             })
         }
     }
@@ -304,12 +288,15 @@ impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
         if self.iterator.valid() {
             if let Some(key) = self.iterator.key() {
                 let cf_handle = get_cf_handle::<T>(&self.db)?;
-                self.db.delete_cf(cf_handle, key).map_err(|e| {
-                    create_write_error::<T>(e, DatabaseWriteOperation::Put, key.to_vec())
-                })?;
+                self.db.delete_cf(cf_handle, key).map_err(delete_error)?;
             }
         }
         Ok(())
+    }
+
+    fn delete_by_key(&mut self, key: T::Key) -> Result<(), DatabaseError> {
+        let cf_handle = get_cf_handle::<T>(&self.db)?;
+        self.db.delete_cf(cf_handle, key.encode()).map_err(delete_error)
     }
 }
 
@@ -493,9 +480,7 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<RW, T> {
 
                 // Delete all found keys
                 for key_to_delete in keys_to_delete {
-                    self.db.delete_cf(cf_handle, &key_to_delete).map_err(|e| {
-                        create_write_error::<T>(e, DatabaseWriteOperation::Put, key_to_delete)
-                    })?;
+                    self.db.delete_cf(cf_handle, &key_to_delete).map_err(delete_error)?;
                 }
             }
         }
@@ -515,11 +500,16 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<RW, T> {
         let composite_key = Self::encode_dupsort_key(encoded_key.as_ref(), subkey);
 
         self.db.put_cf(cf_handle, &composite_key, compressed_value).map_err(|e| {
-            create_write_error::<T>(
-                e,
-                DatabaseWriteOperation::CursorAppendDup,
-                composite_key.clone(),
-            )
+            write_error::<T>(e, DatabaseWriteOperation::CursorAppendDup, composite_key.clone())
         })
+    }
+
+    fn delete_by_key_subkey(&mut self, key: T::Key, subkey: T::SubKey) -> Result<(), DatabaseError> {
+        let encoded_key = key.encode();
+        let encoded_subkey = subkey.encode();
+        let composite_key = Self::encode_dupsort_key(encoded_key.as_ref(), encoded_subkey.as_ref());
+
+        let cf_handle = get_cf_handle::<T>(&self.db)?;
+        self.db.delete_cf(cf_handle, &composite_key).map_err(delete_error)
     }
 }
