@@ -296,7 +296,52 @@ impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
 
     fn delete_by_key(&mut self, key: T::Key) -> Result<(), DatabaseError> {
         let cf_handle = get_cf_handle::<T>(&self.db)?;
-        self.db.delete_cf(cf_handle, key.encode()).map_err(delete_error)
+        if T::DUPSORT {
+            let main_key: Vec<u8> = key.encode().into();
+            // Calculate the next key (main_key + 1) for range deletion
+            let mut next_key = main_key.clone();
+            let mut carry = true;
+            for byte in next_key.iter_mut().rev() {
+                if carry {
+                    if *byte == u8::MAX {
+                        *byte = 0;
+                    } else {
+                        *byte += 1;
+                        carry = false;
+                        break;
+                    }
+                }
+            }
+
+            if carry {
+                let iter = self.db.iterator_cf(
+                    cf_handle,
+                    rocksdb::IteratorMode::From(&main_key, rocksdb::Direction::Forward),
+                );
+                let mut keys_to_delete = Vec::new();
+
+                for result in iter {
+                    if let Ok((composite_key, _)) = result {
+                        let found_main_key = Self::extract_main_key(&composite_key)?;
+                        if found_main_key == main_key {
+                            keys_to_delete.push(composite_key.to_vec());
+                        } else {
+                            break;
+                        }
+                    }
+                }
+
+                for key_to_delete in keys_to_delete {
+                    self.db.delete_cf(cf_handle, &key_to_delete).map_err(delete_error)?;
+                }
+            } else {
+                // Use delete_range_cf for efficient deletion: [main_key, next_key)
+                self.db.delete_range_cf(cf_handle, main_key, next_key).map_err(delete_error)?;
+            }
+            Ok(())
+        } else {
+            self.db.delete_cf(cf_handle, key.encode()).map_err(delete_error)
+        }
     }
 }
 
@@ -454,34 +499,8 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<RW, T> {
         if self.iterator.valid() {
             if let Some(current_composite_key) = self.iterator.key() {
                 let main_key = Self::extract_main_key(current_composite_key)?;
-
-                // Find and delete all entries with the same main key
-                let cf_handle = get_cf_handle::<T>(&self.db)?;
-
-                // Create iterator to find all duplicates
-                let iter = self.db.iterator_cf(
-                    cf_handle,
-                    rocksdb::IteratorMode::From(main_key, rocksdb::Direction::Forward),
-                );
-                let mut keys_to_delete = Vec::new();
-
-                for result in iter {
-                    if let Ok((composite_key, _)) = result {
-                        // Validate and extract main key - if invalid, stop processing
-                        let found_main_key = Self::extract_main_key(&composite_key)?;
-                        if found_main_key == main_key {
-                            keys_to_delete.push(composite_key.to_vec());
-                        } else {
-                            // Different key, stop
-                            break;
-                        }
-                    }
-                }
-
-                // Delete all found keys
-                for key_to_delete in keys_to_delete {
-                    self.db.delete_cf(cf_handle, &key_to_delete).map_err(delete_error)?;
-                }
+                let key = T::Key::decode(main_key).map_err(|_| DatabaseError::Decode)?;
+                self.delete_by_key(key)?;
             }
         }
         Ok(())
