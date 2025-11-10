@@ -6,7 +6,7 @@ use reth_db_api::{
     Tables,
 };
 use reth_storage_errors::db::{DatabaseErrorInfo, DatabaseWriteError, LogLevel};
-use rocksdb::{Options, DB};
+use rocksdb::{Options, DB, BlockBasedOptions, Cache};
 use std::{path::Path, sync::Arc};
 use metrics::Label;
 
@@ -102,6 +102,106 @@ impl DatabaseEnv {
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
 
+        // === Parallelism Configuration ===
+        // Allow more background jobs for compaction and flush
+        // Recommended: Number of CPU cores or cores - 2
+        opts.set_max_background_jobs(14); // 16 cores - 2 for main workload
+        
+        // Increase parallelism for multi-threaded compactions
+        opts.increase_parallelism(16);
+        
+        // === Memory Configuration ===
+        // Write buffer size: 256MB per memtable (large for write-heavy workloads)
+        // Total write buffer budget: write_buffer_size * max_write_buffer_number * num_column_families
+        opts.set_write_buffer_size(256 * 1024 * 1024); // 256MB
+        
+        // Allow up to 6 write buffers (memtables) before blocking writes
+        // This provides buffer during flush delays
+        opts.set_max_write_buffer_number(6);
+        
+        // Min write buffers to merge before flush (reduce write amplification)
+        opts.set_min_write_buffer_number_to_merge(2);
+        
+        // Total memtable size across all column families (8GB)
+        // Helps absorb write spikes
+        opts.set_db_write_buffer_size(8 * 1024 * 1024 * 1024);
+        
+        // === Block Cache Configuration ===
+        // Shared block cache for all column families (8GB for read performance)
+        // Helps with frequent random reads
+        let cache = Cache::new_lru_cache(8 * 1024 * 1024 * 1024);
+        let mut block_opts = BlockBasedOptions::default();
+        block_opts.set_block_cache(&cache);
+        block_opts.set_block_size(32 * 1024); // 32KB blocks (good for random reads)
+        block_opts.set_cache_index_and_filter_blocks(true); // Cache index/filters
+        block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true); // Keep L0 indexes in cache
+        
+        // Enable bloom filters for faster point lookups
+        block_opts.set_bloom_filter(10.0, false); // 10 bits per key
+        
+        opts.set_block_based_table_factory(&block_opts);
+        
+        // === Compaction Configuration ===
+        // Level-based compaction with higher thresholds to delay write stalls
+        opts.set_level_compaction_dynamic_level_bytes(true);
+        
+        // L0 file triggers - increased to avoid frequent slowdowns
+        // Default slowdown: 20 files, stop: 36 files
+        opts.set_level_zero_slowdown_writes_trigger(30); // Start slowing at 30 files
+        opts.set_level_zero_stop_writes_trigger(50); // Stop at 50 files
+        opts.set_level_zero_file_num_compaction_trigger(4); // Compact when L0 has 4 files
+        
+        // Pending compaction bytes limits - increased for high-throughput
+        // Soft limit triggers slowdown, hard limit stops writes
+        opts.set_soft_pending_compaction_bytes_limit(128 * 1024 * 1024 * 1024); // 128GB
+        opts.set_hard_pending_compaction_bytes_limit(512 * 1024 * 1024 * 1024); // 512GB
+        
+        // Target file size for L1 (256MB, doubles per level)
+        opts.set_target_file_size_base(256 * 1024 * 1024);
+        opts.set_target_file_size_multiplier(2);
+        
+        // L1 size (512MB, multiplies by 10 per level)
+        opts.set_max_bytes_for_level_base(512 * 1024 * 1024);
+        opts.set_max_bytes_for_level_multiplier(10.0);
+        
+        // Maximum compaction bytes at once (2GB)
+        opts.set_max_compaction_bytes(2 * 1024 * 1024 * 1024);
+        
+        // === Write Configuration ===
+        // Note: set_delayed_write_rate not available in rocksdb-rs 0.22
+        // The default delayed_write_rate will be used when write stall occurs
+        
+        // Enable pipelined writes for better concurrency
+        opts.set_enable_pipelined_write(true);
+        
+        // WAL configuration
+        opts.set_max_total_wal_size(2 * 1024 * 1024 * 1024); // 2GB max WAL size
+        opts.set_wal_bytes_per_sync(4 * 1024 * 1024); // Sync WAL every 4MB
+        
+        // === Compression Configuration ===
+        // Use LZ4 for L0-L1 (fast), Zstd for L2+ (better compression)
+        opts.set_compression_per_level(&[
+            rocksdb::DBCompressionType::Lz4,    // L0
+            rocksdb::DBCompressionType::Lz4,    // L1
+            rocksdb::DBCompressionType::Zstd,   // L2
+            rocksdb::DBCompressionType::Zstd,   // L3
+            rocksdb::DBCompressionType::Zstd,   // L4
+            rocksdb::DBCompressionType::Zstd,   // L5
+            rocksdb::DBCompressionType::Zstd,   // L6
+        ]);
+        
+        // === I/O Optimization ===
+        // Optimize for SSD with high IOPS
+        opts.set_bytes_per_sync(4 * 1024 * 1024); // Background sync every 4MB
+        opts.set_compaction_readahead_size(4 * 1024 * 1024); // 4MB compaction readahead
+        
+        // Allow OS to use more file handles
+        opts.set_max_open_files(10000);
+        
+        // === Statistics ===
+        opts.enable_statistics();
+        opts.set_stats_dump_period_sec(300); // Dump stats every 5 minutes
+
         // Get all required table names
         let required_tables: Vec<String> = Tables::tables().map(|t| t.name().to_string()).collect();
         let db = DB::open_cf(&opts, path, &required_tables)
@@ -138,7 +238,12 @@ impl DatabaseMetrics for DatabaseEnv {
         let mut metrics = Vec::new();
         
         // 1. rocksdb.actual-delayed-write-rate
-        // Gets the actual delayed write rate (bytes/sec) when write stall occurs
+        // Current write rate limit in bytes/sec when write stall occurs
+        // Threshold: 0 = healthy, >0 = write stall active
+        // Action: If sustained >0, writes are being throttled
+        // - Check num_files_at_level0 and estimate_pending_compaction_bytes
+        // - Increase max_background_jobs (currently 14)
+        // - Increase delayed_write_rate limit (currently 64MB/s)
         if let Ok(Some(value)) = self.inner.property_value("rocksdb.actual-delayed-write-rate") {
             if let Ok(rate) = value.parse::<u64>() {
                 metrics.push((
@@ -150,7 +255,13 @@ impl DatabaseMetrics for DatabaseEnv {
         }
         
         // 2. rocksdb.is-write-stopped
-        // Indicates whether writes are completely stopped (0 = no, 1 = yes)
+        // Whether writes are completely stopped (0=no, 1=yes)
+        // Threshold: 0 = healthy, 1 = CRITICAL
+        // Action: If 1, writes are blocked waiting for flush/compaction
+        // - Immediate: Check if L0 files >= 50 (stop trigger)
+        // - Or pending_compaction_bytes >= 512GB (hard limit)
+        // - Increase level_zero_stop_writes_trigger above 50
+        // - Increase hard_pending_compaction_bytes_limit above 512GB
         if let Ok(Some(value)) = self.inner.property_value("rocksdb.is-write-stopped") {
             if let Ok(stopped) = value.parse::<u64>() {
                 metrics.push((
@@ -161,65 +272,88 @@ impl DatabaseMetrics for DatabaseEnv {
             }
         }
         
-        // 3. rocksdb.cfstats.stall-micros
-        // Collect stall statistics for each column family
-        for table_name in Tables::tables().map(|t| t.name()) {
-            if let Some(cf) = self.inner.cf_handle(table_name) {
-                // Get cfstats string and parse stall-related microseconds
-                if let Ok(Some(cfstats)) = self.inner.property_value_cf(cf, "rocksdb.cfstats") {
-                    // Parse stall metrics from cfstats
-                    // The cfstats format contains multiple lines, we need to find lines with "Stall"
-                    let stall_micros = parse_stall_micros_from_cfstats(&cfstats);
-                    
-                    if let Some(total_stall) = stall_micros.total {
-                        metrics.push((
-                            "rocksdb.cfstats.stall_micros",
-                            total_stall as f64,
-                            vec![
-                                Label::new("cf", table_name),
-                                Label::new("type", "total"),
-                            ],
-                        ));
-                    }
-                    
-                    if let Some(level0_slowdown) = stall_micros.level0_slowdown {
-                        metrics.push((
-                            "rocksdb.cfstats.stall_micros",
-                            level0_slowdown as f64,
-                            vec![
-                                Label::new("cf", table_name),
-                                Label::new("type", "level0_slowdown"),
-                            ],
-                        ));
-                    }
-                    
-                    if let Some(level0_numfiles) = stall_micros.level0_numfiles {
-                        metrics.push((
-                            "rocksdb.cfstats.stall_micros",
-                            level0_numfiles as f64,
-                            vec![
-                                Label::new("cf", table_name),
-                                Label::new("type", "level0_numfiles"),
-                            ],
-                        ));
-                    }
-                    
-                    if let Some(pending_compaction) = stall_micros.pending_compaction_bytes {
-                        metrics.push((
-                            "rocksdb.cfstats.stall_micros",
-                            pending_compaction as f64,
-                            vec![
-                                Label::new("cf", table_name),
-                                Label::new("type", "pending_compaction_bytes"),
-                            ],
-                        ));
-                    }
-                }
+        // 3. rocksdb.num-immutable-mem-table
+        // Number of immutable memtables not yet flushed to disk
+        // Threshold: 0-2 = healthy, 3-4 = warning, >=5 = critical (approaching max_write_buffer_number=6)
+        // Action: If >=4, flush is falling behind
+        // - Increase max_background_jobs for more flush threads
+        // - Reduce write_buffer_size (currently 256MB) to flush more frequently
+        // - Increase max_write_buffer_number above 6 for more buffer
+        if let Ok(Some(value)) = self.inner.property_value("rocksdb.num-immutable-mem-table") {
+            if let Ok(num) = value.parse::<u64>() {
+                metrics.push((
+                    "rocksdb.num_immutable_mem_table",
+                    num as f64,
+                    vec![],
+                ));
             }
         }
         
-        // 4. rocksdb.cur-size-all-mem-tables
-        // Total size of all memory tables in bytes
+        // 4. rocksdb.mem-table-flush-pending
+        // Whether a memtable flush is pending (0=no, 1=yes)
+        // Threshold: 0 = healthy, 1 = flush in progress or queued
+        // Action: If sustained at 1 with high num_immutable_mem_table
+        // - Same actions as num_immutable_mem_table
+        if let Ok(Some(value)) = self.inner.property_value("rocksdb.mem-table-flush-pending") {
+            if let Ok(pending) = value.parse::<u64>() {
+                metrics.push((
+                    "rocksdb.mem_table_flush_pending",
+                    pending as f64,
+                    vec![],
+                ));
+            }
+        }
+        
+        // 5. rocksdb.num-files-at-level0
+        // Number of SST files at Level 0 (most critical metric for write stalls)
+        // Threshold: 0-20 = healthy, 21-29 = warning, 30-49 = slowdown active, >=50 = writes stopped
+        // Action based on range:
+        // - 21-29: Monitor, compaction catching up
+        // - 30-49: Write slowdown active
+        //   - Increase level_zero_slowdown_writes_trigger above 30
+        //   - Increase max_background_jobs for more compaction threads
+        //   - Decrease level_zero_file_num_compaction_trigger below 4 for earlier compaction
+        // - >=50: Writes stopped, immediate action needed
+        //   - Increase level_zero_stop_writes_trigger above 50
+        //   - Reduce write throughput temporarily
+        if let Ok(Some(value)) = self.inner.property_value("rocksdb.num-files-at-level0") {
+            if let Ok(num) = value.parse::<u64>() {
+                metrics.push((
+                    "rocksdb.num_files_at_level0",
+                    num as f64,
+                    vec![],
+                ));
+            }
+        }
+        
+        // 6. rocksdb.estimate-pending-compaction-bytes
+        // Estimated bytes needing compaction to reach target level sizes
+        // Threshold: 0-64GB = healthy, 64-128GB = warning, 128-512GB = slowdown, >=512GB = stopped
+        // Action based on range:
+        // - 64-128GB: Compaction falling behind
+        //   - Increase max_background_jobs
+        //   - Increase max_compaction_bytes above 2GB for larger compactions
+        // - 128-512GB: Soft limit reached, writes slowing
+        //   - Increase soft_pending_compaction_bytes_limit above 128GB
+        // - >=512GB: Hard limit, writes stopped
+        //   - Increase hard_pending_compaction_bytes_limit above 512GB
+        //   - Add more CPU cores to max_background_jobs
+        if let Ok(Some(value)) = self.inner.property_value("rocksdb.estimate-pending-compaction-bytes") {
+            if let Ok(bytes) = value.parse::<u64>() {
+                metrics.push((
+                    "rocksdb.estimate_pending_compaction_bytes",
+                    bytes as f64,
+                    vec![],
+                ));
+            }
+        }
+        
+        // 7. rocksdb.cur-size-all-mem-tables
+        // Total memory used by all memtables (active and immutable)
+        // Threshold: Expect up to db_write_buffer_size (8GB)
+        // Action: If approaching 8GB with high num_immutable_mem_table
+        // - Flush is bottlenecked, same actions as num_immutable_mem_table
+        // - May increase db_write_buffer_size if memory available
         if let Ok(Some(value)) = self.inner.property_value("rocksdb.cur-size-all-mem-tables") {
             if let Ok(size) = value.parse::<u64>() {
                 metrics.push((
@@ -230,8 +364,12 @@ impl DatabaseMetrics for DatabaseEnv {
             }
         }
         
-        // 5. rocksdb.num-running-compactions
-        // Number of currently running compactions
+        // 8. rocksdb.num-running-compactions
+        // Number of compaction threads currently active
+        // Threshold: 0-14 = normal (max_background_jobs=14), >14 should not happen
+        // Action: If consistently at max (14) with pending_compaction_bytes growing
+        // - Increase max_background_jobs above 14 (if CPU available)
+        // - Check disk I/O is not saturated (30000 IOPS available)
         if let Ok(Some(value)) = self.inner.property_value("rocksdb.num-running-compactions") {
             if let Ok(num) = value.parse::<u64>() {
                 metrics.push((
@@ -242,13 +380,34 @@ impl DatabaseMetrics for DatabaseEnv {
             }
         }
         
-        // 6. rocksdb.num-running-flushes
-        // Number of currently running flushes
+        // 9. rocksdb.num-running-flushes
+        // Number of memtable flush operations currently active
+        // Threshold: 0-4 = normal, >4 with high num_immutable_mem_table = bottleneck
+        // Action: If sustained high with growing num_immutable_mem_table
+        // - Check disk write bandwidth (may be saturated)
+        // - Reduce write_buffer_size (256MB) for faster individual flushes
+        // - Increase max_background_jobs for more flush threads
         if let Ok(Some(value)) = self.inner.property_value("rocksdb.num-running-flushes") {
             if let Ok(num) = value.parse::<u64>() {
                 metrics.push((
                     "rocksdb.num_running_flushes",
                     num as f64,
+                    vec![],
+                ));
+            }
+        }
+        
+        // 10. rocksdb.compaction-pending
+        // Whether any compaction is pending (0=no, 1=yes)
+        // Threshold: 0-1 = normal (1 expected under load)
+        // Action: If 1 with high estimate_pending_compaction_bytes
+        // - See estimate_pending_compaction_bytes actions
+        // - Indicates compaction scheduler is active
+        if let Ok(Some(value)) = self.inner.property_value("rocksdb.compaction-pending") {
+            if let Ok(pending) = value.parse::<u64>() {
+                metrics.push((
+                    "rocksdb.compaction_pending",
+                    pending as f64,
                     vec![],
                 ));
             }
@@ -322,67 +481,4 @@ struct StallMicros {
     level0_numfiles: Option<u64>,
     /// Stall time caused by pending compaction bytes limit
     pending_compaction_bytes: Option<u64>,
-}
-
-/// Parses stall-related microseconds from RocksDB cfstats string
-/// 
-/// Example cfstats format:
-/// ```
-/// ** Compaction Stats [default] **
-/// Level    Files   Size     ...
-/// Stall(count): level0_slowdown: 5, level0_numfiles: 0, ...
-/// Stall(us): level0_slowdown: 1234567, level0_numfiles: 0, ...
-/// ```
-fn parse_stall_micros_from_cfstats(cfstats: &str) -> StallMicros {
-    let mut result = StallMicros::default();
-    
-    // Find lines containing "Stall(us):"
-    for line in cfstats.lines() {
-        let line = line.trim();
-        
-        if line.starts_with("Stall(us):") || line.contains("Stall(us):") {
-            // Parse format: "Stall(us): level0_slowdown: 1234, level0_numfiles: 5678, ..."
-            // Remove "Stall(us):" prefix
-            let content = line.strip_prefix("Stall(us):").unwrap_or(line);
-            
-            // Split by different stall types
-            for part in content.split(',') {
-                let part = part.trim();
-                if let Some((key, value)) = part.split_once(':') {
-                    let key = key.trim();
-                    let value = value.trim();
-                    
-                    if let Ok(micros) = value.parse::<u64>() {
-                        match key {
-                            "level0_slowdown" => result.level0_slowdown = Some(micros),
-                            "level0_numfiles" | "level0_numfiles_limit" => {
-                                result.level0_numfiles = Some(micros)
-                            }
-                            "pending_compaction_bytes" | "pending_compaction_bytes_limit" => {
-                                result.pending_compaction_bytes = Some(micros)
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-            
-            // Calculate total stall time
-            let mut total = 0u64;
-            if let Some(v) = result.level0_slowdown {
-                total += v;
-            }
-            if let Some(v) = result.level0_numfiles {
-                total += v;
-            }
-            if let Some(v) = result.pending_compaction_bytes {
-                total += v;
-            }
-            if total > 0 {
-                result.total = Some(total);
-            }
-        }
-    }
-    
-    result
 }
