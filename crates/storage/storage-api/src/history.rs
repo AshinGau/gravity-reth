@@ -6,6 +6,8 @@ use reth_db_models::AccountBeforeTx;
 use reth_primitives_traits::StorageEntry;
 use reth_storage_errors::provider::ProviderResult;
 
+use crate::ChangedAccountsAndStorage;
+
 /// History Writer
 #[auto_impl(&, Arc, Box)]
 pub trait HistoryWriter: Send + Sync {
@@ -55,4 +57,7 @@ pub trait HistoryWriter: Send + Sync {
 
     /// Read account/storage changesets and update account/storage history indices.
     fn update_history_indices(&self, range: RangeInclusive<BlockNumber>) -> ProviderResult<()>;
+
+    /// Read account/storage changesets and update account/storage history indices v2.
+    fn update_history_indicesv2(&self, block_number: BlockNumber, changes: ChangedAccountsAndStorage) -> ProviderResult<()>;
 }

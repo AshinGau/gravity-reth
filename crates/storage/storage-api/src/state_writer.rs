@@ -1,4 +1,4 @@
-use alloy_primitives::BlockNumber;
+use alloy_primitives::{Address, B256, BlockNumber};
 use reth_execution_types::ExecutionOutcome;
 use reth_storage_errors::provider::ProviderResult;
 use reth_trie_common::HashedPostStateSorted;
@@ -8,6 +8,15 @@ use revm_database::{
 };
 
 use super::StorageLocation;
+
+/// Changed accounts and storage by `StateWriter`
+#[derive(Debug, Default)]
+pub struct ChangedAccountsAndStorage {
+    /// Changed accounts
+    pub changed_accounts: Vec<Address>,
+    /// Changed storage
+    pub changed_storage: Vec<(Address, B256)>,
+}
 
 /// A trait specifically for writing state changes or reverts
 pub trait StateWriter {
@@ -21,7 +30,7 @@ pub trait StateWriter {
         execution_outcome: &ExecutionOutcome<Self::Receipt>,
         is_value_known: OriginalValuesKnown,
         write_receipts_to: StorageLocation,
-    ) -> ProviderResult<()>;
+    ) -> ProviderResult<ChangedAccountsAndStorage>;
 
     /// Write state reverts to the database.
     ///
@@ -30,7 +39,7 @@ pub trait StateWriter {
         &self,
         reverts: PlainStateReverts,
         first_block: BlockNumber,
-    ) -> ProviderResult<()>;
+    ) -> ProviderResult<ChangedAccountsAndStorage>;
 
     /// Write state changes to the database.
     fn write_state_changes(&self, changes: StateChangeset) -> ProviderResult<()>;
