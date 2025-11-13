@@ -197,10 +197,6 @@ impl DatabaseEnv {
         
         // Allow OS to use more file handles
         opts.set_max_open_files(10000);
-        
-        // === Statistics ===
-        opts.enable_statistics();
-        opts.set_stats_dump_period_sec(300); // Dump stats every 5 minutes
 
         // Get all required table names
         let required_tables: Vec<String> = Tables::tables().map(|t| t.name().to_string()).collect();
