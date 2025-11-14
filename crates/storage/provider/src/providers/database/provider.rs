@@ -29,7 +29,7 @@ use alloy_primitives::{
     Address, BlockHash, BlockNumber, TxHash, TxNumber, B256, U256,
 };
 use itertools::Itertools;
-use rayon::slice::ParallelSliceMut;
+use rayon::{prelude::*, slice::ParallelSliceMut};
 use reth_chainspec::{ChainInfo, ChainSpecProvider, EthChainSpec, EthereumHardforks};
 use reth_db_api::{
     cursor::{DbCursorRO, DbCursorRW, DbDupCursorRO, DbDupCursorRW},
@@ -836,17 +836,33 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> DatabaseProvider<TX, N> {
     fn append_history_index<P, T>(
         &self,
         index_updates: impl IntoIterator<Item = (P, impl IntoIterator<Item = u64>)>,
-        mut sharded_key_factory: impl FnMut(P, BlockNumber) -> T::Key,
+        sharded_key_factory: impl Fn(P, BlockNumber) -> T::Key + Sync,
     ) -> ProviderResult<()>
     where
-        P: Copy,
+        P: Copy + Send,
         T: Table<Value = BlockNumberList>,
     {
+        let index_updates: Vec<(P, Vec<u64>)> = index_updates
+            .into_iter()
+            .map(|(pk, indices)| (pk, indices.into_iter().collect::<Vec<_>>()))
+            .collect();
+        
+        let shards: Result<Vec<_>, _> = index_updates
+            .into_par_iter()
+            .map(|(partial_key, indices)| -> ProviderResult<(P, Vec<u64>)> {
+                let key = sharded_key_factory(partial_key, u64::MAX);
+                let mut last_shard = if let Some(list) = self.tx.get::<T>(key)? {
+                    list.iter().collect::<Vec<_>>()
+                } else {
+                    vec![]
+                };
+                last_shard.extend(indices);
+                Ok((partial_key, last_shard))
+            })
+            .collect();
+        let shards = shards?;
         let mut cursor = self.tx.cursor_write::<T>()?;
-        for (partial_key, indices) in index_updates {
-            let mut last_shard =
-                self.take_shard::<T>(&mut cursor, sharded_key_factory(partial_key, u64::MAX))?;
-            last_shard.extend(indices);
+        for (partial_key, last_shard) in shards {
             // Chunk indices and insert them in shards of N size.
             let mut chunks = last_shard.chunks(sharded_key::NUM_OF_INDICES_IN_SHARD).peekable();
             while let Some(list) = chunks.next() {
@@ -856,7 +872,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> DatabaseProvider<TX, N> {
                     // Insert last list with `u64::MAX`.
                     u64::MAX
                 };
-                cursor.insert(
+                cursor.upsert(
                     sharded_key_factory(partial_key, highest_block_number),
                     &BlockNumberList::new_pre_sorted(list.iter().copied()),
                 )?;
