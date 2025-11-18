@@ -170,7 +170,6 @@ where
         } in blocks
         {
             let block_hash = recovered_block.hash();
-            let block_number = recovered_block.number();
 
             #[cfg(not(feature = "pipe_test"))]
             let start = Instant::now();
@@ -180,7 +179,7 @@ where
             let start = Instant::now();
             // Write state and changesets to the database.
             // Must be written after blocks because of the receipt lookup.
-            let changes = self.database().write_state(
+            self.database().write_state(
                 &execution_output,
                 OriginalValuesKnown::No,
                 StorageLocation::StaticFiles,
@@ -195,12 +194,13 @@ where
             let start = Instant::now();
             let _ = self.database().write_trie_updatesv2(triev2.as_ref())?;
             metrics::histogram!("save_blocks_time", &[("process", "write_trie_updatesv2")]).record(start.elapsed());
-            let start = Instant::now();
-
-             // update history indices
-            self.database().update_history_indicesv2(block_number, changes)?;
-            metrics::histogram!("save_blocks_time", &[("process", "update_history_indices")]).record(start.elapsed());
         }
+
+        let start = Instant::now();
+        // update history indices
+        self.database().update_history_indices(first_number..=last_block_number)?;
+        metrics::histogram!("save_blocks_time", &[("process", "update_history_indices")]).record(start.elapsed() / block_count as u32);
+
         // Update pipeline progress
         self.database().update_pipeline_stages(last_block_number, false)?;
 

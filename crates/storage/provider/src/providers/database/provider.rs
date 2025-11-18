@@ -14,7 +14,7 @@ use crate::{
     DBProvider, HashingWriter, HeaderProvider, HeaderSyncGapProvider, HistoricalStateProvider,
     HistoricalStateProviderRef, HistoryWriter, LatestStateProvider, LatestStateProviderRef,
     OriginalValuesKnown, ProviderError, PruneCheckpointReader, PruneCheckpointWriter, RevertsInit,
-    StageCheckpointReader, StateCommitmentProvider, StateProviderBox, StateWriter, ChangedAccountsAndStorage,
+    StageCheckpointReader, StateCommitmentProvider, StateProviderBox, StateWriter,
     StaticFileProviderFactory, StatsReader, StorageLocation, StorageReader, StorageTrieWriter,
     TransactionVariant, TransactionsProvider, TransactionsProviderExt, TrieWriter, TrieWriterV2,
 };
@@ -70,7 +70,11 @@ use revm_database::states::{
     PlainStateReverts, PlainStorageChangeset, PlainStorageRevert, StateChangeset,
 };
 use std::{
-    cmp::Ordering, collections::{BTreeMap, BTreeSet}, fmt::Debug, iter::once, ops::{Deref, DerefMut, Range, RangeBounds, RangeInclusive}, sync::{Arc, mpsc}
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet},
+    fmt::Debug,
+    ops::{Deref, DerefMut, Range, RangeBounds, RangeInclusive},
+    sync::{mpsc, Arc},
 };
 use tracing::{debug, trace};
 use ::metrics::histogram;
@@ -1804,7 +1808,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
         execution_outcome: &ExecutionOutcome<Self::Receipt>,
         is_value_known: OriginalValuesKnown,
         write_receipts_to: StorageLocation,
-    ) -> ProviderResult<ChangedAccountsAndStorage> {
+    ) -> ProviderResult<()> {
         let first_block = execution_outcome.first_block();
         let block_count = execution_outcome.len() as u64;
         let last_block = execution_outcome.last_block();
@@ -1815,7 +1819,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
         let (plain_state, reverts) =
             execution_outcome.bundle.to_plain_state_and_reverts(is_value_known);
 
-        let changes = self.write_state_reverts(reverts, first_block)?;
+        self.write_state_reverts(reverts, first_block)?;
         self.write_state_changes(plain_state)?;
 
         // Fetch the first transaction number for each block in the range
@@ -1910,15 +1914,14 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
             }
         }
 
-        Ok(changes)
+        Ok(())
     }
 
     fn write_state_reverts(
         &self,
         reverts: PlainStateReverts,
         first_block: BlockNumber,
-    ) -> ProviderResult<ChangedAccountsAndStorage> {
-        let mut changes = ChangedAccountsAndStorage::default();
+    ) -> ProviderResult<()> {
         // Write storage changes
         tracing::trace!("Writing storage changes");
         let mut storages_cursor = self.tx_ref().cursor_dup_write::<tables::PlainStorageState>()?;
@@ -1956,7 +1959,6 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
 
                 tracing::trace!(?address, ?storage, "Writing storage reverts");
                 for (key, value) in StorageRevertsIter::new(storage, wiped_storage) {
-                    changes.changed_storage.push((address, key));
                     storage_changeset_cursor.append_dup(storage_id, StorageEntry { key, value })?;
                 }
             }
@@ -1973,7 +1975,6 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
             account_block_reverts.par_sort_by_key(|a| a.0);
 
             for (address, info) in account_block_reverts {
-                changes.changed_accounts.push(address);
                 account_changeset_cursor.append_dup(
                     block_number,
                     AccountBeforeTx { address, info: info.map(Into::into) },
@@ -1981,7 +1982,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
             }
         }
 
-        Ok(changes)
+        Ok(())
     }
 
     fn write_state_changes(&self, mut changes: StateChangeset) -> ProviderResult<()> {
@@ -2795,21 +2796,6 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> HistoryWriter for DatabaseProvi
             self.insert_storage_history_index(indices)?;
         }
 
-        Ok(())
-    }
-
-    fn update_history_indicesv2(&self, block_number: BlockNumber, changes: ChangedAccountsAndStorage) -> ProviderResult<()> {
-        // account history stage
-        {
-            let indices = changes.changed_accounts.into_iter().map(|address| (address, once(block_number)));
-            self.insert_account_history_index(indices)?;
-        }
-
-        // storage history stage
-        {
-            let indices = changes.changed_storage.into_iter().map(|location| (location, once(block_number)));
-            self.insert_storage_history_index(indices)?;
-        }
         Ok(())
     }
 }
