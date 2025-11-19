@@ -1,13 +1,14 @@
 use crate::{
-    implementation::rocksdb::{delete_error, get_cf_handle, read_error, write_error},
+    implementation::rocksdb::{get_cf_handle, read_error},
     DatabaseError,
 };
+use parking_lot::Mutex;
 use reth_db_api::{
     common::{IterPairResult, PairResult, ValueOnlyResult},
     cursor::{DbCursorRO, DbCursorRW, DbDupCursorRO, DbDupCursorRW, Walker},
     table::{Compress, Decode, Decompress, DupSort, Encode, Table},
 };
-use reth_storage_errors::db::{DatabaseErrorInfo, DatabaseWriteOperation};
+use reth_storage_errors::db::DatabaseErrorInfo;
 use rocksdb::DB;
 use std::{
     fmt::Debug,
@@ -59,6 +60,7 @@ pub struct Cursor<K: TransactionKind, T: Table> {
     /// Iterator for cursor operations - always ready to use
     iterator: rocksdb::DBRawIterator<'static>,
     /// Cache buffer that receives compressed values.
+    batch: Arc<Mutex<rocksdb::WriteBatch>>,
     buf: Vec<u8>,
     _phantom: PhantomData<(K, T)>,
 }
@@ -66,7 +68,7 @@ pub struct Cursor<K: TransactionKind, T: Table> {
 impl<K: TransactionKind, T: Table> Cursor<K, T> {
     const KEY_LENGTH: usize = mem::size_of::<<T::Key as Encode>::Encoded>();
 
-    pub(crate) fn new(db: Arc<DB>) -> Result<Self, DatabaseError> {
+    pub(crate) fn new(db: Arc<DB>, batch: Arc<Mutex<rocksdb::WriteBatch>>) -> Result<Self, DatabaseError> {
         let cf_handle = get_cf_handle::<T>(&db)?;
 
         // Create iterator at construction time - always ready to use
@@ -77,7 +79,7 @@ impl<K: TransactionKind, T: Table> Cursor<K, T> {
             )
         };
 
-        Ok(Self { db, iterator, buf: Vec::new(), _phantom: PhantomData })
+        Ok(Self { db, iterator, batch, buf: Vec::new(), _phantom: PhantomData })
     }
 
     /// Encode DupSort composite key: key + subkey
@@ -262,17 +264,15 @@ impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
         let encoded_key = key.encode();
         let value_ref = compress_to_buf_or_ref!(self, value);
         let compressed_value = value_ref.unwrap_or(&self.buf);
+        let mut batch = self.batch.lock();
         if T::DUPSORT {
             let subkey = &compressed_value[..value.subkey_compress_length().unwrap()];
             let composite_key = Self::encode_dupsort_key(encoded_key.as_ref(), subkey);
-            self.db.put_cf(cf_handle, &composite_key, compressed_value).map_err(|e| {
-                write_error::<T>(e, DatabaseWriteOperation::Put, encoded_key.into())
-            })
+            batch.put_cf(cf_handle, &composite_key, compressed_value);
         } else {
-            self.db.put_cf(cf_handle, &encoded_key, compressed_value).map_err(|e| {
-                write_error::<T>(e, DatabaseWriteOperation::Put, encoded_key.into())
-            })
+            batch.put_cf(cf_handle, &encoded_key, compressed_value);
         }
+        Ok(())
     }
 
     fn insert(&mut self, key: T::Key, value: &T::Value) -> Result<(), DatabaseError> {
@@ -288,7 +288,8 @@ impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
         if self.iterator.valid() {
             if let Some(key) = self.iterator.key() {
                 let cf_handle = get_cf_handle::<T>(&self.db)?;
-                self.db.delete_cf(cf_handle, key).map_err(delete_error)?;
+                let mut batch = self.batch.lock();
+                batch.delete_cf(cf_handle, key);
             }
         }
         Ok(())
@@ -313,6 +314,7 @@ impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
                 }
             }
 
+            let mut batch = self.batch.lock();
             if carry {
                 let iter = self.db.iterator_cf(
                     cf_handle,
@@ -332,16 +334,17 @@ impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
                 }
 
                 for key_to_delete in keys_to_delete {
-                    self.db.delete_cf(cf_handle, &key_to_delete).map_err(delete_error)?;
+                    batch.delete_cf(cf_handle, &key_to_delete);
                 }
             } else {
                 // Use delete_range_cf for efficient deletion: [main_key, next_key)
-                self.db.delete_range_cf(cf_handle, main_key, next_key).map_err(delete_error)?;
+                batch.delete_range_cf(cf_handle, main_key, next_key);
             }
-            Ok(())
         } else {
-            self.db.delete_cf(cf_handle, key.encode()).map_err(delete_error)
+            let mut batch = self.batch.lock();
+            batch.delete_cf(cf_handle, key.encode().as_ref());
         }
+        Ok(())
     }
 }
 
@@ -518,9 +521,9 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<RW, T> {
         let subkey = &compressed_value[..value.subkey_compress_length().unwrap()];
         let composite_key = Self::encode_dupsort_key(encoded_key.as_ref(), subkey);
 
-        self.db.put_cf(cf_handle, &composite_key, compressed_value).map_err(|e| {
-            write_error::<T>(e, DatabaseWriteOperation::CursorAppendDup, composite_key.clone())
-        })
+        let mut batch = self.batch.lock();
+        batch.put_cf(cf_handle, &composite_key, compressed_value);
+        Ok(())
     }
 
     fn delete_by_key_subkey(&mut self, key: T::Key, subkey: T::SubKey) -> Result<(), DatabaseError> {
@@ -529,6 +532,8 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<RW, T> {
         let composite_key = Self::encode_dupsort_key(encoded_key.as_ref(), encoded_subkey.as_ref());
 
         let cf_handle = get_cf_handle::<T>(&self.db)?;
-        self.db.delete_cf(cf_handle, &composite_key).map_err(delete_error)
+        let mut batch = self.batch.lock();
+        batch.delete_cf(cf_handle, &composite_key);
+        Ok(())
     }
 }

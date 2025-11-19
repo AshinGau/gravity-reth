@@ -94,12 +94,13 @@ rocksdb = [
     "dep:reth-trie-common",
     "reth-trie-common/std",
     "reth-trie-common/rayon",
+    "dep:parking_lot",
 ]
 test-utils = [
     "dep:tempfile",
     "mdbx",
     "arbitrary",
-    "parking_lot",
+    "dep:parking_lot",
     "reth-db-api/test-utils",
     "reth-nippy-jar/test-utils",
     "reth-primitives-traits/test-utils",

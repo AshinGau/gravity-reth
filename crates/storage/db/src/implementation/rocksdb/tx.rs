@@ -1,29 +1,43 @@
 //! Transaction implementation for RocksDB.
 
 use crate::{
-    implementation::rocksdb::{cursor, delete_error, get_cf_handle, read_error, write_error},
-    DatabaseError,
+    DatabaseError, implementation::rocksdb::{cursor, get_cf_handle, read_error, to_error_info}
 };
 use reth_db_api::{
     table::{Compress, Decompress, DupSort, Encode, Table, TableImporter},
     transaction::{DbTx, DbTxMut},
 };
-use reth_storage_errors::db::{DatabaseErrorInfo, DatabaseWriteOperation};
+use reth_storage_errors::db::DatabaseErrorInfo;
 use rocksdb::DB;
 use std::sync::Arc;
+use parking_lot::Mutex;
 
 pub use cursor::{RO, RW};
 
 /// RocksDB transaction.
-#[derive(Debug)]
 pub struct Tx<K: cursor::TransactionKind> {
     db: Arc<DB>,
+    batch: Arc<Mutex<rocksdb::WriteBatch>>,
     _mode: std::marker::PhantomData<K>,
+}
+
+impl<K: cursor::TransactionKind> std::fmt::Debug for Tx<K> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Tx")
+            .field("db", &self.db)
+            .field("batch", &"<WriteBatch>")
+            .field("_mode", &self._mode)
+            .finish()
+    }
 }
 
 impl<K: cursor::TransactionKind> Tx<K> {
     pub(crate) fn new(db: Arc<DB>) -> Self {
-        Self { db, _mode: std::marker::PhantomData }
+        Self { 
+            db, 
+            batch: Arc::new(Mutex::new(rocksdb::WriteBatch::default())),
+            _mode: std::marker::PhantomData 
+        }
     }
 
     pub fn table_entries(&self, name: &str) -> Result<usize, DatabaseError> {
@@ -76,7 +90,12 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
     }
 
     fn commit(self) -> Result<bool, DatabaseError> {
-        // For RocksDB, there's no explicit commit
+        // Write the batch to RocksDB atomically
+        let mut batch_guard = self.batch.lock();
+        let batch = std::mem::take(&mut *batch_guard);
+        self.db.write(batch).map_err(|e| {
+            DatabaseError::Commit(to_error_info(e))
+        })?;
         Ok(true)
     }
 
@@ -85,11 +104,11 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
     }
 
     fn cursor_read<T: Table>(&self) -> Result<Self::Cursor<T>, DatabaseError> {
-        cursor::Cursor::new(self.db.clone())
+        cursor::Cursor::new(self.db.clone(), self.batch.clone())
     }
 
     fn cursor_dup_read<T: DupSort>(&self) -> Result<Self::DupCursor<T>, DatabaseError> {
-        cursor::Cursor::new(self.db.clone())
+        cursor::Cursor::new(self.db.clone(), self.batch.clone())
     }
 
     fn entries<T: Table>(&self) -> Result<usize, DatabaseError> {
@@ -112,9 +131,8 @@ impl DbTxMut for Tx<cursor::RW> {
         let encoded_key = key.encode();
         let encoded_value = value.compress();
 
-        self.db.put_cf(cf_handle, &encoded_key, &encoded_value).map_err(|e| {
-            write_error::<T>(e, DatabaseWriteOperation::Put, encoded_key.as_ref().to_vec())
-        })?;
+        let mut batch = self.batch.lock();
+        batch.put_cf(cf_handle, &encoded_key, &encoded_value);
 
         Ok(())
     }
@@ -128,7 +146,8 @@ impl DbTxMut for Tx<cursor::RW> {
 
         let encoded_key = key.encode();
 
-        self.db.delete_cf(cf_handle, &encoded_key).map_err(delete_error)?;
+        let mut batch = self.batch.lock();
+        batch.delete_cf(cf_handle, &encoded_key);
         Ok(true)
     }
 
@@ -171,22 +190,23 @@ impl DbTxMut for Tx<cursor::RW> {
             (first_key, last_key)
         };
 
+        let mut batch = self.batch.lock();
         // Delete the range [first_key, last_key] - note that delete_range_cf is [start, end)
         // so we need to handle the last key separately
-        self.db.delete_range_cf(cf_handle, &first_key, &last_key).map_err(delete_error)?;
+        batch.delete_range_cf(cf_handle, &first_key, &last_key);
 
         // Delete the last key separately since delete_range_cf is [start, end)
-        self.db.delete_cf(cf_handle, &last_key).map_err(delete_error)?;
+        batch.delete_cf(cf_handle, &last_key);
 
         Ok(())
     }
 
     fn cursor_write<T: Table>(&self) -> Result<Self::CursorMut<T>, DatabaseError> {
-        cursor::Cursor::new(self.db.clone())
+        cursor::Cursor::new(self.db.clone(), self.batch.clone())
     }
 
     fn cursor_dup_write<T: DupSort>(&self) -> Result<Self::DupCursorMut<T>, DatabaseError> {
-        cursor::Cursor::new(self.db.clone())
+        cursor::Cursor::new(self.db.clone(), self.batch.clone())
     }
 }
 
