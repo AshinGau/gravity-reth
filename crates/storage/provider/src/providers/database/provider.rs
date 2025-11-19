@@ -1176,6 +1176,13 @@ impl<TX: DbTx + 'static, N: NodeTypes> BlockNumReader for DatabaseProvider<TX, N
             .unwrap_or_default())
     }
 
+    fn recover_block_number(&self) -> ProviderResult<BlockNumber> {
+        Ok(self
+            .get_stage_checkpoint(StageId::Execution)?
+            .map(|checkpoint| checkpoint.block_number)
+            .unwrap_or_default())
+    }
+
     fn block_number(&self, hash: B256) -> ProviderResult<Option<BlockNumber>> {
         Ok(self.tx.get::<tables::HeaderNumbers>(hash)?)
     }
