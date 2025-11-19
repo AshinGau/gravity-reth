@@ -43,6 +43,10 @@ gravity-storage.workspace = true
 reth-metrics.workspace = true
 gravity-primitives.workspace = true
 
+[features]
+rocksdb = ["reth-db/rocksdb"]
+mdbx = ["reth-db/mdbx"]
+
 [workspace.package]
 version = "1.6.0"
 edition = "2021"
@@ -388,7 +392,7 @@ reth-config = { path = "crates/config", default-features = false }
 reth-consensus = { path = "crates/consensus/consensus", default-features = false }
 reth-consensus-common = { path = "crates/consensus/common", default-features = false }
 reth-consensus-debug-client = { path = "crates/consensus/debug-client" }
-reth-db = { path = "crates/storage/db", default-features = false }
+reth-db = { path = "crates/storage/db" }
 reth-db-api = { path = "crates/storage/db-api" }
 reth-db-common = { path = "crates/storage/db-common" }
 reth-db-models = { path = "crates/storage/db-models", default-features = false }
@@ -469,7 +473,7 @@ reth-provider = { path = "crates/storage/provider" }
 reth-prune = { path = "crates/prune/prune" }
 reth-prune-types = { path = "crates/prune/types", default-features = false }
 reth-revm = { path = "crates/revm", default-features = false }
-grevm = { package = "grevm", git = "https://github.com/Galxe/grevm", tag = "v2.2.0" }
+grevm = { package = "grevm", git = "https://github.com/Galxe/grevm", tag = "v2.2.2" }
 reth-rpc = { path = "crates/rpc/rpc" }
 reth-rpc-api = { path = "crates/rpc/rpc-api" }
 reth-rpc-api-testing-util = { path = "crates/rpc/rpc-testing-util" }
