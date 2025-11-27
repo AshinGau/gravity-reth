@@ -97,7 +97,7 @@ where
 
         let (results, state) = {
             let EvmEnv { cfg_env, block_env } = evm_env;
-            let executor = Scheduler::new(cfg_env, block_env, txs, state, true);
+            let executor = Scheduler::new(cfg_env, block_env, txs, state, false);
             executor.parallel_execute(None).map_err(|e| {
                 BlockExecutionError::Internal(InternalBlockExecutionError::EVM {
                     hash: block

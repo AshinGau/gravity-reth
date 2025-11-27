@@ -177,10 +177,19 @@ where
         provider: &Provider,
         input: ExecInput,
     ) -> Result<ExecOutput, StageError> {
-        if matches!(self, Self::Unwind) {
-            info!(target: "sync::stages::merkle::unwind", "Stage is always skipped");
-            return Ok(ExecOutput::done(StageCheckpoint::new(input.target())))
-        }
+        let (_threshold, incremental_threshold) = match self {
+            Self::Unwind => {
+                info!(target: "sync::stages::merkle::unwind", "Stage is always skipped");
+                return Ok(ExecOutput::done(StageCheckpoint::new(input.target())))
+            }
+            Self::Execution { rebuild_threshold, incremental_threshold } => {
+                (*rebuild_threshold, *incremental_threshold)
+            }
+            #[cfg(any(test, feature = "test-utils"))]
+            Self::Both { rebuild_threshold, incremental_threshold } => {
+                (*rebuild_threshold, *incremental_threshold)
+            }
+        };
 
         let range = input.next_block_range();
         let (_from_block, to_block) = range.clone().into_inner();
@@ -195,13 +204,32 @@ where
             (target_block_root, input.checkpoint().entities_stage_checkpoint().unwrap_or_default())
         } else {
             debug!(target: "sync::stages::merkle::exec", current = ?current_block_number, target = ?to_block, "Updating trie in chunks");
-            // Use optimized nested hash algorithm for state root calculation
-            // Create a read-only transaction for parallel trie calculation
-            let nested_state_root = NestedStateRoot::new(provider.tx_ref(), None);
-            // Read the hashed state from database for the specified range
-            let hashed_state = nested_state_root.read_hashed_state(Some(range))?;
-            let (final_root, trie_updates_v2) = nested_state_root.calculate(&hashed_state)?;
-            provider.write_trie_updatesv2(&trie_updates_v2)?;
+            let mut final_root = None;
+            for start_block in range.step_by(incremental_threshold as usize) {
+                let chunk_to = std::cmp::min(start_block + incremental_threshold, to_block);
+                let chunk_range = start_block..=chunk_to;
+                debug!(
+                    target: "sync::stages::merkle::exec",
+                    current = ?current_block_number,
+                    target = ?to_block,
+                    incremental_threshold,
+                    chunk_range = ?chunk_range,
+                    "Processing chunk"
+                );
+                // Use optimized nested hash algorithm for state root calculation
+                // Create a read-only transaction for parallel trie calculation
+                let nested_state_root = NestedStateRoot::new(provider.tx_ref(), None);
+                // Read the hashed state from database for the specified range
+                let hashed_state = nested_state_root.read_hashed_state(Some(chunk_range))?;
+                let (root, trie_updates_v2) = nested_state_root.calculate(&hashed_state)?;
+                final_root = Some(root);
+                provider.write_trie_updatesv2(&trie_updates_v2)?;
+            }
+
+            // if we had no final root, we must have not looped above, which should not be possible
+            let final_root = final_root.ok_or(StageError::Fatal(
+                "Incremental merkle hashing did not produce a final root".into(),
+            ))?;
 
             let total_hashed_entries = (provider.count_entries::<tables::HashedAccounts>()? +
                 provider.count_entries::<tables::HashedStorages>()?)

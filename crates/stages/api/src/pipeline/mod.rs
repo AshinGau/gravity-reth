@@ -46,8 +46,6 @@ pub type PipelineWithResult<N> = (Pipeline<N>, Result<ControlFlow, PipelineError
 
 type DatabaseProviderRW<N> = <ProviderFactory<N> as DatabaseProviderFactory>::ProviderRW;
 
-const SYNC_BATCH_SIZE: u64 = 10000;
-
 #[cfg_attr(doc, aquamarine::aquamarine)]
 /// A staged sync pipeline.
 ///
@@ -224,23 +222,6 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
     /// the pipeline (for example the `Finish` stage). Or [`ControlFlow::Unwind`] of the stage
     /// that caused the unwind.
     pub async fn run_loop(&mut self) -> Result<ControlFlow, PipelineError> {
-        if let Some(max_block) = self.max_block {
-            let mut current_max_block = self
-                .provider_factory
-                .get_stage_checkpoint(StageId::Finish)?
-                .map(|ch| ch.block_number)
-                .unwrap_or_default();
-            while current_max_block < max_block {
-                current_max_block = max_block.min(current_max_block + SYNC_BATCH_SIZE);
-                self.run_batch(Some(current_max_block)).await?;
-            }
-            Ok(self.progress.next_ctrl())
-        } else {
-            self.run_batch(None).await
-        }
-    }
-
-    async fn run_batch(&mut self, to_block: Option<u64>) -> Result<ControlFlow, PipelineError> {
         self.move_to_static_files()?;
 
         let mut previous_stage = None;
@@ -249,8 +230,7 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
             let stage_id = stage.id();
 
             trace!(target: "sync::pipeline", stage = %stage_id, "Executing stage");
-            let next =
-                self.execute_stage_to_completion(previous_stage, stage_index, to_block).await?;
+            let next = self.execute_stage_to_completion(previous_stage, stage_index).await?;
 
             trace!(target: "sync::pipeline", stage = %stage_id, ?next, "Completed stage");
 
@@ -439,13 +419,12 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
         &mut self,
         previous_stage: Option<BlockNumber>,
         stage_index: usize,
-        to_block: Option<u64>,
     ) -> Result<ControlFlow, PipelineError> {
         let total_stages = self.stages.len();
 
         let stage_id = self.stage(stage_index).id();
         let mut made_progress = false;
-        let target = to_block.or(previous_stage);
+        let target = self.max_block.or(previous_stage);
 
         loop {
             let prev_checkpoint = self.provider_factory.get_stage_checkpoint(stage_id)?;
@@ -457,7 +436,7 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                 warn!(
                     target: "sync::pipeline",
                     stage = %stage_id,
-                    max_block = to_block,
+                    max_block = self.max_block,
                     prev_block = prev_checkpoint.map(|progress| progress.block_number),
                     "Stage reached target block, skipping."
                 );
