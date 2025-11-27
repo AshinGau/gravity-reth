@@ -1,7 +1,6 @@
 use crate::{common::CliNodeTypes, db::checksum::ChecksumViewer};
 use clap::Parser;
 use comfy_table::{Cell, Row, Table as ComfyTable};
-use eyre::WrapErr;
 use human_bytes::human_bytes;
 use itertools::Itertools;
 use reth_chainspec::EthereumHardforks;
@@ -75,7 +74,7 @@ impl Command {
             "Total Size",
         ]);
 
-        tool.provider_factory.db_ref().view(|tx| {
+        tool.provider_factory.db_ref().view(|_tx| {
             let mut db_tables = Tables::ALL.iter().map(|table| table.name()).collect::<Vec<_>>();
             db_tables.sort();
             let mut total_size = 0;

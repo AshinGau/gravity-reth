@@ -65,6 +65,17 @@ pub struct Cursor<K: TransactionKind, T: Table> {
     _phantom: PhantomData<(K, T)>,
 }
 
+impl<K: TransactionKind, T: Table> std::fmt::Debug for Cursor<K, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Cursor")
+            .field("db", &self.db)
+            .field("iterator", &"<DBRawIterator>")
+            .field("batch", &"<WriteBatch>")
+            .field("_phantom", &self._phantom)
+            .finish()
+    }
+}
+
 impl<K: TransactionKind, T: Table> Cursor<K, T> {
     const KEY_LENGTH: usize = mem::size_of::<<T::Key as Encode>::Encoded>();
 
@@ -88,12 +99,6 @@ impl<K: TransactionKind, T: Table> Cursor<K, T> {
         composite.extend_from_slice(key);
         composite.extend_from_slice(subkey);
         composite
-    }
-
-    /// Decode DupSort composite key: split based on fixed key length
-    fn decode_dupsort_key(composite: &[u8]) -> Result<(&[u8], &[u8]), DatabaseError> {
-        assert!(composite.len() >= Self::KEY_LENGTH);
-        Ok((&composite[..Self::KEY_LENGTH], &composite[Self::KEY_LENGTH..]))
     }
 
     /// Extract main key from composite key with validation

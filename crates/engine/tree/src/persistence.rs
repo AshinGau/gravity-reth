@@ -160,12 +160,11 @@ where
             let last_block = blocks.last().unwrap().recovered_block();
             let first_number = first_block.number();
             let last_block_number = last_block.number();
-            let block_count = blocks.len();
-            debug!(target: "provider::storage_writer", block_count = %blocks.len(), "Writing blocks and execution data to storage");
+            debug!(target: "provider::storage_writer", block_count = blocks.len(), "Writing blocks and execution data to storage");
 
             for ExecutedBlockWithTrieUpdates {
                 block: ExecutedBlock { recovered_block, execution_output, hashed_state },
-                trie,
+                trie: _,
                 triev2,
             } in blocks {
                 let block_number = recovered_block.number();
@@ -228,7 +227,7 @@ where
                     info!(target: "provider::storage_writer", checkpoint = ?ck.block_number, block_number = ?block_number, "Missing previous block(s) merklization state, rebuild from database");
                     let nested_state_root = NestedStateRoot::new(provider_rw.tx_ref(), None);
                     let hashed_state = nested_state_root.read_hashed_state(Some(ck.block_number+1..=block_number-1))?;
-                    let (final_root, trie_updates_v2) = nested_state_root.calculate(&hashed_state)?;
+                    let (_final_root, trie_updates_v2) = nested_state_root.calculate(&hashed_state)?;
                     provider_rw.write_trie_updatesv2(&trie_updates_v2).map_err(ProviderError::Database)?;
                 }
                 provider_rw.write_trie_updatesv2(triev2.as_ref()).map_err(ProviderError::Database)?;

@@ -12,7 +12,7 @@ use rocksdb::DB;
 use std::sync::Arc;
 use parking_lot::Mutex;
 
-pub use cursor::{RO, RW};
+pub(crate) use cursor::{RO, RW};
 
 /// RocksDB transaction.
 pub struct Tx<K: cursor::TransactionKind> {

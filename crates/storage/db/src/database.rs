@@ -50,7 +50,7 @@ pub fn init_db<P: AsRef<Path>>(path: P, args: DatabaseArguments) -> eyre::Result
 
 /// Opens up an existing database or creates a new one at the specified path. Creates tables defined
 /// in the given [`TableSet`] if necessary. Read/Write mode.
-pub fn init_db_for<P: AsRef<Path>, TS: TableSet>(
+pub(crate) fn init_db_for<P: AsRef<Path>, TS: TableSet>(
     path: P,
     args: DatabaseArguments,
 ) -> eyre::Result<DatabaseEnv> {
