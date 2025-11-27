@@ -192,7 +192,7 @@ where
         };
 
         let range = input.next_block_range();
-        let (_from_block, to_block) = range.clone().into_inner();
+        let (from_block, to_block) = range.clone().into_inner();
         let current_block_number = input.checkpoint().block_number;
 
         let target_block = provider
@@ -205,7 +205,8 @@ where
         } else {
             debug!(target: "sync::stages::merkle::exec", current = ?current_block_number, target = ?to_block, "Updating trie in chunks");
             let mut final_root = None;
-            for start_block in range.step_by(incremental_threshold as usize) {
+            let mut start_block = from_block;
+            while start_block <= to_block {
                 let chunk_to = std::cmp::min(start_block + incremental_threshold, to_block);
                 let chunk_range = start_block..=chunk_to;
                 debug!(
@@ -224,6 +225,7 @@ where
                 let (root, trie_updates_v2) = nested_state_root.calculate(&hashed_state)?;
                 final_root = Some(root);
                 provider.write_trie_updatesv2(&trie_updates_v2)?;
+                start_block = chunk_to + 1;
             }
 
             // if we had no final root, we must have not looped above, which should not be possible
