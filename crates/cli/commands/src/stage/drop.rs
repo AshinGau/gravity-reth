@@ -6,7 +6,6 @@ use reth_chainspec::EthChainSpec;
 use reth_cli::chainspec::ChainSpecParser;
 use reth_db::{static_file::iter_static_files, DatabaseError};
 use reth_db_api::{
-    database::Database,
     tables,
     transaction::{DbTx, DbTxMut},
 };

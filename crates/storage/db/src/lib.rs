@@ -15,18 +15,15 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
-mod database;
+pub mod database;
 mod implementation;
 pub mod lockfile;
-mod metrics;
 pub mod static_file;
 pub mod version;
 
 // Backend-specific modules are now handled through the unified database module
 
 pub mod generic;
-
-use reth_trie_common as _;
 
 pub use reth_storage_errors::db::{DatabaseError, DatabaseWriteOperation};
 
@@ -48,7 +45,6 @@ pub mod test_utils {
         database::Database, database_metrics::DatabaseMetrics, models::ClientVersion,
     };
     use reth_fs_util;
-    use reth_libmdbx::MaxReadTransactionDuration;
     use std::{
         fmt::Formatter,
         path::{Path, PathBuf},
@@ -174,8 +170,7 @@ pub mod test_utils {
 
         let db = init_db(
             &path,
-            DatabaseArguments::new(ClientVersion::default())
-                .with_max_read_transaction_duration(Some(MaxReadTransactionDuration::Unbounded)),
+            DatabaseArguments::new(ClientVersion::default()),
         )
         .expect(&emsg);
 
@@ -188,8 +183,7 @@ pub mod test_utils {
         let path = path.as_ref().to_path_buf();
         let db = init_db(
             path.as_path(),
-            DatabaseArguments::new(ClientVersion::default())
-                .with_max_read_transaction_duration(Some(MaxReadTransactionDuration::Unbounded)),
+            DatabaseArguments::new(ClientVersion::default()),
         )
         .expect(ERROR_DB_CREATION);
         Arc::new(TempDatabase::new(db, path))
@@ -198,8 +192,7 @@ pub mod test_utils {
     /// Create read only database for testing
     #[track_caller]
     pub fn create_test_ro_db() -> Arc<TempDatabase<DatabaseEnv>> {
-        let args = DatabaseArguments::new(ClientVersion::default())
-            .with_max_read_transaction_duration(Some(MaxReadTransactionDuration::Unbounded));
+        let args = DatabaseArguments::new(ClientVersion::default());
 
         let path = tempdir_path();
         {
@@ -222,7 +215,6 @@ mod tests {
     use reth_db_api::{
         cursor::DbCursorRO, database::Database, models::ClientVersion, transaction::DbTx,
     };
-    use reth_libmdbx::MaxReadTransactionDuration;
     use std::time::Duration;
     use tempfile::tempdir;
 
@@ -230,8 +222,7 @@ mod tests {
     fn db_version() {
         let path = tempdir().unwrap();
 
-        let args = DatabaseArguments::new(ClientVersion::default())
-            .with_max_read_transaction_duration(Some(MaxReadTransactionDuration::Unbounded));
+        let args = DatabaseArguments::new(ClientVersion::default());
 
         // Database is empty
         {

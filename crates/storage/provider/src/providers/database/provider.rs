@@ -809,6 +809,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> DatabaseProvider<TX, N> {
 
     /// Load shard and remove it. If list is empty, last shard was full or
     /// there are no shards at all.
+    #[allow(dead_code)]
     fn take_shard<T>(
         &self,
         cursor: &mut <TX as DbTxMut>::CursorMut<T>,
@@ -1976,7 +1977,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
         Ok(())
     }
 
-    fn write_state_changes(&self, mut changes: StateChangeset) -> ProviderResult<()> {
+    fn write_state_changes(&self, changes: StateChangeset) -> ProviderResult<()> {
         // Write new account state
         tracing::trace!(len = changes.accounts.len(), "Writing new account state");
         let mut accounts_cursor = self.tx_ref().cursor_write::<tables::PlainAccountState>()?;
@@ -2007,7 +2008,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
                 storages_cursor.delete_by_key(address)?;
             }
             // cast storages to B256.
-            let mut storage = storage
+            let storage = storage
                 .into_iter()
                 .map(|(k, value)| StorageEntry { key: k.into(), value })
                 .collect::<Vec<_>>();

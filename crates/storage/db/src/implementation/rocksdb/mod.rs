@@ -2,16 +2,15 @@
 
 use crate::{DatabaseError, TableSet};
 use reth_db_api::{
-    database_metrics::DatabaseMetrics, models::ClientVersion, table::Table, DatabaseWriteOperation,
-    Tables,
+    database_metrics::DatabaseMetrics, models::ClientVersion, table::Table, Tables,
 };
-use reth_storage_errors::db::{DatabaseErrorInfo, DatabaseWriteError, LogLevel};
+use reth_storage_errors::db::{DatabaseErrorInfo, LogLevel};
 use rocksdb::{Options, DB, BlockBasedOptions, Cache};
 use std::{path::Path, sync::Arc};
 use metrics::Label;
 
-pub mod cursor;
-pub mod tx;
+pub(crate) mod cursor;
+pub(crate) mod tx;
 
 /// Database environment kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -362,9 +361,26 @@ impl DatabaseEnv {
     }
 
     /// Records the client version in the database.
-    pub fn record_client_version(&self, _version: ClientVersion) -> Result<(), DatabaseError> {
-        // RocksDB doesn't require explicit client version recording like MDBX
-        // The version information is typically handled at the application level
+    pub fn record_client_version(&self, version: ClientVersion) -> Result<(), DatabaseError> {
+        use reth_db_api::{cursor::{DbCursorRO, DbCursorRW}, database::Database, transaction::{DbTx, DbTxMut}, tables};
+        use std::time::{SystemTime, UNIX_EPOCH};
+        
+        if version.is_empty() {
+            return Ok(())
+        }
+
+        let tx = self.tx_mut()?;
+        let mut version_cursor = tx.cursor_write::<tables::VersionHistory>()?;
+
+        let last_version = version_cursor.last()?.map(|(_, v)| v);
+        if Some(&version) != last_version.as_ref() {
+            version_cursor.upsert(
+                SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
+                &version,
+            )?;
+            tx.commit()?;
+        }
+
         Ok(())
     }
 }
@@ -577,25 +593,6 @@ fn read_error(e: rocksdb::Error) -> DatabaseError {
     DatabaseError::Read(to_error_info(e))
 }
 
-/// Create a delete error from RocksDB error
-fn delete_error(e: rocksdb::Error) -> DatabaseError {
-    DatabaseError::Delete(to_error_info(e))
-}
-
-/// Create a write error from RocksDB error with operation context
-fn write_error<T: Table>(
-    e: rocksdb::Error,
-    operation: DatabaseWriteOperation,
-    key: Vec<u8>,
-) -> DatabaseError {
-    DatabaseError::Write(Box::new(DatabaseWriteError {
-        info: to_error_info(e),
-        operation,
-        table_name: T::NAME,
-        key,
-    }))
-}
-
 /// Helper function to get column family handle with proper error handling
 fn get_cf_handle<T: Table>(db: &DB) -> Result<&rocksdb::ColumnFamily, DatabaseError> {
     db.cf_handle(T::NAME).ok_or_else(|| {
@@ -604,17 +601,4 @@ fn get_cf_handle<T: Table>(db: &DB) -> Result<&rocksdb::ColumnFamily, DatabaseEr
             code: -1,
         })
     })
-}
-
-/// Stall-related statistics in microseconds
-#[derive(Debug, Default)]
-struct StallMicros {
-    /// Total stall time
-    total: Option<u64>,
-    /// Stall time caused by level0 slowdown
-    level0_slowdown: Option<u64>,
-    /// Stall time caused by level0 file number limit
-    level0_numfiles: Option<u64>,
-    /// Stall time caused by pending compaction bytes limit
-    pending_compaction_bytes: Option<u64>,
 }
