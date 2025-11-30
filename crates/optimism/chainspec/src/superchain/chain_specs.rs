@@ -45,7 +45,7 @@ create_superchain_specs!(
     ("settlus-sepolia", "sepolia"),
     ("shape", "mainnet"),
     ("shape", "sepolia"),
-    ("snax", "mainnet"),
+    ("silent-data-mainnet", "mainnet"),
     ("soneium", "mainnet"),
     ("soneium-minato", "sepolia"),
     ("sseed", "mainnet"),
