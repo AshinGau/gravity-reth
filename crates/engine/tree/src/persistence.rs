@@ -156,6 +156,7 @@ where
 
         let num_blocks = blocks.len();
         if let Some(last_block_hn) = &last_block_hash_num {
+            let test_panic_stage: Option<u32> = std::env::var("TEST_PANIC_STAGE").ok().map(|s| s.parse().unwrap());
             let first_block = blocks.first().unwrap().recovered_block();
             let last_block = blocks.last().unwrap().recovered_block();
             let first_number = first_block.number();
@@ -168,6 +169,7 @@ where
                 triev2,
             } in blocks {
                 let block_number = recovered_block.number();
+                let block_size = recovered_block.senders().len();
 
                 let start = Instant::now();
                 let provider_rw = self.provider.database_provider_rw()?;
@@ -181,6 +183,11 @@ where
                     info!(target: "provider::storage_writer", block_number = ?block_number, "Skip insert_block process");
                 }
                 metrics::histogram!("save_blocks_time", &[("process", "insert_block")]).record(start.elapsed());
+                
+                if let Some(1) = test_panic_stage && block_size > 1500 {
+                    info!("panic after insert_block, block number: {}", block_number);
+                    panic!("panic after insert_block, block number: {}", block_number);
+                }
 
                 let start = Instant::now();
                 let provider_rw = self.provider.database_provider_rw()?;
@@ -199,6 +206,11 @@ where
                     panic!("Persist uncontinuous block, checkpoint: {}, current: {}", ck.block_number, block_number);
                 }
                 metrics::histogram!("save_blocks_time", &[("process", "write_state")]).record(start.elapsed());
+
+                if let Some(2) = test_panic_stage && block_size > 1500 {
+                    info!("panic after write_state, block number: {}", block_number);
+                    panic!("panic after write_state, block number: {}", block_number);
+                }
 
                 let start = Instant::now();
                 let provider_rw = self.provider.database_provider_rw()?;
@@ -220,6 +232,11 @@ where
                 provider_rw.commit()?;
                 metrics::histogram!("save_blocks_time", &[("process", "write_hashed_state")]).record(start.elapsed());
 
+                if let Some(3) = test_panic_stage && block_size > 1500 {
+                    info!("panic after write_hashed_state, block number: {}", block_number);
+                    panic!("panic after write_hashed_state, block number: {}", block_number);
+                }
+
                 let start = Instant::now();
                 let provider_rw = self.provider.database_provider_rw()?;
                 let ck = provider_rw.tx_ref().get::<tables::StageCheckpoints>(StageId::MerkleExecute.to_string()).map_err(ProviderError::Database)?.unwrap_or_default();
@@ -234,6 +251,11 @@ where
                 provider_rw.tx_ref().put::<tables::StageCheckpoints>(StageId::MerkleExecute.to_string(), StageCheckpoint{block_number, ..ck}).map_err(ProviderError::Database)?;
                 provider_rw.commit()?;
                 metrics::histogram!("save_blocks_time", &[("process", "write_trie_updatesv2")]).record(start.elapsed());
+
+                if let Some(4) = test_panic_stage && block_size > 1500 {
+                    info!("panic after write_trie_updatesv2, block number: {}", block_number);
+                    panic!("panic after write_trie_updatesv2, block number: {}", block_number);
+                }
 
                 let start = Instant::now();
                 let provider_rw = self.provider.database_provider_rw()?;
