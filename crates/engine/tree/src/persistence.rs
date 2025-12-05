@@ -175,13 +175,14 @@ where
                 let provider_rw = self.provider.database_provider_rw()?;
                 let ck = provider_rw.tx_ref().get::<tables::StageCheckpoints>(StageId::Execution.to_string()).map_err(ProviderError::Database)?.unwrap_or_default();
                 if block_number == ck.block_number + 1 {
-                    provider_rw.insert_block(Arc::unwrap_or_clone(recovered_block), StorageLocation::Both)?;
+                    let body_indices = provider_rw.insert_block(Arc::unwrap_or_clone(recovered_block), StorageLocation::Both)?;
                     // Write state and changesets to the database.
                     // Must be written after blocks because of the receipt lookup.
-                    provider_rw.write_state(
+                    provider_rw.write_state_with_indices(
                         &execution_output,
                         OriginalValuesKnown::No,
                         StorageLocation::StaticFiles,
+                        Some(vec![body_indices]),
                     )?;
                     provider_rw.tx_ref().put::<tables::StageCheckpoints>(StageId::Execution.to_string(), StageCheckpoint{block_number, ..ck}).map_err(ProviderError::Database)?;
                     provider_rw.commit()?;
