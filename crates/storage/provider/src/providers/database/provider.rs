@@ -1795,11 +1795,12 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
 {
     type Receipt = ReceiptTy<N>;
 
-    fn write_state(
+    fn write_state_with_indices(
         &self,
         execution_outcome: &ExecutionOutcome<Self::Receipt>,
         is_value_known: OriginalValuesKnown,
         write_receipts_to: StorageLocation,
+        body_indices: Option<Vec<StoredBlockBodyIndices>>,
     ) -> ProviderResult<()> {
         let first_block = execution_outcome.first_block();
         let block_count = execution_outcome.len() as u64;
@@ -1815,11 +1816,14 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
         self.write_state_changes(plain_state)?;
 
         // Fetch the first transaction number for each block in the range
-        let block_indices: Vec<_> = self
-            .block_body_indices_range(block_range)?
-            .into_iter()
-            .map(|b| b.first_tx_num)
-            .collect();
+        let block_indices: Vec<_> = if let Some(body_indices) = body_indices {
+            body_indices.into_iter().map(|b| b.first_tx_num).collect()
+        } else {
+            self.block_body_indices_range(block_range)?
+                .into_iter()
+                .map(|b| b.first_tx_num)
+                .collect()
+        };
 
         // Ensure all expected blocks are present.
         if block_indices.len() < block_count as usize {

@@ -20,6 +20,8 @@ use reth_node_core::{
     args::{DatabaseArgs, DatadirArgs},
     dirs::{ChainPath, DataDirPath},
 };
+use gravity_primitives::get_gravity_config;
+use reth_engine_tree::recovery::StorageRecoveryHelper;
 use reth_provider::{
     providers::{BlockchainProvider, NodeTypesForProvider, StaticFileProvider},
     ProviderFactory, StaticFileProviderFactory,
@@ -177,6 +179,13 @@ impl<C: ChainSpecParser> EnvironmentArgs<C> {
             // Move all applicable data from database to static files.
             pipeline.move_to_static_files()?;
             pipeline.unwind(unwind_target.unwind_target().expect("should exist"), None)?;
+        }
+
+        // In pipe execution mode (disable_pipe_execution = false), we need to recover
+        // any interrupted block writes from checkpoints
+        if !get_gravity_config().disable_pipe_execution {
+            info!(target: "reth::cli", "Checking for interrupted block writes and recovering if needed");
+            StorageRecoveryHelper::new(&factory).check_and_recover()?;
         }
 
         Ok(factory)
