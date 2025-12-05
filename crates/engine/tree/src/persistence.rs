@@ -173,26 +173,9 @@ where
 
                 let start = Instant::now();
                 let provider_rw = self.provider.database_provider_rw()?;
-                let ck = provider_rw.tx_ref().get::<tables::StageCheckpoints>(StageId::Bodies.to_string()).map_err(ProviderError::Database)?.unwrap_or_default();
-                if block_number == ck.block_number + 1 {
-                    provider_rw.insert_block(Arc::unwrap_or_clone(recovered_block), StorageLocation::Both)?;
-                    provider_rw.tx_ref().put::<tables::StageCheckpoints>(StageId::Bodies.to_string(), StageCheckpoint{block_number, ..ck}).map_err(ProviderError::Database)?;
-                    provider_rw.commit()?;
-                } else {
-                    assert_eq!(block_number, ck.block_number);
-                    info!(target: "provider::storage_writer", block_number = ?block_number, "Skip insert_block process");
-                }
-                metrics::histogram!("save_blocks_time", &[("process", "insert_block")]).record(start.elapsed());
-                
-                if let Some(1) = test_panic_stage && block_size > 1500 {
-                    info!("panic after insert_block, block number: {}", block_number);
-                    panic!("panic after insert_block, block number: {}", block_number);
-                }
-
-                let start = Instant::now();
-                let provider_rw = self.provider.database_provider_rw()?;
                 let ck = provider_rw.tx_ref().get::<tables::StageCheckpoints>(StageId::Execution.to_string()).map_err(ProviderError::Database)?.unwrap_or_default();
                 if block_number == ck.block_number + 1 {
+                    provider_rw.insert_block(Arc::unwrap_or_clone(recovered_block), StorageLocation::Both)?;
                     // Write state and changesets to the database.
                     // Must be written after blocks because of the receipt lookup.
                     provider_rw.write_state(
