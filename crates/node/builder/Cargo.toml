@@ -28,6 +28,7 @@ reth-engine-primitives.workspace = true
 reth-engine-service.workspace = true
 reth-engine-tree.workspace = true
 reth-engine-util.workspace = true
+gravity-primitives.workspace = true
 reth-evm.workspace = true
 reth-exex.workspace = true
 reth-fs-util.workspace = true
