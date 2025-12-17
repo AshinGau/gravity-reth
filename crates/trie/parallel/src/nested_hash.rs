@@ -481,7 +481,7 @@ mod tests {
 
     fn random_state() -> HashMap<Address, (Account, HashMap<B256, U256>)> {
         let mut rng = rand::rng();
-        (0..100)
+        (0..10)
             .map(|_| {
                 let address = Address::random();
                 let account =
@@ -489,7 +489,7 @@ mod tests {
                 let mut storage = HashMap::<B256, U256>::default();
                 let has_storage = rng.random_bool(0.7);
                 if has_storage {
-                    for _ in 0..100 {
+                    for _ in 0..10000 {
                         storage.insert(
                             B256::from(U256::from(rng.random::<u64>())),
                             U256::from(rng.random::<u64>()),
@@ -573,7 +573,8 @@ mod tests {
             hashed_state.storages.insert(hashed_address, hashed_storage);
         }
 
-        let tx = factory.database_provider_ro().unwrap().tx_ref();
+        let provider = factory.database_provider_ro().unwrap();
+        let tx = provider.tx_ref();
         let (parallel_root_hash, ..) =
             NestedStateRoot::new(tx, None).calculate(&hashed_state).unwrap();
         assert_eq!(parallel_root_hash, test_utils::state_root(state))
