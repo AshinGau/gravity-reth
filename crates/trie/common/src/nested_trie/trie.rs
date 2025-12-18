@@ -14,7 +14,8 @@ use reth_storage_errors::{db::DatabaseError, ProviderResult};
 
 use crate::nested_trie::node::{Node, NodeFlag};
 
-const MIN_PARALLEL_NODES: usize = 64;
+/// The min number of nodes to parallelly update MPT sub-trie
+pub const MIN_PARALLEL_NODES: usize = 64;
 
 /// Node reader for nested trie
 pub trait TrieReader {

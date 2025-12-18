@@ -3,9 +3,7 @@
 use core::ops::RangeInclusive;
 
 use alloy_primitives::{
-    keccak256,
-    map::{hash_map, B256Map, HashMap},
-    BlockNumber, B256, U256,
+    B256, BlockNumber, U256, keccak256, map::{B256Map, HashMap, hash_map}
 };
 use alloy_rlp::encode_fixed_size;
 use once_cell::sync::OnceCell;
@@ -21,9 +19,7 @@ use reth_primitives_traits::Account;
 use reth_provider::{PersistBlockCache, ProviderResult};
 use reth_storage_errors::db::DatabaseError;
 use reth_trie::{
-    nested_trie::{Node, Trie, TrieReader},
-    HashedPostState, HashedStorage, Nibbles, StorageTrieUpdatesV2, StoredNibbles,
-    StoredNibblesSubKey, EMPTY_ROOT_HASH,
+    EMPTY_ROOT_HASH, HashedPostState, HashedStorage, Nibbles, StorageTrieUpdatesV2, StoredNibbles, StoredNibblesSubKey, nested_trie::{MIN_PARALLEL_NODES, Node, Trie, TrieReader}
 };
 use reth_trie_common::updates::TrieUpdatesV2;
 
@@ -240,7 +236,7 @@ where
                                 // only make the large storage trie parallel
                                 let parallel = storage
                                     .as_ref()
-                                    .map(|s| s.storage.len() > 256)
+                                    .map(|s| s.storage.len() > MIN_PARALLEL_NODES)
                                     .unwrap_or(false);
                                 let mut storage_trie = Trie::new(trie_reader, parallel)?;
                                 if let Some(storage) = storage {
