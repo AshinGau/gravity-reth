@@ -1,6 +1,7 @@
 #![allow(clippy::type_complexity)]
 
 use core::ops::RangeInclusive;
+use std::sync::atomic::Ordering;
 
 use alloy_primitives::{
     B256, BlockNumber, U256, keccak256, map::{B256Map, HashMap, hash_map}
@@ -19,7 +20,7 @@ use reth_primitives_traits::Account;
 use reth_provider::{PersistBlockCache, ProviderResult};
 use reth_storage_errors::db::DatabaseError;
 use reth_trie::{
-    EMPTY_ROOT_HASH, HashedPostState, HashedStorage, Nibbles, StorageTrieUpdatesV2, StoredNibbles, StoredNibblesSubKey, nested_trie::{MIN_PARALLEL_NODES, Node, Trie, TrieReader}
+    EMPTY_ROOT_HASH, HashedPostState, HashedStorage, Nibbles, StorageTrieUpdatesV2, StoredNibbles, StoredNibblesSubKey, nested_trie::{MIN_PARALLEL_NODES, NestedTrieMetris, Node, Trie, TrieReader}
 };
 use reth_trie_common::updates::TrieUpdatesV2;
 
@@ -99,7 +100,7 @@ where
     Tx: DbTx,
 {
     /// Create a new `NestedStateRoot`
-    pub const fn new(tx: &'tx Tx, cache: Option<PersistBlockCache>) -> Self {
+    pub fn new(tx: &'tx Tx, cache: Option<PersistBlockCache>) -> Self {
         Self { tx, cache }
     }
 
@@ -173,6 +174,7 @@ where
         &self,
         hashed_state: &HashedPostState,
     ) -> ProviderResult<(B256, TrieUpdatesV2)> {
+        let metrics = NestedTrieMetris::default();
         let trie_update = Mutex::new(TrieUpdatesV2::default());
         let updated_account_nodes: [Mutex<Vec<(Nibbles, Option<Node>)>>; 16] = Default::default();
         let mut partitioned_accounts: [Vec<(&B256, &Option<Account>)>; 16] = Default::default();
@@ -252,15 +254,17 @@ where
                                         updated_storage_nodes[index].push((nibbles, value));
                                     }
                                 }
-                                storage_trie
-                                    .parallel_update(updated_storage_nodes, create_reader)?;
-                                let account = account.into_trie_account(storage_trie.hash());
+                                metrics.merge(storage_trie.parallel_update(updated_storage_nodes, create_reader)?);
+                                let account = NestedTrieMetris::record_duration(&metrics.build_hash_time, || {
+                                    account.into_trie_account(storage_trie.hash())
+                                });
                                 updated_account_nodes.push((
                                     path,
                                     Some(Node::ValueNode(alloy_rlp::encode(account))),
                                 ));
-
-                                let trie_output = storage_trie.take_output();
+                                let trie_output = NestedTrieMetris::record_duration(&metrics.take_output_time, || {
+                                    storage_trie.take_output()
+                                });
                                 if !trie_output.is_empty() {
                                     assert!(trie_update
                                         .lock()
@@ -300,12 +304,22 @@ where
         };
         let cursor = self.tx.cursor_read::<tables::AccountsTrieV2>()?;
         let mut account_trie = Trie::new(AccountTrieReader(cursor, self.cache.clone()), true)?;
-        account_trie.parallel_update(updated_account_nodes, create_reader)?;
-
-        let root_hash = account_trie.hash();
-        let output = account_trie.take_output();
+        metrics.merge(account_trie.parallel_update(updated_account_nodes, create_reader)?);
+        let root_hash = NestedTrieMetris::record_duration(&metrics.build_hash_time, || {
+            account_trie.hash()
+        });
+        let output = NestedTrieMetris::record_duration(&metrics.take_output_time, || {
+            account_trie.take_output()
+        });
         trie_update.account_nodes = output.update_nodes;
         trie_update.removed_nodes = output.removed_nodes;
+
+        metrics::histogram!("nested_hash", &[("process", "update_node_time")])
+            .record(metrics.update_node_time.load(Ordering::Relaxed) as f64);
+        metrics::histogram!("nested_hash", &[("process", "build_hash_time")])
+            .record(metrics.build_hash_time.load(Ordering::Relaxed) as f64);
+        metrics::histogram!("nested_hash", &[("process", "take_output_time")])
+            .record(metrics.take_output_time.load(Ordering::Relaxed) as f64);
 
         Ok((root_hash, trie_update))
     }

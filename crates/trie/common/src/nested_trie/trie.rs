@@ -1,3 +1,5 @@
+use std::{sync::atomic::{AtomicU64, Ordering}, time::Instant};
+
 use gravity_primitives::get_gravity_config;
 use once_cell::sync::OnceCell;
 
@@ -15,7 +17,7 @@ use reth_storage_errors::{db::DatabaseError, ProviderResult};
 use crate::nested_trie::node::{Node, NodeFlag};
 
 /// The min number of nodes to parallelly update MPT sub-trie
-pub const MIN_PARALLEL_NODES: usize = 64;
+pub const MIN_PARALLEL_NODES: usize = 128;
 
 /// Node reader for nested trie
 pub trait TrieReader {
@@ -39,6 +41,40 @@ impl TrieOutput {
     }
 }
 
+/// Nested trie metrics
+#[derive(Default, Debug)]
+pub struct NestedTrieMetris {
+    /// Time to update trie node
+    pub update_node_time: AtomicU64,
+    /// Time to build hash
+    pub build_hash_time: AtomicU64,
+    /// Time to take output
+    pub take_output_time: AtomicU64,
+}
+
+impl NestedTrieMetris {
+    /// Record nested trie duration
+    pub fn record_duration<F, R>(duration_nanos: &AtomicU64, f: F) -> R
+    where
+        F: FnOnce() -> R
+    {
+        let start = Instant::now();
+        let r = f();
+        duration_nanos.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        r
+    }
+
+    /// Merge other metrics
+    pub fn merge(&self, other: &NestedTrieMetris) {
+        self.update_node_time.fetch_add(
+            other.update_node_time.load(Ordering::Relaxed), Ordering::Relaxed);
+        self.build_hash_time.fetch_add(
+            other.build_hash_time.load(Ordering::Relaxed), Ordering::Relaxed);
+        self.take_output_time.fetch_add(
+            other.take_output_time.load(Ordering::Relaxed), Ordering::Relaxed);
+    }
+}
+
 /// Nested trie
 #[derive(Debug)]
 pub struct Trie<R>
@@ -49,6 +85,7 @@ where
     reader: R,
     trie_output: TrieOutput,
     parallel: bool,
+    metrics: NestedTrieMetris,
 }
 
 impl<R> Trie<R>
@@ -58,11 +95,11 @@ where
     /// Create a nested trie
     pub fn new(mut reader: R, parallel: bool) -> Result<Self, DatabaseError> {
         let root = reader.read(&Nibbles::new())?;
-        Ok(Self { root, reader, trie_output: Default::default(), parallel })
+        Ok(Self { root, reader, trie_output: Default::default(), parallel, metrics: NestedTrieMetris::default() })
     }
 
     fn new_with_root(reader: R, root: Option<Node>, parallel: bool) -> Self {
-        Self { root, reader, trie_output: Default::default(), parallel }
+        Self { root, reader, trie_output: Default::default(), parallel, metrics: NestedTrieMetris::default() }
     }
 
     /// Take the trie output
@@ -242,7 +279,7 @@ where
         &mut self,
         batches: [Vec<(Nibbles, Option<Node>)>; 16], // Some for insert, None for delete
         f: F,
-    ) -> ProviderResult<()>
+    ) -> ProviderResult<&NestedTrieMetris>
     where
         F: Fn() -> ProviderResult<R> + Clone + Send + Sync,
     {
@@ -257,7 +294,7 @@ where
         batches: [Vec<(Nibbles, Option<Node>)>; 16], // Some for insert, None for delete
         level: usize,
         f: F,
-    ) -> ProviderResult<()>
+    ) -> ProviderResult<&NestedTrieMetris>
     where
         F: Fn() -> ProviderResult<R> + Clone + Send + Sync,
     {
@@ -291,9 +328,11 @@ where
                                     }
                                     let reader = f()?;
                                     let mut child_trie = Self::new_with_root(reader, child_root, true);
-                                    child_trie.parallel_update_inner(sub_batches, level + 1, f.clone())?;
+                                    let child_metrics = child_trie.parallel_update_inner(sub_batches, level + 1, f.clone())?;
+                                    self.metrics.merge(&child_metrics);
                                     child_trie
                                 } else {
+                                    let start = Instant::now();
                                     let prefix = batch[0].0.slice(0..level);
                                     let reader = f()?;
                                     let mut child_trie = Self::new_with_root(reader, child_root, false);
@@ -309,10 +348,15 @@ where
                                         let (_, node) = result?;
                                         child_trie.root = node;
                                     }
+                                    self.metrics.update_node_time.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
                                     child_trie
                                 };
-                                let _ = child_trie.hash();
-                                *child = child_trie.root.take().map(Box::new);
+                                NestedTrieMetris::record_duration(&self.metrics.build_hash_time, || {
+                                    let _ = child_trie.hash();
+                                });
+                                *child = NestedTrieMetris::record_duration(&self.metrics.take_output_time, || {
+                                    child_trie.root.take().map(Box::new)
+                                });
                                 if !child_trie.trie_output.removed_nodes.is_empty() {
                                     removed_nodes
                                         .lock()
@@ -380,10 +424,11 @@ where
                 } else {
                     self.trie_output.removed_nodes.extend(removed_nodes);
                 }
-                return Ok(());
+                return Ok(&self.metrics);
             }
             self.root = Some(root);
         }
+        let start = Instant::now();
         for batch in batches {
             for (key, value) in batch {
                 if let Some(value) = value {
@@ -393,7 +438,8 @@ where
                 }
             }
         }
-        Ok(())
+        self.metrics.update_node_time.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        Ok(&self.metrics)
     }
 
     /// Delete `ValueNode` by full path
