@@ -4,9 +4,10 @@ use core::ops::RangeInclusive;
 use std::sync::atomic::Ordering;
 
 use alloy_primitives::{
-    B256, BlockNumber, U256, keccak256, map::{B256Map, HashMap, hash_map}
+    B256, BlockNumber, KECCAK256_EMPTY, U256, keccak256, map::{B256Map, HashMap, hash_map}
 };
 use alloy_rlp::encode_fixed_size;
+use gravity_primitives::get_gravity_config;
 use once_cell::sync::OnceCell;
 use reth_db_api::{
     cursor::{DbCursorRO, DbDupCursorRO},
@@ -174,6 +175,7 @@ where
         &self,
         hashed_state: &HashedPostState,
     ) -> ProviderResult<(B256, TrieUpdatesV2)> {
+        let pipe_mode = !get_gravity_config().disable_pipe_execution;
         let metrics = NestedTrieMetris::default();
         let trie_update = Mutex::new(TrieUpdatesV2::default());
         let updated_account_nodes: [Mutex<Vec<(Nibbles, Option<Node>)>>; 16] = Default::default();
@@ -209,12 +211,15 @@ where
                                 if let Some(storage) = &storage {
                                     if storage.wiped {
                                         let account = account.into_trie_account(EMPTY_ROOT_HASH);
-                                        let node =
-                                            Some(Node::ValueNode(alloy_rlp::encode(account)));
-                                        updated_account_nodes.push((path, node));
+                                        updated_account_nodes.push((path, Some(Node::ValueNode(alloy_rlp::encode(account)))));
                                         deleted_storage();
                                         continue;
                                     }
+                                }
+                                if account.get_bytecode_hash() == KECCAK256_EMPTY && pipe_mode {
+                                    let account = account.into_trie_account(EMPTY_ROOT_HASH);
+                                    updated_account_nodes.push((path, Some(Node::ValueNode(alloy_rlp::encode(account)))));
+                                    continue;
                                 }
 
                                 let mut updated_storage_nodes: [Vec<(Nibbles, Option<Node>)>; 16] =

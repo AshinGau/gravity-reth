@@ -11122,6 +11122,7 @@ dependencies = [
  "alloy-rlp",
  "codspeed-criterion-compat",
  "derive_more",
+ "gravity-primitives",
  "itertools 0.14.0",
  "metrics",
  "once_cell",
