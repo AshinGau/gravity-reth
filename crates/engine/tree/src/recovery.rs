@@ -63,9 +63,6 @@ impl<'a, N: ProviderNodeTypes> StorageRecoveryHelper<'a, N> {
         // Stage 2: Recover MerkleExecute
         self.recover_merkle(recover_block_number)?;
 
-        // Stage 3: Recover IndexAccountHistory
-        self.recover_history_indices(recover_block_number)?;
-
         let provider_rw = self.factory.database_provider_rw()?;
         provider_rw.update_pipeline_stages(recover_block_number, false)?;
         provider_rw.commit()?;

@@ -255,30 +255,6 @@ where
                     metrics::histogram!("save_blocks_time", &[("process", "write_trie_updatesv2")])
                         .record(start.elapsed());
                 }
-                {
-                    let start = Instant::now();
-                    let provider_rw = self.provider.database_provider_rw()?;
-                    let ck = provider_rw
-                        .tx_ref()
-                        .get::<tables::StageCheckpoints>(StageId::IndexAccountHistory.to_string())
-                        .map_err(ProviderError::Database)?
-                        .unwrap_or_default();
-                    assert_eq!(ck.block_number + 1, block_number);
-                    provider_rw.update_history_indices(block_number..=block_number)?;
-                    provider_rw
-                        .tx_ref()
-                        .put::<tables::StageCheckpoints>(
-                            StageId::IndexAccountHistory.to_string(),
-                            StageCheckpoint { block_number, ..ck },
-                        )
-                        .map_err(ProviderError::Database)?;
-                    provider_rw.commit()?;
-                    metrics::histogram!(
-                        "save_blocks_time",
-                        &[("process", "update_history_indices")]
-                    )
-                    .record(start.elapsed());
-                }
                 PERSIST_BLOCK_CACHE.persist_tip(block_number);
             }
             // Update pipeline progress
