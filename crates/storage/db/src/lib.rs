@@ -30,7 +30,9 @@ pub use reth_storage_errors::db::{DatabaseError, DatabaseWriteOperation};
 pub use generic::{create_db, init_db, open_db, open_db_read_only};
 
 // Always use RocksDB implementation
-pub use crate::implementation::rocksdb::{DatabaseArguments, DatabaseEnv, DatabaseEnvKind};
+pub use crate::implementation::rocksdb::{
+    DatabaseArguments, DatabaseEnv, DatabaseEnvKind, ShardingDirectories,
+};
 
 pub use models::ClientVersion;
 pub use reth_db_api::*;
