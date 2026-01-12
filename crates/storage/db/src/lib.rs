@@ -37,6 +37,33 @@ pub use crate::implementation::rocksdb::{
 pub use models::ClientVersion;
 pub use reth_db_api::*;
 
+/// Generic failpoint injection macro that panics when triggered.
+/// When `failpoints` feature is enabled, this triggers the failpoint and panics if activated.
+/// When disabled, this is a no-op (compiles to nothing).
+///
+/// # Example
+/// ```ignore
+/// set_fail_point!("my::failpoint::name");
+/// ```
+///
+/// To trigger via RPC: `debug_setFailpoint("my::failpoint::name", "panic")`
+#[cfg(feature = "failpoints")]
+#[macro_export]
+macro_rules! set_fail_point {
+    ($name:expr) => {
+        fail::fail_point!($name, |_| {
+            panic!("failpoint triggered: {}", $name);
+        });
+    };
+}
+
+/// No-op version when failpoints feature is disabled.
+#[cfg(not(feature = "failpoints"))]
+#[macro_export]
+macro_rules! set_fail_point {
+    ($name:expr) => {};
+}
+
 /// Collection of database test utilities
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils {

@@ -4,7 +4,7 @@ use alloy_eips::BlockNumHash;
 use gravity_primitives::get_gravity_config;
 use reth_chain_state::{ExecutedBlock, ExecutedBlockWithTrieUpdates};
 use reth_db::{
-    tables,
+    set_fail_point, tables,
     transaction::{DbTx, DbTxMut},
 };
 use reth_errors::ProviderError;
@@ -202,6 +202,7 @@ where
                             Arc::unwrap_or_clone(recovered_block),
                             StorageLocation::Both,
                         )?;
+                        set_fail_point!("persistence::after_write_state");
                         // Write state and changesets to the database.
                         // Must be written after blocks because of the receipt lookup.
                         provider_rw.write_state_with_indices(
@@ -219,6 +220,7 @@ where
                             .map_err(ProviderError::Database)?;
                         static_file_provider.commit()?;
                         provider_rw.commit()?;
+                        set_fail_point!("persistence::after_state_commit");
                         metrics::histogram!("save_blocks_time", &[("process", "write_state")])
                             .record(start.elapsed());
 
@@ -234,6 +236,7 @@ where
                         provider_rw.write_hashed_state(
                             &Arc::unwrap_or_clone(hashed_state).into_sorted(),
                         )?;
+                        set_fail_point!("persistence::after_hashed_state");
                         provider_rw
                             .tx_ref()
                             .put::<tables::StageCheckpoints>(
@@ -242,6 +245,7 @@ where
                             )
                             .map_err(ProviderError::Database)?;
                         provider_rw.commit()?;
+                        set_fail_point!("persistence::after_hashed_state_commit");
                         metrics::histogram!(
                             "save_blocks_time",
                             &[("process", "write_hashed_state")]
@@ -260,6 +264,7 @@ where
                                 .unwrap_or_default();
                             assert_eq!(ck.block_number + 1, block_number);
                             provider_rw.update_history_indices(block_number..=block_number)?;
+                            set_fail_point!("persistence::after_history_indices");
                             provider_rw
                                 .tx_ref()
                                 .put::<tables::StageCheckpoints>(
@@ -268,6 +273,7 @@ where
                                 )
                                 .map_err(ProviderError::Database)?;
                             provider_rw.commit()?;
+                            set_fail_point!("persistence::after_history_commit");
                             metrics::histogram!(
                                 "save_blocks_time",
                                 &[("process", "update_history_indices")]
@@ -288,6 +294,7 @@ where
                         provider_rw
                             .write_trie_updatesv2(triev2.as_ref())
                             .map_err(ProviderError::Database)?;
+                        set_fail_point!("persistence::after_trie_update");
                         provider_rw
                             .tx_ref()
                             .put::<tables::StageCheckpoints>(
@@ -296,6 +303,7 @@ where
                             )
                             .map_err(ProviderError::Database)?;
                         provider_rw.commit()?;
+                        set_fail_point!("persistence::after_trie_commit");
                         metrics::histogram!(
                             "save_blocks_time",
                             &[("process", "write_trie_updatesv2")]

@@ -14,6 +14,7 @@ use reth_storage_errors::db::DatabaseErrorInfo;
 use rocksdb::DB;
 use std::{sync::Arc, thread};
 
+use crate::set_fail_point;
 pub(crate) use cursor::{RO, RW};
 
 /// RocksDB transaction with three-database sharding architecture.
@@ -241,13 +242,17 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
                     let account_batch = std::mem::take(&mut *account_batch);
                     self.account_db
                         .write(account_batch)
-                        .map_err(|e| DatabaseError::Commit(to_error_info(e)))
+                        .map_err(|e| DatabaseError::Commit(to_error_info(e)))?;
+                    set_fail_point!("db::commit::after_account_trie");
+                    Ok(())
                 }));
                 handles.push(scope.spawn(|| -> Result<(), DatabaseError> {
                     let storage_batch = std::mem::take(&mut *storage_batch);
                     self.storage_db
                         .write(storage_batch)
-                        .map_err(|e| DatabaseError::Commit(to_error_info(e)))
+                        .map_err(|e| DatabaseError::Commit(to_error_info(e)))?;
+                    set_fail_point!("db::commit::after_storage_trie");
+                    Ok(())
                 }));
                 for handle in handles {
                     handle.join().unwrap()?;
@@ -261,12 +266,14 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
                 self.account_db
                     .write(account_batch)
                     .map_err(|e| DatabaseError::Commit(to_error_info(e)))?;
+                set_fail_point!("db::commit::after_account_trie");
             }
             if storage_batch.len() > 0 {
                 let storage_batch = std::mem::take(&mut *storage_batch);
                 self.storage_db
                     .write(storage_batch)
                     .map_err(|e| DatabaseError::Commit(to_error_info(e)))?;
+                set_fail_point!("db::commit::after_storage_trie");
             }
         }
 
@@ -279,6 +286,7 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
             self.state_db
                 .write(state_batch)
                 .map_err(|e| DatabaseError::Commit(to_error_info(e)))?;
+            set_fail_point!("db::commit::after_state");
         }
         Ok(true)
     }
