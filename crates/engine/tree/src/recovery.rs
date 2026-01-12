@@ -235,3 +235,286 @@ impl<'a, N: ProviderNodeTypes> StorageRecoveryHelper<'a, N> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gravity_primitives::{init_gravity_config, Config as GravityConfig};
+    use reth_db::{
+        tables,
+        transaction::{DbTx, DbTxMut},
+    };
+    use reth_provider::test_utils::create_test_provider_factory;
+    use reth_stages_api::{StageCheckpoint, StageId};
+    use std::sync::Once;
+
+    static INIT: Once = Once::new();
+
+    fn init_test_gravity_config() {
+        INIT.call_once(|| {
+            init_gravity_config(GravityConfig {
+                disable_pipe_execution: false,
+                disable_grevm: false,
+                pipe_block_gas_limit: 1_000_000_000,
+                cache_max_persist_gap: 64,
+                cache_capacity: 2_000_000,
+                report_db_metrics: false,
+                trie_parallel_levels: 1,
+                validator_node_only: false,
+            });
+        });
+    }
+
+    #[test]
+    fn test_recovery_not_needed_when_checkpoints_consistent() {
+        reth_tracing::init_test_tracing();
+        init_test_gravity_config();
+        let factory = create_test_provider_factory();
+
+        // Set all checkpoints to block 5 (consistent state)
+        {
+            let provider = factory.database_provider_rw().unwrap();
+            for stage_id in [
+                StageId::Execution,
+                StageId::AccountHashing,
+                StageId::MerkleExecute,
+                StageId::IndexAccountHistory,
+            ] {
+                provider
+                    .tx_ref()
+                    .put::<tables::StageCheckpoints>(
+                        stage_id.to_string(),
+                        StageCheckpoint { block_number: 5, stage_checkpoint: None },
+                    )
+                    .unwrap();
+            }
+            provider.commit().unwrap();
+        }
+
+        let helper = StorageRecoveryHelper::new(&factory);
+
+        // Recovery should succeed without error (no recovery needed)
+        let result = helper.check_and_recover();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_helper_creation() {
+        let factory = create_test_provider_factory();
+        let _helper = StorageRecoveryHelper::new(&factory);
+        // If helper is created successfully, test passes
+    }
+
+    #[test]
+    fn test_recover_hashing_when_checkpoint_behind() {
+        reth_tracing::init_test_tracing();
+        let factory = create_test_provider_factory();
+
+        // Set AccountHashing checkpoint to block 3 (behind execution at 5)
+        {
+            let provider = factory.database_provider_rw().unwrap();
+            provider
+                .tx_ref()
+                .put::<tables::StageCheckpoints>(
+                    StageId::Execution.to_string(),
+                    StageCheckpoint { block_number: 5, stage_checkpoint: None },
+                )
+                .unwrap();
+            provider
+                .tx_ref()
+                .put::<tables::StageCheckpoints>(
+                    StageId::AccountHashing.to_string(),
+                    StageCheckpoint { block_number: 3, stage_checkpoint: None },
+                )
+                .unwrap();
+            provider
+                .tx_ref()
+                .put::<tables::StageCheckpoints>(
+                    StageId::MerkleExecute.to_string(),
+                    StageCheckpoint { block_number: 5, stage_checkpoint: None },
+                )
+                .unwrap();
+            provider
+                .tx_ref()
+                .put::<tables::StageCheckpoints>(
+                    StageId::IndexAccountHistory.to_string(),
+                    StageCheckpoint { block_number: 5, stage_checkpoint: None },
+                )
+                .unwrap();
+            provider.commit().unwrap();
+        }
+
+        let helper = StorageRecoveryHelper::new(&factory);
+
+        // Call recover_hashing directly (normally called by check_and_recover)
+        // This should handle the case where no actual data exists gracefully
+        let result = helper.recover_hashing(5);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_recover_merkle_when_checkpoint_behind() {
+        reth_tracing::init_test_tracing();
+        init_test_gravity_config();
+        let factory = create_test_provider_factory();
+
+        // Set MerkleExecute checkpoint to block 3 (behind execution at 5)
+        {
+            let provider = factory.database_provider_rw().unwrap();
+            provider
+                .tx_ref()
+                .put::<tables::StageCheckpoints>(
+                    StageId::Execution.to_string(),
+                    StageCheckpoint { block_number: 5, stage_checkpoint: None },
+                )
+                .unwrap();
+            provider
+                .tx_ref()
+                .put::<tables::StageCheckpoints>(
+                    StageId::AccountHashing.to_string(),
+                    StageCheckpoint { block_number: 5, stage_checkpoint: None },
+                )
+                .unwrap();
+            provider
+                .tx_ref()
+                .put::<tables::StageCheckpoints>(
+                    StageId::MerkleExecute.to_string(),
+                    StageCheckpoint { block_number: 3, stage_checkpoint: None },
+                )
+                .unwrap();
+            provider
+                .tx_ref()
+                .put::<tables::StageCheckpoints>(
+                    StageId::IndexAccountHistory.to_string(),
+                    StageCheckpoint { block_number: 5, stage_checkpoint: None },
+                )
+                .unwrap();
+            provider.commit().unwrap();
+        }
+
+        let helper = StorageRecoveryHelper::new(&factory);
+
+        // Call recover_merkle directly
+        let result = helper.recover_merkle(5);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_recover_history_indices_when_checkpoint_behind() {
+        reth_tracing::init_test_tracing();
+        let factory = create_test_provider_factory();
+
+        // Set IndexAccountHistory checkpoint to block 3 (behind execution at 5)
+        {
+            let provider = factory.database_provider_rw().unwrap();
+            provider
+                .tx_ref()
+                .put::<tables::StageCheckpoints>(
+                    StageId::Execution.to_string(),
+                    StageCheckpoint { block_number: 5, stage_checkpoint: None },
+                )
+                .unwrap();
+            provider
+                .tx_ref()
+                .put::<tables::StageCheckpoints>(
+                    StageId::AccountHashing.to_string(),
+                    StageCheckpoint { block_number: 5, stage_checkpoint: None },
+                )
+                .unwrap();
+            provider
+                .tx_ref()
+                .put::<tables::StageCheckpoints>(
+                    StageId::MerkleExecute.to_string(),
+                    StageCheckpoint { block_number: 5, stage_checkpoint: None },
+                )
+                .unwrap();
+            provider
+                .tx_ref()
+                .put::<tables::StageCheckpoints>(
+                    StageId::IndexAccountHistory.to_string(),
+                    StageCheckpoint { block_number: 3, stage_checkpoint: None },
+                )
+                .unwrap();
+            provider.commit().unwrap();
+        }
+
+        let helper = StorageRecoveryHelper::new(&factory);
+
+        // Call recover_history_indices directly
+        let result = helper.recover_history_indices(5);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_checkpoint_ordering_logic() {
+        reth_tracing::init_test_tracing();
+        let factory = create_test_provider_factory();
+
+        // Test that checkpoints are read correctly
+        {
+            let provider = factory.database_provider_rw().unwrap();
+            provider
+                .tx_ref()
+                .put::<tables::StageCheckpoints>(
+                    StageId::Execution.to_string(),
+                    StageCheckpoint { block_number: 10, stage_checkpoint: None },
+                )
+                .unwrap();
+            provider
+                .tx_ref()
+                .put::<tables::StageCheckpoints>(
+                    StageId::AccountHashing.to_string(),
+                    StageCheckpoint { block_number: 8, stage_checkpoint: None },
+                )
+                .unwrap();
+            provider
+                .tx_ref()
+                .put::<tables::StageCheckpoints>(
+                    StageId::MerkleExecute.to_string(),
+                    StageCheckpoint { block_number: 9, stage_checkpoint: None },
+                )
+                .unwrap();
+            provider
+                .tx_ref()
+                .put::<tables::StageCheckpoints>(
+                    StageId::IndexAccountHistory.to_string(),
+                    StageCheckpoint { block_number: 7, stage_checkpoint: None },
+                )
+                .unwrap();
+            provider.commit().unwrap();
+        }
+
+        // Verify each checkpoint is stored and retrieved correctly
+        {
+            let provider = factory.database_provider_ro().unwrap();
+            let ck_exec = provider
+                .tx_ref()
+                .get::<tables::StageCheckpoints>(StageId::Execution.to_string())
+                .unwrap()
+                .unwrap();
+            let ck_hash = provider
+                .tx_ref()
+                .get::<tables::StageCheckpoints>(StageId::AccountHashing.to_string())
+                .unwrap()
+                .unwrap();
+            let ck_merkle = provider
+                .tx_ref()
+                .get::<tables::StageCheckpoints>(StageId::MerkleExecute.to_string())
+                .unwrap()
+                .unwrap();
+            let ck_history = provider
+                .tx_ref()
+                .get::<tables::StageCheckpoints>(StageId::IndexAccountHistory.to_string())
+                .unwrap()
+                .unwrap();
+
+            assert_eq!(ck_exec.block_number, 10);
+            assert_eq!(ck_hash.block_number, 8);
+            assert_eq!(ck_merkle.block_number, 9);
+            assert_eq!(ck_history.block_number, 7);
+        }
+
+        // Verify recovery helper can be created
+        let _helper = StorageRecoveryHelper::new(&factory);
+    }
+}
