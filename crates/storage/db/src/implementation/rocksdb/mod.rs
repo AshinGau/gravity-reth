@@ -267,8 +267,8 @@ impl DatabaseEnv {
     ) -> Result<Self, DatabaseError> {
         // Determine sharding layout (always 3 databases)
         let (state_path, account_path, storage_path) =
-            Self::resolve_shard_paths(path, args.sharding_directories());
-        info!(target: "database::open", state_path = ?state_path, account_path = ?account_path, state_path = ?storage_path , "Generate RocksDB instance path");
+            Self::resolve_shard_paths(path, args.sharding_directories())?;
+        info!(target: "database::open", state_path = ?state_path, account_path = ?account_path, storage_path = ?storage_path , "Generate RocksDB instance path");
 
         // Configure RocksDB options (shared across the 3-db architecture)
         let opts = Self::create_db_options(&args);
@@ -293,7 +293,7 @@ impl DatabaseEnv {
     fn resolve_shard_paths(
         base_path: &Path,
         sharding_config: Option<&str>,
-    ) -> (PathBuf, PathBuf, PathBuf) {
+    ) -> Result<(PathBuf, PathBuf, PathBuf), DatabaseError> {
         match sharding_config {
             Some(raw) => {
                 let parts: Vec<_> =
@@ -303,30 +303,32 @@ impl DatabaseEnv {
                         // First dir: state + account; Second dir: storage
                         let dir1 = PathBuf::from(parts[0]);
                         let dir2 = PathBuf::from(parts[1]);
-                        (dir1.join("state"), dir1.join("account_trie"), dir2.join("storage_trie"))
+                        Ok((
+                            dir1.join("state"),
+                            dir1.join("account_trie"),
+                            dir2.join("storage_trie"),
+                        ))
                     }
                     3 => {
                         // First: state; Second: account; Third: storage
                         let dir1 = PathBuf::from(parts[0]);
                         let dir2 = PathBuf::from(parts[1]);
                         let dir3 = PathBuf::from(parts[2]);
-                        (dir1.clone(), dir2.clone(), dir3.clone())
+                        Ok((dir1.clone(), dir2.clone(), dir3.clone()))
                     }
-                    other => {
-                        panic!(
-                            "db.sharding-directories expects 2 or 3 ';' separated paths, got {}",
-                            other
-                        )
-                    }
+                    other => Err(DatabaseError::Other(format!(
+                        "db.sharding-directories expects 2 or 3 ';' separated paths, got {}",
+                        other
+                    ))),
                 }
             }
             None => {
                 // Default: create 3 subdirectories under base path
-                (
+                Ok((
                     base_path.join("state"),
                     base_path.join("account_trie"),
                     base_path.join("storage_trie"),
-                )
+                ))
             }
         }
     }
