@@ -2,7 +2,7 @@
 
 use super::{
     base::{ConfigFetcher, OnchainConfigFetcher},
-    JWK_MANAGER_ADDR, NATIVE_ORACLE_ADDR, SYSTEM_CALLER,
+    JWK_MANAGER_ADDR, SYSTEM_CALLER,
 };
 use alloy_eips::BlockId;
 use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
@@ -123,6 +123,7 @@ sol! {
 /// TODO(gravity): Add `kty` field to the Solidity RSA_JWK struct in
 /// gravity_chain_core_contracts/src/oracle/jwk/IJWKManager.sol to properly store this value
 /// on-chain instead of hardcoding it here.
+#[allow(dead_code)]
 fn convert_oracle_rsa_to_api_jwk(rsa_jwk: OracleRSA_JWK) -> JWKStruct {
     // Create gaptos-compatible RSA_JWK struct with all 5 fields
     // The struct order in gaptos is: kid, kty, alg, e, n
@@ -341,13 +342,6 @@ fn convert_into_bcs_all_providers_jwks(all_providers_jwks: AllProvidersJWKs) -> 
     bcs::to_bytes(&all_providers).expect("Failed to serialize AllProvidersJWKs").into()
 }
 
-/// Source type constants for NativeOracle
-const SOURCE_TYPE_BLOCKCHAIN: u32 = 0;
-const SOURCE_TYPE_JWK: u32 = 1;
-
-/// Default callback gas limit for JWK updates
-const JWK_CALLBACK_GAS_LIMIT: u64 = 500_000;
-
 /// Construct JWK transaction from ProviderJWKs
 ///
 /// In the new Oracle architecture, JWK updates are recorded via NativeOracle.record().
@@ -363,15 +357,15 @@ pub(crate) fn construct_jwk_transaction(
 
     // Calculate sourceId from issuer hash
     let issuer_hash = keccak256(&provider_jwks.issuer);
-    let source_id = U256::from_be_bytes(issuer_hash.0);
+    let _source_id = U256::from_be_bytes(issuer_hash.0);
 
     // Encode payload: (bytes issuer, uint64 version, RSA_JWK[] jwks)
     // Note: This encodes the RSA JWKs for JWKManager callback
-    let rsa_jwks: Vec<OracleRSA_JWK> = sol_provider_jwks
+    let _rsa_jwks: Vec<OracleRSA_JWK> = sol_provider_jwks
         .jwks
         .iter()
         .filter(|jwk| jwk.variant == 0) // Only RSA JWKs
-        .map(|jwk| {
+        .map(|_jwk| {
             // Decode RSA_JWK from JWK.data
             // For now, we pass through the data as-is since the format matches
             // TODO: Proper conversion if needed
