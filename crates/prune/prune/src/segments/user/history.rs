@@ -92,7 +92,9 @@ where
     // If shard consists only of block numbers less than the target one, delete shard
     // completely.
     if key.as_ref().highest_block_number <= to_block {
-        cursor.delete_current()?;
+        // Use delete_by_key instead of delete_current to ensure we delete the correct key
+        // regardless of cursor position visibility issues with RocksDB WriteBatch.
+        cursor.delete_by_key(RawKey::new(key))?;
         Ok(PruneShardOutcome::Deleted)
     }
     // Shard contains block numbers that are higher than the target one, so we need to
@@ -113,32 +115,36 @@ where
         // block, we need to remove it, as empty shards are not allowed.
         if higher_blocks.is_empty() {
             if key.as_ref().highest_block_number == u64::MAX {
+                // Save the current key before moving cursor
+                let current_key = key.clone();
+
                 let prev_row = cursor
                     .prev()?
                     .map(|(k, v)| Result::<_, DatabaseError>::Ok((k.key()?, v)))
                     .transpose()?;
+
+                // Restore cursor position back to current key after prev() moved it.
+                // This is important for RocksDB because the caller will call next()
+                // after this function returns, expecting the cursor to be at the
+                // current position.
+                cursor.seek(RawKey::new(current_key.clone()))?;
+
                 match prev_row {
                     // If current shard is the last shard for the sharded key that
                     // has previous shards, replace it with the previous shard.
-                    Some((prev_key, prev_value)) if key_matches(&prev_key, &key) => {
-                        cursor.delete_current()?;
-                        // Rocksdb doesn't move cursor pointer in write operation
-                        cursor.next()?;
-                        // Upsert will replace the last shard for this sharded key with
-                        // the previous value.
-                        cursor.upsert(RawKey::new(key), &prev_value)?;
+                    Some((prev_key, prev_value)) if key_matches(&prev_key, &current_key) => {
+                        // Delete the previous shard by its key
+                        cursor.delete_by_key(RawKey::new(prev_key))?;
+                        // Upsert the current (last) shard key with the previous shard's value
+                        // This effectively "promotes" the previous shard to be the new last shard
+                        cursor.upsert(RawKey::new(current_key), &prev_value)?;
                         Ok(PruneShardOutcome::Updated)
                     }
                     // If there's no previous shard for this sharded key,
                     // just delete last shard completely.
                     _ => {
-                        // If we successfully moved the cursor to a previous row,
-                        // jump to the original last shard.
-                        if prev_row.is_some() {
-                            cursor.next()?;
-                        }
-                        // Delete shard.
-                        cursor.delete_current()?;
+                        // Delete by explicit key to avoid cursor position issues
+                        cursor.delete_by_key(RawKey::new(current_key))?;
                         Ok(PruneShardOutcome::Deleted)
                     }
                 }
@@ -146,7 +152,7 @@ where
             // If current shard is not the last shard for this sharded key,
             // just delete it.
             else {
-                cursor.delete_current()?;
+                cursor.delete_by_key(RawKey::new(key))?;
                 Ok(PruneShardOutcome::Deleted)
             }
         } else {
