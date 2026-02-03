@@ -3,9 +3,7 @@
 use core::ops::RangeInclusive;
 
 use alloy_primitives::{
-    keccak256,
-    map::{hash_map, B256Map, HashMap},
-    BlockNumber, B256, KECCAK256_EMPTY, U256,
+    Address, B256, BlockNumber, KECCAK256_EMPTY, U256, keccak256, map::{B256Map, HashMap, hash_map}
 };
 use alloy_rlp::encode_fixed_size;
 use gravity_primitives::get_gravity_config;
@@ -117,25 +115,35 @@ where
         let mut storages: B256Map<HashedStorage> = HashMap::default();
         let tx = self.tx;
         if let Some(range) = range {
-            // Walk account changeset and insert account prefixes.
+            let start_block = *range.start();
+            let end_block = *range.end();
+
             let mut account_changeset_cursor = tx.cursor_read::<tables::AccountChangeSets>()?;
             let mut account_hashed_state_cursor = tx.cursor_read::<tables::HashedAccounts>()?;
-            for account_entry in account_changeset_cursor.walk_range(range.clone())? {
-                let (_, AccountBeforeTx { address, .. }) = account_entry?;
+            // Seek to start of range
+            let mut current = account_changeset_cursor.seek(start_block)?;
+            while let Some((block_number, AccountBeforeTx { address, .. })) = current {
+                if block_number > end_block {
+                    break;
+                }
                 let hashed_address = keccak256(address);
                 if let hash_map::Entry::Vacant(e) = accounts.entry(hashed_address) {
                     let account = account_hashed_state_cursor.seek_exact(hashed_address)?;
                     e.insert(account.map(|a| a.1));
                 }
+                current = account_changeset_cursor.next()?;
             }
 
-            // Walk storage changeset and insert storage prefixes as well as account prefixes if
-            // missing from the account prefix set.
             let mut storage_changeset_cursor = tx.cursor_dup_read::<tables::StorageChangeSets>()?;
             let mut storage_cursor = tx.cursor_dup_read::<tables::HashedStorages>()?;
-            let storage_range = BlockNumberAddress::range(range);
-            for storage_entry in storage_changeset_cursor.walk_range(storage_range)? {
-                let (BlockNumberAddress((_, address)), entry) = storage_entry?;
+            // Seek to start of range
+            let storage_start = BlockNumberAddress((start_block, Address::ZERO));
+            let mut current = storage_changeset_cursor.seek(storage_start)?;
+            while let Some((key, entry)) = current {
+                let BlockNumberAddress((block_number, address)) = key;
+                if block_number > end_block {
+                    break;
+                }
                 let hashed_address = keccak256(address);
                 if let hash_map::Entry::Vacant(e) = accounts.entry(hashed_address) {
                     let account = account_hashed_state_cursor.seek_exact(hashed_address)?;
@@ -147,6 +155,7 @@ where
                     .map(|s| s.value)
                     .unwrap_or(U256::ZERO);
                 storages.entry(hashed_address).or_default().storage.insert(hashed_slot, slot_value);
+                current = storage_changeset_cursor.next()?;
             }
         } else {
             let mut account_cursor = tx.cursor_read::<tables::HashedAccounts>()?;
