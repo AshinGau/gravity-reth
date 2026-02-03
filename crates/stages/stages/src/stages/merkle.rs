@@ -200,7 +200,7 @@ where
 
         let (trie_root, entities_checkpoint) = if range.is_empty() {
             (target_block_root, input.checkpoint().entities_stage_checkpoint().unwrap_or_default())
-        } else if to_block - from_block > threshold || from_block == 1 {
+        } else if to_block <= 60000 && (to_block - from_block > threshold || from_block == 1) {
             info!(target: "sync::stages::merkle::exec", current = ?current_block_number, target = ?to_block, "Rebuilding trie from hashed state");
             // if there are more blocks than threshold it is faster to rebuild the trie
             provider.tx_ref().clear::<tables::AccountsTrieV2>()?;
@@ -290,8 +290,9 @@ where
             (final_root.unwrap_or(EMPTY_ROOT_HASH), entities_checkpoint)
         } else {
             info!(target: "sync::stages::merkle::exec", current = ?current_block_number, target = ?to_block, "Incremental updating trie in chunks");
+            let incremental_threshold = 1000000;
             let mut final_root = None;
-            let mut start_block = from_block;
+            let mut start_block = 0;
             while start_block <= to_block {
                 let chunk_to = std::cmp::min(start_block + incremental_threshold, to_block);
                 let chunk_range = start_block..=chunk_to;
