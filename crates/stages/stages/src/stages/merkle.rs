@@ -293,6 +293,9 @@ where
             let incremental_threshold = 1000000;
             let mut final_root = None;
             let mut start_block = 0;
+            provider.tx_ref().clear::<tables::AccountsTrieV2>()?;
+            provider.tx_ref().clear::<tables::StoragesTrieV2>()?;
+            provider.tx_ref().commit_view()?;
             while start_block <= to_block {
                 let chunk_to = std::cmp::min(start_block + incremental_threshold, to_block);
                 let chunk_range = start_block..=chunk_to;
