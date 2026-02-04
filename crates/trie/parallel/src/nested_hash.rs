@@ -1,6 +1,7 @@
 #![allow(clippy::type_complexity)]
 
 use core::ops::RangeInclusive;
+use std::collections::HashSet;
 
 use alloy_primitives::{
     Address, B256, BlockNumber, KECCAK256_EMPTY, U256, keccak256, map::{B256Map, HashMap, hash_map}
@@ -193,6 +194,7 @@ where
             }
         }
 
+        let mut missing_accounts = HashMap::new();
         for (hashed_address, account2) in &state2.accounts {
             if let Some(account1) = state1.accounts.get(hashed_address) {
                 if account2 != account1 {
@@ -200,6 +202,18 @@ where
                 }
             } else {
                 println!("Can't find account {:?} in state1: {:?}", hashed_address, account2);
+                missing_accounts.insert(*hashed_address, account2.clone());
+            }
+        }
+        if !missing_accounts.is_empty() {
+            let mut plain_account_cursor = self.tx.cursor_read::<tables::PlainAccountState>()?;
+            let walker = plain_account_cursor.walk(None)?;
+            for account in walker {
+                let (address, account) = account?;
+                let hashed_address = keccak256(address);
+                if let Some(ma) = missing_accounts.get(&hashed_address) {
+                    println!("get account address({:?}), hashed_address({:?}) in plain table, missing_info: {:?}, real_info: {:?}", address, hashed_address, ma, account);
+                }
             }
         }
 
