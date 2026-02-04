@@ -189,7 +189,7 @@ where
                     println!("Different account, account1: {:?}, account2: {:?}", account1, account2);
                 }
             } else {
-                println!("Can't find account {:?} in state2", hashed_address);
+                println!("Can't find account {:?} in state2: {:?}", hashed_address, account1);
             }
         }
 
@@ -199,7 +199,7 @@ where
                     println!("Different account, account2: {:?}, account1: {:?}", account2, account1);
                 }
             } else {
-                println!("Can't find account {:?} in state1", hashed_address);
+                println!("Can't find account {:?} in state1: {:?}", hashed_address, account2);
             }
         }
 
