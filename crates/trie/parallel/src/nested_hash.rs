@@ -111,10 +111,12 @@ where
         &self,
         range: Option<RangeInclusive<BlockNumber>>,
     ) -> ProviderResult<HashedPostState> {
-        let mut accounts = HashMap::default();
-        let mut storages: B256Map<HashedStorage> = HashMap::default();
-        let tx = self.tx;
-        if let Some(range) = range {
+        let state1 = {
+            let mut accounts = HashMap::default();
+            let mut storages: B256Map<HashedStorage> = HashMap::default();
+            let tx = self.tx;
+
+            let range = range.unwrap();
             let start_block = *range.start();
             let end_block = *range.end();
 
@@ -157,7 +159,14 @@ where
                 storages.entry(hashed_address).or_default().storage.insert(hashed_slot, slot_value);
                 current = storage_changeset_cursor.next()?;
             }
-        } else {
+            HashedPostState { accounts, storages }
+        };
+        
+        let state2 = {
+            let mut accounts = HashMap::default();
+            let mut storages: B256Map<HashedStorage> = HashMap::default();
+            let tx = self.tx;
+
             let mut account_cursor = tx.cursor_read::<tables::HashedAccounts>()?;
             let account_walker = account_cursor.walk(None)?;
             for account in account_walker {
@@ -171,9 +180,68 @@ where
                 let (hashed_address, entry) = storage?;
                 storages.entry(hashed_address).or_default().storage.insert(entry.key, entry.value);
             }
+            HashedPostState { accounts, storages }
+        };
+
+        for (hashed_address, account1) in &state1.accounts {
+            if let Some(account2) = state2.accounts.get(hashed_address) {
+                if account1 != account2 {
+                    println!("Different account, account1: {:?}, account2: {:?}", account1, account2);
+                }
+            } else {
+                println!("Can't find account {:?} in state2", hashed_address);
+            }
         }
 
-        Ok(HashedPostState { accounts, storages })
+        for (hashed_address, account2) in &state2.accounts {
+            if let Some(account1) = state1.accounts.get(hashed_address) {
+                if account2 != account1 {
+                    println!("Different account, account2: {:?}, account1: {:?}", account2, account1);
+                }
+            } else {
+                println!("Can't find account {:?} in state1", hashed_address);
+            }
+        }
+
+        for (hashed_address, storage1) in &state1.storages {
+            if let Some(storage2) = state2.storages.get(hashed_address) {
+                if storage1.wiped == storage2.wiped {
+                    println!("Different wiped, storage1: {}, storage2: {}", storage1.wiped, storage2.wiped);
+                }
+                for (slot, value1) in &storage1.storage {
+                    if let Some(value2) = storage2.storage.get(slot) {
+                        if value1 != value2 {
+                            println!("Different slot value in {:?} - {}, value1: {}, value2: {}", hashed_address, slot, value1, value2);
+                        }
+                    } else {
+                        println!("Can't find slot {:?} in state2({:?})", slot, hashed_address);
+                    }
+                }
+            } else {
+                println!("Can't find storage {:?} in state2", hashed_address);
+            }
+        }
+
+        for (hashed_address, storage2) in &state2.storages {
+            if let Some(storage1) = state1.storages.get(hashed_address) {
+                if storage1.wiped == storage2.wiped {
+                    println!("Different wiped, storage2: {}, storage1: {}", storage2.wiped, storage1.wiped);
+                }
+                for (slot, value2) in &storage2.storage {
+                    if let Some(value1) = storage1.storage.get(slot) {
+                        if value1 != value2 {
+                            println!("Different slot value in {:?} - {}, value2: {}, value1: {}", hashed_address, slot, value2, value1);
+                        }
+                    } else {
+                        println!("Can't find slot {:?} in state1({:?})", slot, hashed_address);
+                    }
+                }
+            } else {
+                println!("Can't find storage {:?} in state1", hashed_address);
+            }
+        }
+
+        Ok(state2)
     }
 }
 
