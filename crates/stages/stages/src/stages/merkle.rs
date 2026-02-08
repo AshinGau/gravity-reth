@@ -371,20 +371,85 @@ where
         if range.is_empty() {
             info!(target: "sync::stages::merkle::unwind", "Nothing to unwind");
         } else {
-            // Use optimized nested hash algorithm for state root calculation
-            let nested_state_root = NestedStateRoot::new(provider.tx_ref(), None);
-            let hashed_state = nested_state_root.read_hashed_state(Some(range))?;
-            let (block_root, trie_updates_v2) = nested_state_root.calculate(&hashed_state)?;
+            info!("Unwind and rebuild trie from hashed state");
+            // if there are more blocks than threshold it is faster to rebuild the trie
+            provider.tx_ref().clear::<tables::AccountsTrieV2>()?;
+            provider.tx_ref().clear::<tables::StoragesTrieV2>()?;
+            provider.tx_ref().commit_view()?;
+
+            // Rebuild trie by processing HashedAccounts and HashedStorages in chunks
+            // to avoid loading the entire state into memory, 256 kv entries for a block
+            let chunk_entries_threshold = 800000;
+            let mut final_root = None;
+            let total_accounts = provider.count_entries::<tables::HashedAccounts>()?;
+            let mut account_cursor = provider.tx_ref().cursor_read::<tables::HashedAccounts>()?;
+            let mut storage_cursor =
+                provider.tx_ref().cursor_dup_read::<tables::HashedStorages>()?;
+
+            let mut hashed_state = HashedPostState::default();
+            let mut processed_num_accounts: usize = 0;
+            let mut chunk_num_entries: usize = 0;
+
+            for account_entry in account_cursor.walk(None)? {
+                let (hashed_address, account) = account_entry?;
+                processed_num_accounts += 1;
+                chunk_num_entries += 1;
+
+                // Collect storage entries for this account using seek + next with key comparison
+                let mut storage = HashedStorage::default();
+                let mut storage_entry = storage_cursor.seek(hashed_address)?;
+                while let Some((found_key, entry)) = storage_entry {
+                    if found_key != hashed_address {
+                        break;
+                    }
+                    if !entry.value.is_zero() {
+                        storage.storage.insert(entry.key, entry.value);
+                        chunk_num_entries += 1;
+                    }
+                    storage_entry = storage_cursor.next()?
+                }
+
+                // Insert account and storage into hashed state
+                hashed_state.accounts.insert(hashed_address, Some(account));
+                if !storage.storage.is_empty() {
+                    hashed_state.storages.insert(hashed_address, storage);
+                }
+
+                // Check if we've reached the chunk threshold
+                if chunk_num_entries >= chunk_entries_threshold {
+                    // Calculate state root for this chunk and update trie
+                    let nested_state_root = NestedStateRoot::new(provider.tx_ref(), None);
+                    let (root, trie_updates_v2) = nested_state_root.calculate(&hashed_state)?;
+                    provider.write_trie_updatesv2(&trie_updates_v2)?;
+                    provider.tx_ref().commit_view()?;
+                    final_root = Some(root);
+
+                    info!(
+                        target: "sync::stages::merkle::exec",
+                        chunk_entries = chunk_num_entries,
+                        progress = %format!("{:.2}%", (processed_num_accounts as f64 / total_accounts as f64) * 100.0),
+                        "Processing merkle by rebuilding chunk"
+                    );
+                    chunk_num_entries = 0;
+                    hashed_state.clear();
+                }
+            }
+
+            // Process remaining entries
+            if chunk_num_entries > 0 {
+                let nested_state_root = NestedStateRoot::new(provider.tx_ref(), None);
+                let (root, trie_updates_v2) = nested_state_root.calculate(&hashed_state)?;
+                provider.write_trie_updatesv2(&trie_updates_v2)?;
+                provider.tx_ref().commit_view()?;
+                final_root = Some(root);
+            }
 
             // Validate the calculated state root
             let target = provider
                 .header_by_number(input.unwind_to)?
                 .ok_or_else(|| ProviderError::HeaderNotFound(input.unwind_to.into()))?;
 
-            validate_state_root(block_root, SealedHeader::seal_slow(target), input.unwind_to)?;
-
-            // Validation passed, apply unwind changes to the database.
-            provider.write_trie_updatesv2(&trie_updates_v2)?;
+            validate_state_root(final_root.unwrap(), SealedHeader::seal_slow(target), input.unwind_to)?;
 
             // Update entities checkpoint to reflect the unwind operation
             // Since we're unwinding, we need to recalculate the total entities at the target block
