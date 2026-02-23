@@ -857,11 +857,10 @@ impl<Storage: GravityStorage> Core<Storage> {
         // Map from (sourceType, sourceId) to latest nonce
         let mut data_records: HashMap<(u32, alloy_primitives::U256), u128> = HashMap::new();
 
-        // FIXME (GRETH-010): Oracle events (DataRecorded) are extracted from ALL transaction
-        // receipts, including user transactions. If NativeOracle.record() is callable without
-        // SYSTEM_CALLER access control, a user transaction could inject oracle data.
-        // Mitigation: ensure NativeOracle.record() is restricted to SYSTEM_CALLER on-chain,
-        // and/or filter oracle events here to only accept those from SYSTEM_CALLER transactions.
+        // Only process logs from system transaction receipts — the caller passes a slice
+        // that excludes user transaction receipts (GRETH-010 fix, see call site in
+        // execute_ordered_block). This prevents a user-controlled log from injecting
+        // oracle data even if NativeOracle.record() lacks on-chain access control.
         for receipt in receipts {
             debug!(target: "execute_ordered_block",
                 number=?block_number,
