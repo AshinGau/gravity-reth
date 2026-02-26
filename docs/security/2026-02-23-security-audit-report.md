@@ -26,6 +26,7 @@
 **Issue:** Gravity replaced upstream's `InvalidTransactionSignature` error with `unwrap_or(Address::ZERO)` on signer recovery failure. Transactions with invalid signatures are attributed to the zero address instead of being rejected.
 **Fix:** Restored original error-path behavior. Invalid signatures now return `InvalidTransactionSignature` error. System transactions (empty signatures) handled explicitly.
 **Commit:** `14b6ce5152`
+**Review Comments** reviewer: Xin GAO; state: accepted; comments: The original error-path behavior (returning `InvalidTransactionSignature` on recovery failure) was not restored. Instead, transactions that fail signer recovery are attributed to `SYSTEM_CALLER` (`0x...1625f0000`). This is safe because the code guarantees that all such transactions are system transactions (empty signatures) — mined blocks only contain either user-signed transactions (which recover successfully) or system transactions (which are injected by the consensus engine and have no recoverable signature).
 
 ### GRETH-002: Unsafe Lifetime Transmute in RocksDB Cursor
 
@@ -33,6 +34,7 @@
 **Issue:** `DBRawIterator<'_>` transmuted to `'static` lifetime. Rust does not guarantee struct field drop order, so `iterator` could be accessed after `db` is dropped — undefined behavior.
 **Fix:** Restructured to `CursorInner` with explicit drop ordering: `_db` field listed after `iterator` so iterator drops first. Added `Drop` impl with safety documentation.
 **Commit:** `cbccf02ff2`
+**Review Comments** reviewer: Xin GAO; state: accepted; comments: The DB is a global singleton for the entire process lifetime, so in practice the Cursor's `Arc<DB>` is never the last reference. However, considered in isolation, the `Cursor` struct does have a soundness issue — the fix was still necessary to ensure correct drop ordering.
 
 ### GRETH-003: Mint Precompile Wrong Authorized Address
 
@@ -40,6 +42,7 @@
 **Issue:** `AUTHORIZED_CALLER` set to `0x595475...4e` (unknown address) instead of `JWK_MANAGER_ADDR` (`0x...1625f4001`). Anyone with the private key for the hardcoded address could mint unlimited G tokens.
 **Fix:** Replaced with `use super::onchain_config::JWK_MANAGER_ADDR`. Added compile-time assertion preventing future divergence.
 **Commit:** `cbccf02ff2`
+**Review Comments** reviewer: Xin GAO; state: accepted; comments: The address `0x595475...4e` is not an arbitrary unknown address — it is the Native Oracle contract address. This address is contract-dependent. The ideal approach would be to make it a configurable item rather than a hardcoded constant.
 
 ### GRETH-004: Block Validation Skipped in Release Builds
 
@@ -47,6 +50,7 @@
 **Issue:** `validate_block()` call gated behind `#[cfg(debug_assertions)]`. In release builds, blocks are accepted as canonical without any consensus rule checks (header hash, parent linkage, gas limit, timestamp).
 **Fix:** Removed `#[cfg(debug_assertions)]` gate. Validation now runs in all build configurations.
 **Commit:** `cbccf02ff2`
+**Review Comments** reviewer: Xin GAO; state: accepted; comments: `validate_block()` is not needed in the pipeline Aptos consensus flow. The `#[cfg(debug_assertions)]` gate happened to skip it. The correct fix would be to remove `validate_block()` entirely rather than running it in all build configurations.
 
 ---
 
@@ -58,6 +62,7 @@
 **Issue:** Persistence writes to three independent RocksDB instances in parallel via `thread::scope()`. If one write fails mid-way, state is partially committed with no rollback.
 **Status:** Mitigated with explicit error logging and idempotent checkpoint design. Full 2-phase commit deferred to future refactor.
 **Commit:** `14b6ce5152`
+**Review Comments** reviewer: Xin GAO; state: rejected; comments: The recovery process provides repair methods for various write failure scenarios and guarantees block eventual consistency.
 
 ### GRETH-006: Path Traversal in Shard Directory Config
 
@@ -65,6 +70,7 @@
 **Issue:** `--db.sharding-directories` accepts arbitrary paths with no normalization. `../../etc/cron.daily` style paths accepted.
 **Fix:** Added path validation: must be absolute, no `..` components.
 **Commit:** `14b6ce5152`
+**Review Comments** reviewer: Xin GAO; state: accepted; comments: It makes sense.
 
 ### GRETH-007: Grevm State Root Unverified
 
@@ -72,6 +78,7 @@
 **Issue:** After Grevm parallel execution, computed state root not compared against block header. Silent state divergence possible.
 **Fix:** Added `warn!` on `None` state root. Improved assertion messages for mismatch detection.
 **Commit:** `f16d356915`
+**Review Comments** reviewer: Xin GAO; state: accepted; comments: It makes sense.
 
 ### GRETH-008: Recovery Trusts Unverified Execution State
 
@@ -79,6 +86,7 @@
 **Issue:** Crash recovery re-hashes and rebuilds trie from persisted state without verifying state root against canonical block header.
 **Status:** Documented as design decision — BFT consensus guarantees block validity.
 **Commit:** `14b6ce5152`
+**Review Comments** reviewer: Xin GAO; state: accepted; comments: When recovering damaged blocks, if the state root calculation is incorrect, the error may only surface when processing the next block, which makes troubleshooting difficult. Moreover, the block's dirty data may have already been written to the DB, requiring an unwind/rollback to recover.
 
 ### GRETH-009: Immediate Finalization Without Independent Proof
 
@@ -86,6 +94,7 @@
 **Issue:** Every block immediately marked `safe` AND `finalized` with no independent cryptographic proof from consensus layer.
 **Status:** Documented as design decision — AptosBFT provides deterministic finality, so canonical == finalized.
 **Commit:** `14b6ce5152`
+**Review Comments** reviewer: Xin GAO; state: accepted; comments: Should add documents.
 
 ### GRETH-010: Oracle Events Extracted from All Receipts
 
@@ -93,6 +102,7 @@
 **Issue:** Oracle events extracted from ALL execution receipts including user transactions. If NativeOracle access control is bypassed, user contracts could inject false oracle data.
 **Fix:** Sliced receipt processing to system receipts only.
 **Commit:** `f16d356915`
+**Review Comments** reviewer: Xin GAO; state: accepted; comments: This issue is indeed severe — user transactions could forge system transaction logs by emitting events with matching signatures, leading to incorrect chain state. A critical vulnerability.
 
 ### GRETH-011: Relayer Log Parsing Without Receipt Verification
 
