@@ -8354,6 +8354,7 @@ dependencies = [
  "reth-stages",
  "reth-stages-api",
  "reth-static-file",
+ "reth-storage-errors",
  "reth-tasks",
  "reth-testing-utils",
  "reth-tracing",
