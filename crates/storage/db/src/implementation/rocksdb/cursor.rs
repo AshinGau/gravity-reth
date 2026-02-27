@@ -56,9 +56,10 @@ macro_rules! compress_to_buf_or_ref {
 
 /// `RocksDB` cursor with `RawIterator` caching for performance.
 pub struct Cursor<K: TransactionKind, T: Table> {
-    db: Arc<DB>,
     /// Iterator for cursor operations - always ready to use
     iterator: rocksdb::DBRawIterator<'static>,
+    /// db should drop after iterator
+    db: Arc<DB>,
     /// Cache buffer that receives compressed values.
     batch: Arc<Mutex<rocksdb::WriteBatch>>,
     buf: Vec<u8>,
@@ -68,8 +69,8 @@ pub struct Cursor<K: TransactionKind, T: Table> {
 impl<K: TransactionKind, T: Table> std::fmt::Debug for Cursor<K, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Cursor")
-            .field("db", &self.db)
             .field("iterator", &"<DBRawIterator>")
+            .field("db", &self.db)
             .field("batch", &"<WriteBatch>")
             .field("_phantom", &self._phantom)
             .finish()
@@ -93,7 +94,7 @@ impl<K: TransactionKind, T: Table> Cursor<K, T> {
             )
         };
 
-        Ok(Self { db, iterator, batch, buf: Vec::new(), _phantom: PhantomData })
+        Ok(Self { iterator, db, batch, buf: Vec::new(), _phantom: PhantomData })
     }
 
     /// Encode `DupSort` composite key: key + subkey
