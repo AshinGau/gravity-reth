@@ -530,8 +530,20 @@ impl<Storage: GravityStorage> Core<Storage> {
         let executed_block_hash = execution_result.block_hash;
         self.execution_result_tx.send(execution_result).ok()?;
         let block_hash = self.verified_block_hash_rx.wait(block_id).await?;
-        if let Some(block_hash) = block_hash {
-            assert_eq!(executed_block_hash, block_hash);
+        match block_hash {
+            Some(verified_hash) => {
+                assert_eq!(executed_block_hash, verified_hash, "Block hash mismatch");
+            }
+            None => {
+                // Consensus did not supply a verification hash for this block.
+                warn!(
+                    target: "PipeExecService.process",
+                    block_number = ?block_number,
+                    block_id = ?block_id,
+                    block_hash = ?executed_block_hash,
+                    "consensus did not provide a verification hash for this block"
+                );
+            }
         }
         let elapsed = start_time.elapsed();
         self.metrics.verify_duration.record(elapsed);
