@@ -1029,6 +1029,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             gravity_events: vec![],
             epoch,
         };
+        let n_system_receipts = 1 + validator_txn_results.len();
         metadata_txn_result.insert_to_executed_ordered_block_result(&mut result, 0);
         // Insert validator transaction results one by one after the metadata transaction
         // Position 1 is right after the metadata transaction at position 0
@@ -1040,8 +1041,9 @@ impl<Storage: GravityStorage> Core<Storage> {
             receipts_len=?result.execution_output.receipts.len(),
             "insert metadata and validator transaction results to executed ordered block result"
         );
+        // Only extract gravity events from system transaction receipts.
         let gravity_events = self.extract_gravity_events_from_receipts(
-            &result.execution_output.receipts,
+            &result.execution_output.receipts[..n_system_receipts],
             result.block.number,
             epoch,
         );
