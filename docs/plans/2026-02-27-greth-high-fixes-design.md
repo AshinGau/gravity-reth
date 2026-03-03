@@ -21,3 +21,5 @@ Date: 2026-02-27
 **Files:** `crates/pipe-exec-layer-ext-v2/execute/src/onchain_config/metadata_txn.rs`, `crates/pipe-exec-layer-ext-v2/execute/src/lib.rs`
 
 **Review Comments** reviewer: neko; state: pending; comments: @lightman Fix implemented: (1) `transact_system_txn` now asserts success instead of silently logging errors — a reverted system txn indicates corrupted chain state and must halt the node. (2) Receipt `success` field now derives from `result.is_success()` instead of hardcoding `true`, making failed system txns observable on-chain. Please review whether assert-and-panic is acceptable for production, or if we should propagate `Err` and halt block processing gracefully instead.
+
+**Review Comments** reviewer: lightman; state: partial-reject; comments: For change (a), rejected — DKG/JWK system transactions can legitimately fail, so we cannot use a hard assert. Failures must be handled gracefully (e.g., propagate `Err` and halt block processing) instead of panicking. For change (b), accepted — deriving `receipt.success` from `result.is_success()` instead of hardcoding `true` is correct.
