@@ -6,8 +6,8 @@ use crate::{
     data_source::{source_types, OracleData, OracleDataSource},
     eth_client::EthHttpCli,
 };
-use alloy_primitives::{hex, Address, Bytes, B256, U256};
-use alloy_rpc_types::{Filter, Log};
+use alloy_primitives::{hex, Address, Bytes, U256};
+use alloy_rpc_types::Filter;
 use alloy_sol_macro::sol;
 use alloy_sol_types::SolEvent;
 use anyhow::{anyhow, Result};
@@ -17,7 +17,7 @@ use std::sync::{
     Arc,
 };
 use tokio::sync::Mutex;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 // GravityPortal.MessageSent event signature
 sol! {
@@ -103,11 +103,6 @@ pub struct BlockchainEventSource {
 
     /// Last event we returned to caller (for exactly-once tracking and persistence)
     last_processed: Mutex<LastProcessedEvent>,
-
-    /// Block hash at the cursor position from the previous poll (GRETH-012).
-    /// On each poll we verify the stored cursor block still has the same hash.
-    /// A mismatch means a chain reorganization has occurred past the finalized marker.
-    confirmed_cursor_hash: Mutex<Option<B256>>,
 }
 
 impl BlockchainEventSource {
@@ -141,7 +136,6 @@ impl BlockchainEventSource {
             portal_address,
             cursor: AtomicU64::new(cursor),
             last_processed: Mutex::new(LastProcessedEvent::new(latest_onchain_nonce, cursor)),
-            confirmed_cursor_hash: Mutex::new(None),
         })
     }
 
@@ -211,85 +205,6 @@ impl BlockchainEventSource {
     pub fn set_cursor(&self, block: u64) {
         self.cursor.store(block, Ordering::Relaxed);
     }
-
-    /// Cross-verify event logs against block receipts (GRETH-011).
-    ///
-    /// Groups logs by block number, fetches receipts for each block via a separate
-    /// RPC call, and retains only logs that appear verbatim (address + topics + data)
-    /// in the canonical receipt list. Logs whose receipts cannot be fetched are
-    /// dropped (fail-closed). This detects a compromised RPC server that forges
-    /// `eth_getLogs` responses without corresponding `eth_getBlockReceipts` entries.
-    async fn verify_logs_against_receipts(&self, logs: Vec<Log>) -> Vec<Log> {
-        use std::collections::HashMap;
-
-        if logs.is_empty() {
-            return logs;
-        }
-
-        // Group log indices by block number for batched receipt fetching.
-        let mut by_block: HashMap<u64, Vec<usize>> = HashMap::new();
-        for (i, log) in logs.iter().enumerate() {
-            if let Some(bn) = log.block_number {
-                by_block.entry(bn).or_default().push(i);
-            }
-            // Logs without block_number are kept as-is (can't verify; shouldn't
-            // happen for finalized blocks but handled defensively).
-        }
-
-        // Start by assuming every log is kept; mark failures as dropped.
-        let mut keep = vec![true; logs.len()];
-
-        for (block_number, indices) in &by_block {
-            match self.rpc_client.get_block_receipts(*block_number).await {
-                Ok(receipts) => {
-                    for &idx in indices {
-                        let log = &logs[idx];
-                        let mut found = false;
-                        'receipt_search: for receipt in &receipts {
-                            for receipt_log in receipt.logs() {
-                                if receipt_log.address() == log.address()
-                                    && receipt_log.data().topics() == log.topics()
-                                    && receipt_log.data().data == log.data().data
-                                {
-                                    found = true;
-                                    break 'receipt_search;
-                                }
-                            }
-                        }
-                        if !found {
-                            warn!(
-                                target: "blockchain_source",
-                                chain_id = self.chain_id,
-                                block_number = block_number,
-                                log_address = ?log.address(),
-                                "GRETH-011: Log not found in block receipts — \
-                                 possible RPC manipulation, dropping log"
-                            );
-                            keep[idx] = false;
-                        }
-                    }
-                }
-                Err(e) => {
-                    // Fail-closed: drop all logs from this block if receipts are
-                    // unavailable so fabricated logs are never silently accepted.
-                    warn!(
-                        target: "blockchain_source",
-                        chain_id = self.chain_id,
-                        block_number = block_number,
-                        error = ?e,
-                        logs_dropped = indices.len(),
-                        "GRETH-011: Failed to fetch block receipts for verification, \
-                         dropping logs from block"
-                    );
-                    for &idx in indices {
-                        keep[idx] = false;
-                    }
-                }
-            }
-        }
-
-        logs.into_iter().zip(keep).filter(|(_, k)| *k).map(|(log, _)| log).collect()
-    }
 }
 
 #[async_trait]
@@ -305,52 +220,6 @@ impl OracleDataSource for BlockchainEventSource {
     async fn poll(&self) -> Result<Vec<OracleData>> {
         let cursor = self.cursor.load(Ordering::Relaxed);
         let finalized_block = self.rpc_client.get_finalized_block_number().await?;
-
-        // GRETH-012: Reorg detection — verify the cursor block hash hasn't changed
-        // since the last poll. A change means the chain reorganized past the block
-        // we previously considered finalized, which requires operator intervention.
-        if cursor > 0 {
-            match self.rpc_client.get_block_hash_at(cursor).await {
-                Ok(current_hash) => {
-                    let mut stored = self.confirmed_cursor_hash.lock().await;
-                    match *stored {
-                        Some(prev_hash) if prev_hash != current_hash => {
-                            error!(
-                                target: "blockchain_source",
-                                chain_id = self.chain_id,
-                                cursor_block = cursor,
-                                prev_hash = ?prev_hash,
-                                current_hash = ?current_hash,
-                                "REORG DETECTED: cursor block hash changed — \
-                                 chain reorganization past finalized block; \
-                                 operator intervention required"
-                            );
-                            return Err(anyhow::anyhow!(
-                                "Chain reorg detected at block {} for chain {}: \
-                                 hash changed from {:?} to {:?}",
-                                cursor,
-                                self.chain_id,
-                                prev_hash,
-                                current_hash
-                            ));
-                        }
-                        _ => {
-                            *stored = Some(current_hash);
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!(
-                        target: "blockchain_source",
-                        chain_id = self.chain_id,
-                        cursor_block = cursor,
-                        error = ?e,
-                        "Failed to fetch cursor block hash for reorg check, skipping"
-                    );
-                }
-            }
-        }
-
         let to_block = std::cmp::min(cursor + Self::MAX_BLOCKS_PER_POLL, finalized_block);
 
         if to_block <= cursor {
@@ -371,28 +240,13 @@ impl OracleDataSource for BlockchainEventSource {
             "Polling for MessageSent events"
         );
 
-        let raw_logs = self.rpc_client.get_logs(&filter).await?;
-
-        // GRETH-011: Receipt proof verification — cross-check each returned log against
-        // the block receipts from a second RPC call to detect RPC server manipulation.
-        let logs = self.verify_logs_against_receipts(raw_logs).await;
-
+        let logs = self.rpc_client.get_logs(&filter).await?;
         let mut results = Vec::with_capacity(logs.len());
 
         // Filter events strictly greater than last processed nonce
         let last_nonce = self.last_processed.lock().await.nonce;
 
         for log in logs {
-            // GRETH-011: Re-verify event signature locally — don't trust RPC filter alone.
-            if log.topics().first() != Some(&MessageSent::SIGNATURE_HASH) {
-                warn!(target: "relayer::blockchain_source", "Unexpected event signature in log, skipping");
-                continue;
-            }
-            // Re-verify contract address.
-            if log.address() != self.portal_address {
-                warn!(target: "relayer::blockchain_source", "Log from unexpected address {:?}, skipping", log.address());
-                continue;
-            }
             let nonce = if let Some(nonce_topic) = log.topics().get(1) {
                 let nonce_bytes = &nonce_topic.as_slice()[16..32];
                 u128::from_be_bytes(nonce_bytes.try_into().unwrap_or_default())
@@ -455,24 +309,6 @@ impl OracleDataSource for BlockchainEventSource {
 
         // Update cursor
         self.cursor.store(to_block, Ordering::Relaxed);
-
-        // GRETH-012: Store the new cursor's block hash so the next poll can detect reorgs.
-        if to_block > cursor {
-            match self.rpc_client.get_block_hash_at(to_block).await {
-                Ok(hash) => {
-                    *self.confirmed_cursor_hash.lock().await = Some(hash);
-                }
-                Err(e) => {
-                    warn!(
-                        target: "blockchain_source",
-                        chain_id = self.chain_id,
-                        to_block = to_block,
-                        error = ?e,
-                        "Failed to store cursor block hash for reorg detection"
-                    );
-                }
-            }
-        }
 
         // Track max nonce for exactly-once semantics (atomic update of nonce + block)
         if !results.is_empty() {

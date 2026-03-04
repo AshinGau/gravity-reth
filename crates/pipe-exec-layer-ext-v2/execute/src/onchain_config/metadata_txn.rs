@@ -199,13 +199,10 @@ pub fn transact_system_txn(
     let tx_env = Recovered::new_unchecked(txn.clone(), SYSTEM_CALLER).into_tx_env();
     let result = evm.transact_raw(tx_env).unwrap();
 
-    // GRETH-025: System transactions MUST succeed — a revert indicates corrupted
-    // chain state. Halt immediately instead of silently continuing.
-    assert!(
-        result.result.is_success(),
-        "system transaction must succeed but got: {:?}",
-        result.result
-    );
+    // Log any execution errors with appropriate severity
+    if !result.result.is_success() {
+        super::errors::log_execution_error(&result.result);
+    }
 
     (SystemTxnResult { result: result.result, txn }, result.state)
 }

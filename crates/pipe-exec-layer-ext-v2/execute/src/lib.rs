@@ -857,10 +857,6 @@ impl<Storage: GravityStorage> Core<Storage> {
         // Map from (sourceType, sourceId) to latest nonce
         let mut data_records: HashMap<(u32, alloy_primitives::U256), u128> = HashMap::new();
 
-        // Only process logs from system transaction receipts — the caller passes a slice
-        // that excludes user transaction receipts (GRETH-010 fix, see call site in
-        // execute_ordered_block). This prevents a user-controlled log from injecting
-        // oracle data even if NativeOracle.record() lacks on-chain access control.
         for receipt in receipts {
             debug!(target: "execute_ordered_block",
                 number=?block_number,
@@ -1203,8 +1199,9 @@ impl<Storage: GravityStorage> Core<Storage> {
 ///
 /// **This is NOT a security boundary.** Cross-sender dependencies are not
 /// visible during parallel per-sender validation because each sender's account
-/// state is a local copy of the pre-block state. Invalid transactions that
-/// slip through will be definitively rejected during EVM execution.
+/// state is a local copy of the pre-block state. This means the filter may
+/// produce false positives (marking valid transactions as invalid) but never
+/// false negatives (letting invalid ones through undetected by EVM execution).
 ///
 /// The purpose of this filter is to avoid feeding obviously-invalid transactions
 /// (wrong nonce, insufficient balance) to the parallel EVM, reducing wasted work.

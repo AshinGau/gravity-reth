@@ -1,6 +1,6 @@
 use alloy_network::Ethereum;
 use alloy_provider::{Provider, ProviderBuilder, RootProvider};
-use alloy_rpc_types::{Filter, Log, TransactionReceipt};
+use alloy_rpc_types::{Filter, Log};
 use anyhow::{Context as AnyhowContext, Result};
 use reqwest::ClientBuilder;
 use tokio::time::{sleep, Duration};
@@ -69,47 +69,6 @@ impl EthHttpCli {
         self.retry_with_backoff(|| async { self.provider.get_logs(filter).await })
             .await
             .with_context(|| "Failed to get logs with filter")
-    }
-
-    /// Gets the block hash at a specific block number
-    ///
-    /// Used by reorg detection (GRETH-012) to verify that a previously-seen
-    /// finalized block still has the same hash on the next poll.
-    pub async fn get_block_hash_at(&self, block_number: u64) -> Result<alloy_primitives::B256> {
-        self.retry_with_backoff(|| async {
-            match self
-                .provider
-                .get_block_by_number(alloy_rpc_types::BlockNumberOrTag::Number(block_number))
-                .await?
-            {
-                Some(block) => Ok(block.header.hash),
-                None => Err(alloy_transport::TransportError::UnsupportedFeature(
-                    "block not found".into(),
-                )),
-            }
-        })
-        .await
-        .with_context(|| format!("Failed to get block hash at block {}", block_number))
-    }
-
-    /// Gets all transaction receipts in a block.
-    ///
-    /// Used for receipt proof verification (GRETH-011) to cross-validate event logs
-    /// returned by `eth_getLogs` against the canonical receipt list, detecting
-    /// manipulation by a compromised RPC server.
-    pub async fn get_block_receipts(&self, block_number: u64) -> Result<Vec<TransactionReceipt>> {
-        self.retry_with_backoff(|| async {
-            self.provider
-                .get_block_receipts(
-                    alloy_rpc_types::BlockNumberOrTag::Number(block_number).into(),
-                )
-                .await?
-                .ok_or(alloy_transport::TransportError::UnsupportedFeature(
-                    "no receipts returned for block".into(),
-                ))
-        })
-        .await
-        .with_context(|| format!("Failed to get block receipts for block {}", block_number))
     }
 
     /// Gets the latest finalized block number
