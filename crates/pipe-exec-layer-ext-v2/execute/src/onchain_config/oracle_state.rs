@@ -142,10 +142,20 @@ where
                 "Fetched oracle source state"
             );
 
+            // GRETH-043: Use checked conversion instead of silent truncation
+            let nonce_u64 = u64::try_from(latest_nonce).unwrap_or_else(|_| {
+                tracing::error!(
+                    target: "oracle_state",
+                    source_id = source_id.to_string(),
+                    latest_nonce,
+                    "Nonce exceeds u64::MAX — clamping to u64::MAX"
+                );
+                u64::MAX
+            });
             results.push(OracleSourceState {
                 source_type: SOURCE_TYPE_BLOCKCHAIN,
                 source_id: source_id.try_into().unwrap_or(0),
-                latest_nonce: latest_nonce as u64,
+                latest_nonce: nonce_u64,
                 latest_record,
             });
         }
@@ -168,10 +178,14 @@ where
         let latest_record =
             self.fetch_latest_record(source_type, source_id, latest_nonce, block_id);
 
+        // GRETH-043: Use checked conversion instead of silent truncation
         OracleSourceState {
             source_type,
             source_id: source_id.try_into().unwrap_or(0),
-            latest_nonce: latest_nonce as u64,
+            latest_nonce: u64::try_from(latest_nonce).unwrap_or_else(|_| {
+                tracing::error!(target: "oracle_state", latest_nonce, "Nonce exceeds u64::MAX");
+                u64::MAX
+            }),
             latest_record,
         }
     }

@@ -3,8 +3,9 @@ use alloy_provider::{Provider, ProviderBuilder, RootProvider};
 use alloy_rpc_types::{Filter, Log};
 use anyhow::{Context as AnyhowContext, Result};
 use reqwest::ClientBuilder;
+use std::path::Path;
 use tokio::time::{sleep, Duration};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 use url::Url;
 
 /// Retry configuration
@@ -50,12 +51,46 @@ impl EthHttpCli {
     /// # Errors
     /// * Returns an error if the URL cannot be parsed or client cannot be built
     pub fn new(rpc_url: &str) -> Result<Self> {
+        Self::new_with_tls_config(rpc_url, None)
+    }
+
+    /// GRETH-058: Create a new EthHttpCli with optional TLS certificate pinning.
+    ///
+    /// # Arguments
+    /// * `rpc_url` - The RPC endpoint URL
+    /// * `ca_cert_path` - Optional path to a PEM-encoded CA certificate for pinning.
+    ///   When provided, ONLY this CA will be trusted (system CAs are excluded).
+    pub fn new_with_tls_config(
+        rpc_url: &str,
+        ca_cert_path: Option<&Path>,
+    ) -> Result<Self> {
         debug!("Creating EthHttpCli for URL: {}", rpc_url);
 
         let url =
             Url::parse(rpc_url).with_context(|| format!("Failed to parse RPC URL: {}", rpc_url))?;
 
-        let client_builder = ClientBuilder::new().no_proxy().use_rustls_tls();
+        let mut client_builder = ClientBuilder::new().no_proxy().use_rustls_tls();
+
+        if let Some(cert_path) = ca_cert_path {
+            let cert_pem = std::fs::read(cert_path)
+                .with_context(|| format!("Failed to read CA certificate: {:?}", cert_path))?;
+            let cert = reqwest::tls::Certificate::from_pem(&cert_pem)
+                .with_context(|| "Failed to parse CA certificate PEM")?;
+            // Pin to this specific CA — disable system CA store
+            client_builder = client_builder
+                .tls_built_in_root_certs(false)
+                .add_root_certificate(cert);
+            info!("TLS certificate pinned to: {:?}", cert_path);
+        } else {
+            // GRETH-058: Log a warning when no pinning is configured
+            warn!(
+                target: "EthHttpCli",
+                rpc_url = rpc_url,
+                "No TLS certificate pinning configured — using system CA store. \
+                 Consider configuring certificate pinning for production deployments."
+            );
+        }
+
         let client = client_builder.build().with_context(|| "Failed to build HTTP client")?;
 
         let provider: RootProvider<Ethereum> =

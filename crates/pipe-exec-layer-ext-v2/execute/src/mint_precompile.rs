@@ -24,8 +24,15 @@ pub const AUTHORIZED_CALLER: Address = JWK_MANAGER_ADDR;
 /// Function ID for mint operation
 const FUNC_MINT: u8 = 0x01;
 
-/// Base gas cost for mint operation
-const MINT_BASE_GAS: u64 = 21000;
+/// GRETH-066: Base gas cost for mint operation.
+/// Higher than a simple transfer (21,000) to account for authorization check,
+/// state mutation (balance increment), and mutex lock acquisition.
+const MINT_BASE_GAS: u64 = 50_000;
+
+/// GRETH-049: Maximum tokens that can be minted in a single call.
+/// Acts as a safety cap to prevent unbounded minting from a compromised JWK Manager.
+/// Set to 10M tokens (in wei) as a reasonable per-call limit.
+const MAX_SINGLE_MINT: u128 = 10_000_000 * 10u128.pow(18);
 
 /// Creates a mint token precompile contract instance with state access.
 ///
@@ -132,6 +139,18 @@ fn mint_token_handler<DB: ParallelDatabase + Send + Sync>(
     if amount == 0 {
         warn!(target: "evm::precompile::mint_token", ?recipient, "Zero amount");
         return Err(PrecompileError::Other("Zero amount not allowed".into()));
+    }
+
+    // GRETH-049: Per-call mint cap to limit damage from compromised JWK Manager
+    if amount > MAX_SINGLE_MINT {
+        warn!(
+            target: "evm::precompile::mint_token",
+            ?recipient,
+            amount,
+            max = MAX_SINGLE_MINT,
+            "Mint amount exceeds per-call cap"
+        );
+        return Err(PrecompileError::Other("Mint amount exceeds per-call cap".into()));
     }
 
     // 6. Execute mint operation

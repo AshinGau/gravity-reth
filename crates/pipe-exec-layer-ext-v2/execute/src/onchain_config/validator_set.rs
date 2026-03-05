@@ -51,8 +51,17 @@ where
                     );
                 })
                 .ok()?;
-            getActiveValidatorsCall::abi_decode_returns(&result)
-                .expect("Failed to decode getActiveValidators return value")
+            // GRETH-060: Graceful error handling instead of panic on decode failure
+            match getActiveValidatorsCall::abi_decode_returns(&result) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to decode getActiveValidators at block {}: {:?}",
+                        block_id, e
+                    );
+                    return None;
+                }
+            }
         };
 
         // 2. Fetch pending active validators
@@ -70,8 +79,17 @@ where
                     );
                 })
                 .ok()?;
-            getPendingActiveValidatorsCall::abi_decode_returns(&result)
-                .expect("Failed to decode getPendingActiveValidators return value")
+            // GRETH-060: Graceful error handling instead of panic on decode failure
+            match getPendingActiveValidatorsCall::abi_decode_returns(&result) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to decode getPendingActiveValidators at block {}: {:?}",
+                        block_id, e
+                    );
+                    return None;
+                }
+            }
         };
 
         // 3. Fetch pending inactive validators
@@ -89,8 +107,17 @@ where
                     );
                 })
                 .ok()?;
-            getPendingInactiveValidatorsCall::abi_decode_returns(&result)
-                .expect("Failed to decode getPendingInactiveValidators return value")
+            // GRETH-060: Graceful error handling instead of panic on decode failure
+            match getPendingInactiveValidatorsCall::abi_decode_returns(&result) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to decode getPendingInactiveValidators at block {}: {:?}",
+                        block_id, e
+                    );
+                    return None;
+                }
+            }
         };
 
         // Convert to BCS-encoded ValidatorSet format with all validator lists

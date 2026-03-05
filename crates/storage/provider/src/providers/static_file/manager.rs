@@ -1093,12 +1093,37 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
             writer.prune_headers(highest_static_file_block - target_block)?;
         } else if let Some(block) = provider.block_body_indices(target_block)? {
             let highest_tx = self.get_highest_static_file_tx(segment).unwrap_or_default();
-            let to_delete = highest_tx - block.last_tx_num();
-            if segment.is_receipts() {
-                writer.prune_receipts(to_delete, target_block)?;
-            } else {
-                writer.prune_transactions(to_delete, target_block)?;
+            // GRETH-073: Use checked_sub to prevent arithmetic underflow
+            let to_delete = match highest_tx.checked_sub(block.last_tx_num()) {
+                Some(n) => n,
+                None => {
+                    warn!(
+                        target: "reth::providers",
+                        ?segment,
+                        highest_tx,
+                        last_tx_num = block.last_tx_num(),
+                        "Arithmetic underflow in static file pruning: highest_tx < last_tx_num. \
+                         Skipping pruning for this segment."
+                    );
+                    0
+                }
+            };
+            if to_delete > 0 {
+                if segment.is_receipts() {
+                    writer.prune_receipts(to_delete, target_block)?;
+                } else {
+                    writer.prune_transactions(to_delete, target_block)?;
+                }
             }
+        } else {
+            // GRETH-071: Log warning when block body indices are missing
+            warn!(
+                target: "reth::providers",
+                ?segment,
+                target_block,
+                "Block body indices not found for target block during static file pruning — \
+                 skipping segment pruning. This may indicate a crash during block write."
+            );
         }
         writer.commit()?;
         Ok(())

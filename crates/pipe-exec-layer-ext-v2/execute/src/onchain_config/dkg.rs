@@ -130,9 +130,17 @@ where
             })
             .ok()?;
 
-        // Decode the Solidity DKG state
-        let solidity_dkg_state = getDKGStateCall::abi_decode_returns(&result)
-            .expect("Failed to decode getDKGState return value");
+        // GRETH-060: Graceful error handling instead of panic on decode failure
+        let solidity_dkg_state = match getDKGStateCall::abi_decode_returns(&result) {
+            Ok(state) => state,
+            Err(e) => {
+                tracing::error!(
+                    "Failed to decode getDKGState return value at block {}: {:?}",
+                    block_id, e
+                );
+                return None;
+            }
+        };
         Some(convert_dkg_state_to_bcs(&solidity_dkg_state))
     }
 
@@ -261,11 +269,29 @@ fn convert_validator(
     gravity_api_types::on_chain_config::dkg::ValidatorConsensusInfo {
         addr: gravity_api_types::account::ExternalAccountAddress::new(addr_bytes),
         pk_bytes: validator.consensusPubkey.to_vec(),
-        // Convert wei to tokens by dividing by 10^18
-        voting_power: (validator.votingPower /
-            alloy_primitives::U256::from(10).pow(alloy_primitives::U256::from(18)))
-        .try_into()
-        .unwrap_or(u64::MAX),
+        // GRETH-064: Convert wei to ether with minimum threshold to prevent disenfranchisement
+        voting_power: {
+            let wei = validator.votingPower;
+            let ether = wei / alloy_primitives::U256::from(10).pow(alloy_primitives::U256::from(18));
+            let power: u64 = ether.try_into().unwrap_or_else(|_| {
+                tracing::warn!(
+                    validator = ?validator.validator,
+                    voting_power_wei = ?wei,
+                    "Voting power exceeds u64::MAX after conversion, clamping"
+                );
+                u64::MAX
+            });
+            if power == 0 && !wei.is_zero() {
+                tracing::warn!(
+                    validator = ?validator.validator,
+                    voting_power_wei = ?wei,
+                    "Voting power rounds to 0, setting minimum power of 1"
+                );
+                1u64
+            } else {
+                power
+            }
+        },
     }
 }
 
@@ -297,11 +323,29 @@ fn convert_validator_for_event(
     gravity_api_types::on_chain_config::dkg::ValidatorConsensusInfo {
         addr: gravity_api_types::account::ExternalAccountAddress::new(addr_bytes),
         pk_bytes: validator.consensusPubkey.to_vec(),
-        // Convert wei to tokens by dividing by 10^18
-        voting_power: (validator.votingPower /
-            alloy_primitives::U256::from(10).pow(alloy_primitives::U256::from(18)))
-        .try_into()
-        .unwrap_or(u64::MAX),
+        // GRETH-064: Convert wei to ether with minimum threshold to prevent disenfranchisement
+        voting_power: {
+            let wei = validator.votingPower;
+            let ether = wei / alloy_primitives::U256::from(10).pow(alloy_primitives::U256::from(18));
+            let power: u64 = ether.try_into().unwrap_or_else(|_| {
+                tracing::warn!(
+                    validator = ?validator.validator,
+                    voting_power_wei = ?wei,
+                    "Voting power exceeds u64::MAX after conversion, clamping"
+                );
+                u64::MAX
+            });
+            if power == 0 && !wei.is_zero() {
+                tracing::warn!(
+                    validator = ?validator.validator,
+                    voting_power_wei = ?wei,
+                    "Voting power rounds to 0, setting minimum power of 1"
+                );
+                1u64
+            } else {
+                power
+            }
+        },
     }
 }
 

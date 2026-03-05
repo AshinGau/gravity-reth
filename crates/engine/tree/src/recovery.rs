@@ -117,6 +117,27 @@ impl<'a, N: ProviderNodeTypes> StorageRecoveryHelper<'a, N> {
         let provider_ro = self.factory.database_provider_ro()?;
         let recover_block_number = provider_ro.recover_block_number()?;
         let best_block_number = provider_ro.best_block_number()?;
+
+        // GRETH-070: Validate that the execution checkpoint points to a block
+        // that actually exists and has consistent data.
+        let recover_block_number = if recover_block_number > 0 {
+            let header_exists = provider_ro
+                .header_by_number(recover_block_number)?
+                .is_some();
+            if !header_exists {
+                warn!(
+                    target: "engine::recovery",
+                    recover_block_number = ?recover_block_number,
+                    "Execution checkpoint references non-existent block header, \
+                     falling back to previous block"
+                );
+                recover_block_number.saturating_sub(1)
+            } else {
+                recover_block_number
+            }
+        } else {
+            recover_block_number
+        };
         drop(provider_ro);
 
         if recover_block_number == best_block_number {

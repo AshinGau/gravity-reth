@@ -18,8 +18,10 @@ const BLS_POP_LEN: usize = 96;
 /// Expected input length: pubkey (48) + pop (96) = 144 bytes
 const EXPECTED_INPUT_LEN: usize = BLS_PUBKEY_LEN + BLS_POP_LEN;
 
-/// Gas cost for PoP verification (2 bilinear pairings + hash-to-curve)
-const POP_VERIFY_GAS: u64 = 45_000;
+/// GRETH-065: Gas cost for PoP verification (2 bilinear pairings + hash-to-curve).
+/// Aligned with EIP-2537: ~131k (2 pairings) + ~32k (hash-to-curve) = ~163k.
+/// Set to 150,000 as a conservative lower bound.
+const POP_VERIFY_GAS: u64 = 150_000;
 
 /// Domain separation tag for BLS PoP verification
 /// Matches the IETF standard for BLS12-381 PoP

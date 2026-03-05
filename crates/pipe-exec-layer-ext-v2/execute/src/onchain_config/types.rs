@@ -10,9 +10,28 @@ use gravity_api_types::on_chain_config::validator_set::ValidatorSet as GravityVa
 // Wei to Ether conversion constant (10^18)
 const WEI_PER_ETHER: U256 = U256::from_limbs([1000000000000000000, 0, 0, 0]);
 
-/// Convert voting power from wei to ether
-fn wei_to_ether(wei: U256) -> U256 {
-    wei / WEI_PER_ETHER
+/// GRETH-064: Convert voting power from wei to ether with minimum threshold.
+///
+/// Returns at least 1 if the input is non-zero, to prevent validators
+/// with sub-1-ETH stake from being silently disenfranchised.
+fn wei_to_ether_voting_power(wei: U256) -> u64 {
+    let ether = wei / WEI_PER_ETHER;
+    let power: u64 = ether.try_into().unwrap_or_else(|_| {
+        tracing::warn!(
+            voting_power_wei = ?wei,
+            "Voting power exceeds u64::MAX, clamping"
+        );
+        u64::MAX
+    });
+    if power == 0 && !wei.is_zero() {
+        tracing::warn!(
+            voting_power_wei = ?wei,
+            "Voting power rounds to 0 after conversion, using minimum of 1"
+        );
+        1u64
+    } else {
+        power
+    }
 }
 
 sol! {
@@ -94,15 +113,15 @@ pub fn convert_validator_consensus_info(
     let account_address =
         gravity_api_types::u256_define::AccountAddress::from_bytes(&account_address_bytes);
 
-    // Convert voting power from wei to ether
-    let power_ether = wei_to_ether(info.votingPower);
+    // GRETH-064: Convert voting power with minimum threshold
+    let power = wei_to_ether_voting_power(info.votingPower);
 
     // Original Ethereum address (20 bytes) as reth_account_address
     let reth_account_address = info.validator.as_slice().to_vec();
 
     GravityValidatorInfo::new(
         account_address,
-        power_ether.to::<u64>(),
+        power,
         ValidatorConfig::new(
             info.consensusPubkey.clone().into(),
             info.networkAddresses.to_vec(),

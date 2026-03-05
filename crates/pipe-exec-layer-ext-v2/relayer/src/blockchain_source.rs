@@ -154,7 +154,8 @@ impl BlockchainEventSource {
 
     /// Get the current block cursor position
     pub fn cursor(&self) -> u64 {
-        self.cursor.load(Ordering::Relaxed)
+        // GRETH-062: Use Acquire ordering to ensure visibility of prior writes
+        self.cursor.load(Ordering::Acquire)
     }
 
     /// Get the last processed event state
@@ -203,7 +204,8 @@ impl BlockchainEventSource {
 
     /// Set the cursor position (used for onchain state reconciliation)
     pub fn set_cursor(&self, block: u64) {
-        self.cursor.store(block, Ordering::Relaxed);
+        // GRETH-062: Use Release ordering to ensure prior writes are visible
+        self.cursor.store(block, Ordering::Release);
     }
 }
 
@@ -240,6 +242,17 @@ impl OracleDataSource for BlockchainEventSource {
             "Polling for MessageSent events"
         );
 
+        // TODO(GRETH-039): Add multi-RPC cross-validation for oracle data.
+        // Currently trusts a single RPC endpoint with zero cryptographic proof.
+        // A compromised RPC can inject fabricated MessageSent events.
+        //
+        // Short-term: Add verification_clients: Vec<EthHttpCli> to BlockchainSource
+        // and cross-check logs from at least 2 independent RPC endpoints.
+        // Reject the batch if log count or data differs between endpoints.
+        //
+        // Long-term: Implement Merkle proof verification — for each log, request
+        // eth_getProof and verify receipt trie inclusion against a trusted
+        // finalized block hash.
         let logs = self.rpc_client.get_logs(&filter).await?;
         let mut results = Vec::with_capacity(logs.len());
 

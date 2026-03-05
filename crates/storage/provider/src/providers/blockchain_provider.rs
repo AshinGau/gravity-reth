@@ -567,6 +567,16 @@ impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider<N> {
         block_number: BlockNumber,
     ) -> ProviderResult<StateProviderBox> {
         trace!(target: "providers::blockchain", ?block_number, "Getting history by block number");
+
+        // GRETH-072: Validator-only nodes do not write history indices.
+        // Reject historical queries to prevent returning stale/empty data.
+        if get_gravity_config().validator_node_only {
+            let best = self.best_block_number()?;
+            if block_number < best {
+                return Err(ProviderError::StateForNumberNotFound(block_number));
+            }
+        }
+
         let provider = self.consistent_provider()?;
         provider.ensure_canonical_block(block_number)?;
         let hash = provider

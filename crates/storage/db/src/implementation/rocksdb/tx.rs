@@ -1,4 +1,12 @@
 //! Transaction implementation for `RocksDB`.
+//!
+//! TODO(GRETH-034, GRETH-035): Add snapshot support to `Tx<RO>` for point-in-time
+//! consistent reads across all 3 DB instances. This requires:
+//! 1. Optional `SnapshotWithThreadMode` fields for state_db, account_db, storage_db
+//! 2. A `new_consistent_snapshot()` constructor that takes all 3 snapshots under a
+//!    shared mutex to prevent interleaving commits
+//! 3. Modified cursor reads that use snapshot.get() when snapshot is present
+//! 4. The commit path must also acquire the snapshot coordination lock
 
 use crate::{
     implementation::rocksdb::{cursor, get_cf_handle, read_error, to_error_info},

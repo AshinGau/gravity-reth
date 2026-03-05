@@ -58,10 +58,14 @@ impl RelayerState {
             .with_context(|| format!("Failed to parse state file: {}", path.display()))?;
 
         if state.version != SCHEMA_VERSION {
+            // GRETH-075: Return a fresh state instead of loading incompatible data.
+            // The relayer will re-sync from its configured starting points.
             warn!(
-                "State file version {} differs from current version {}",
+                "State file version {} differs from current version {}. \
+                 Resetting relayer state to avoid loading incompatible data.",
                 state.version, SCHEMA_VERSION
             );
+            return Ok(Self::new());
         }
 
         debug!("Loaded relayer state with {} sources from {}", state.sources.len(), path.display());

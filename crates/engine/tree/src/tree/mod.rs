@@ -493,7 +493,17 @@ where
                     block_number=%block_number,
                     block_hash=%executed_block.recovered_block.hash(),
                     "Received make canonical event");
-                self.make_executed_block_canonical(executed_block);
+                // GRETH-068: Propagate error instead of panicking
+                if let Err(err) = self.make_executed_block_canonical(executed_block) {
+                    error!(
+                        target: "on_pipe_exec_event",
+                        block_number=%block_number,
+                        error=%err,
+                        "make_executed_block_canonical failed, node should shut down"
+                    );
+                    // Do not send on tx — the caller will detect the failure via channel drop.
+                    return;
+                }
                 tx.send(()).expect("Failed to send make canonical event");
             }
             PipeExecLayerEvent::WaitForPersistence(WaitForPersistenceEvent {
@@ -514,7 +524,11 @@ where
         }
     }
 
-    fn make_executed_block_canonical(&mut self, block: ExecutedBlockWithTrieUpdates<N>) {
+    /// GRETH-068: Returns ProviderResult instead of panicking on make_canonical failure
+    fn make_executed_block_canonical(
+        &mut self,
+        block: ExecutedBlockWithTrieUpdates<N>,
+    ) -> ProviderResult<()> {
         let block_number = block.recovered_block.number();
         let block_hash = block.recovered_block.hash();
         let sealed_header = block.recovered_block.clone_sealed_header();
@@ -530,11 +544,16 @@ where
             ForkchoiceStatus::Valid,
         );
 
-        self.make_canonical(block_hash).unwrap_or_else(|err| {
-            panic!(
-                "Failed to make canonical, block_number={block_number} block_hash={block_hash}: {err}",
-            )
-        });
+        if let Err(err) = self.make_canonical(block_hash) {
+            error!(
+                target: "engine::tree",
+                block_number=%block_number,
+                block_hash=%block_hash,
+                error=%err,
+                "Failed to make block canonical — triggering graceful shutdown"
+            );
+            return Err(err);
+        }
 
         // ARCHITECTURAL NOTE (GRETH-009): Gravity's deterministic BFT consensus (AptosBFT with
         // 2/3+ quorum) provides finality guarantees equivalent to Ethereum's finalized state.
@@ -547,6 +566,7 @@ where
         // Defense: validate_block() (called above) provides a secondary check on block structure.
         self.canonical_in_memory_state.set_safe(sealed_header.clone());
         self.canonical_in_memory_state.set_finalized(sealed_header);
+        Ok(())
     }
 
     /// Returns a new [`Sender`] to send messages to this type.
@@ -566,8 +586,14 @@ where
     }
 
     fn pipe_run_inner(mut self) {
-        let pipe_event_rx =
-            get_pipe_exec_layer_event_bus::<N>().event_rx.lock().unwrap().take().unwrap();
+        // GRETH-037: Event bus is now typed as EthPrimitives.
+        // Safety: gravity-reth always instantiates N = EthPrimitives.
+        // The transmute is sound because PipeExecLayerEvent<EthPrimitives> and
+        // PipeExecLayerEvent<N> have identical layout when N = EthPrimitives.
+        let pipe_event_rx: std::sync::mpsc::Receiver<PipeExecLayerEvent<N>> = unsafe {
+            let eth_rx = get_pipe_exec_layer_event_bus().event_rx.lock().unwrap().take().unwrap();
+            std::mem::transmute(eth_rx)
+        };
         loop {
             match self.try_recv_pipe_exec_event(&pipe_event_rx) {
                 Ok(Some(event)) => self.on_pipe_exec_event(event),

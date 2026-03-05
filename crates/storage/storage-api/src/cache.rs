@@ -202,6 +202,8 @@ impl PersistBlockCache {
                         } else {
                             (persist_height + last_contract_eviction_height) / 2
                         };
+                        // GRETH-030: Never evict above persist_height to avoid evicting unpersisted data
+                        let eviction_height = eviction_height.min(persist_height);
                         inner.contracts.retain(|_, v| v.block_number > eviction_height);
                         last_contract_eviction_height = eviction_height;
                     }
@@ -212,6 +214,8 @@ impl PersistBlockCache {
                         } else {
                             (persist_height + last_state_eviction_height) / 2
                         };
+                        // GRETH-030: Never evict above persist_height to avoid evicting unpersisted trie nodes
+                        let eviction_height = eviction_height.min(persist_height);
                         inner.accounts.retain(|_, v| v.block_number > eviction_height);
                         inner.storage.iter().for_each(|s| {
                             s.retain(|_, v| v.block_number > eviction_height);
@@ -521,32 +525,37 @@ impl PersistBlockCache {
         })
     }
 
-    /// Write trie updates.
+    /// Write trie updates to the cache.
+    ///
+    /// # Safety Invariant (GRETH-046)
+    ///
+    /// This method is called sequentially per block number, ordered by the
+    /// `merklize_barrier`. Concurrent reads may observe a partially-applied
+    /// update within a single block, but the barrier ensures no two blocks'
+    /// trie updates overlap. The insert-before-remove ordering prevents
+    /// transient "missing node" windows for paths that are both removed and
+    /// re-inserted.
     pub fn write_trie_updates(&self, input: &TrieUpdatesV2, block_number: u64) {
-        input.removed_nodes.par_iter().for_each(|path| {
-            self.account_trie.remove(path);
-        });
+        // GRETH-046: Insert new nodes first so readers never see a gap
         input.account_nodes.par_iter().for_each(|(path, node)| {
             self.account_trie.insert(*path, ValueWithTip::new(node.clone().into(), block_number));
+        });
+        // GRETH-046: Then remove nodes that are no longer needed, but only if
+        // they weren't just re-inserted for this block
+        input.removed_nodes.par_iter().for_each(|path| {
+            if let Some(entry) = self.account_trie.get(path) {
+                if entry.block_number < block_number {
+                    drop(entry);
+                    self.account_trie.remove(path);
+                }
+            }
         });
 
         input.storage_tries.par_iter().for_each(|(hashed_address, storage_trie_update)| {
             if storage_trie_update.is_deleted {
                 self.storage_trie.remove(hashed_address);
             } else {
-                let remove_storage_trie =
-                    if let Some(storage) = self.storage_trie.get(hashed_address) {
-                        for path in &storage_trie_update.removed_nodes {
-                            storage.remove(path);
-                        }
-                        storage.is_empty()
-                    } else {
-                        false
-                    };
-                if remove_storage_trie {
-                    self.storage_trie.remove(hashed_address);
-                }
-
+                // GRETH-046: Insert new storage nodes first
                 if let Some(storage) = self.storage_trie.get(hashed_address) {
                     for (nibbles, node) in &storage_trie_update.storage_nodes {
                         storage
@@ -572,6 +581,22 @@ impl PersistBlockCache {
                             }
                             entry.insert(data);
                         }
+                    }
+                }
+
+                // GRETH-046: Then remove stale storage nodes
+                if let Some(storage) = self.storage_trie.get(hashed_address) {
+                    for path in &storage_trie_update.removed_nodes {
+                        if let Some(entry) = storage.get(path) {
+                            if entry.block_number < block_number {
+                                drop(entry);
+                                storage.remove(path);
+                            }
+                        }
+                    }
+                    if storage.is_empty() {
+                        drop(storage);
+                        self.storage_trie.remove(hashed_address);
                     }
                 }
             }

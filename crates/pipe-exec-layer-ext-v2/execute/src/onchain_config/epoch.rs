@@ -61,8 +61,17 @@ where
                 })
                 .ok()?;
 
-            let epoch = Reconfiguration::currentEpochCall::abi_decode_returns(&result)
-                .expect("Failed to decode currentEpoch return value");
+            // GRETH-060: Graceful error handling instead of panic on decode failure
+            let epoch = match Reconfiguration::currentEpochCall::abi_decode_returns(&result) {
+                Ok(epoch) => epoch,
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to decode currentEpoch return value at block {}: {:?}",
+                        block_id, e
+                    );
+                    return None;
+                }
+            };
 
             // Convert epoch to bytes
             Some(Bytes::from(epoch.to_le_bytes().to_vec()))

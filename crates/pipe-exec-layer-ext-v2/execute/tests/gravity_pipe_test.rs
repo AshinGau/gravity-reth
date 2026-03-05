@@ -56,6 +56,7 @@ fn new_ordered_block(
         proposer_index: Some(0),
         extra_data: vec![],
         randomness: U256::ZERO,
+        failed_proposer_indices: vec![],
     }
 }
 

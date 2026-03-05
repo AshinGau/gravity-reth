@@ -4,15 +4,17 @@ use super::{
     types::{convert_active_validators_to_bcs, onBlockStartCall, NewEpochEvent},
     SYSTEM_CALLER,
 };
+// GRETH-041: Import the single canonical definition of new_system_call_txn from parent module
+use super::new_system_call_txn;
 use crate::{onchain_config::BLOCK_ADDR, ExecuteOrderedBlockResult, OrderedBlock};
-use alloy_consensus::{constants::EMPTY_WITHDRAWALS, Header, TxLegacy, EMPTY_OMMER_ROOT_HASH};
+use alloy_consensus::{constants::EMPTY_WITHDRAWALS, Header, EMPTY_OMMER_ROOT_HASH};
 use alloy_eips::{eip4895::Withdrawals, merge::BEACON_NONCE};
-use alloy_primitives::{Address, Bytes, Signature, TxKind, U256};
+use alloy_primitives::Bytes;
 use alloy_sol_types::{SolCall, SolEvent};
 use gravity_api_types::events::contract_event::GravityEvent;
 use gravity_primitives::get_gravity_config;
 use reth_chainspec::{ChainSpec, EthereumHardforks};
-use reth_ethereum_primitives::{Block, BlockBody, Transaction, TransactionSigned};
+use reth_ethereum_primitives::{Block, BlockBody, TransactionSigned};
 use reth_evm::{Evm, IntoTxEnv};
 use reth_execution_types::BlockExecutionOutput;
 use reth_primitives::{Receipt, Recovered};
@@ -207,26 +209,8 @@ pub fn transact_system_txn(
     (SystemTxnResult { result: result.result, txn }, result.state)
 }
 
-/// Create a new system call transaction
-fn new_system_call_txn(
-    contract: Address,
-    nonce: u64,
-    gas_price: u128,
-    input: Bytes,
-) -> TransactionSigned {
-    TransactionSigned::new_unhashed(
-        Transaction::Legacy(TxLegacy {
-            chain_id: None,
-            nonce,
-            gas_price,
-            gas_limit: 30_000_000,
-            to: TxKind::Call(contract),
-            value: U256::ZERO,
-            input,
-        }),
-        Signature::new(U256::ZERO, U256::ZERO, false),
-    )
-}
+// GRETH-041: Removed duplicate new_system_call_txn() definition.
+// The single canonical definition lives in the parent module (mod.rs).
 
 /// Execute a metadata contract call (onBlockStart from Blocker.sol)
 ///
@@ -238,18 +222,21 @@ fn new_system_call_txn(
 ///
 /// @param proposer_index Index of the proposer in the active validator set,
 ///        or None for NIL blocks (will use NIL_PROPOSER_INDEX = u64::MAX)
+/// GRETH-042: Accept failed_proposer_indices parameter to enable proposer accountability.
 pub fn construct_metadata_txn(
     nonce: u64,
     gas_price: u128,
     timestamp_us: u64,
     proposer_index: Option<u64>,
+    failed_proposer_indices: Vec<u64>,
 ) -> TransactionSigned {
     // For NIL blocks, use NIL_PROPOSER_INDEX (type(uint64).max in Solidity)
     let proposer_idx = proposer_index.unwrap_or(NIL_PROPOSER_INDEX);
 
     let call = onBlockStartCall {
         proposerIndex: proposer_idx,
-        failedProposerIndices: vec![],
+        // GRETH-042: Pass actual failed proposer indices from consensus layer
+        failedProposerIndices: failed_proposer_indices,
         timestampMicros: timestamp_us,
     };
     let input: Bytes = call.abi_encode().into();

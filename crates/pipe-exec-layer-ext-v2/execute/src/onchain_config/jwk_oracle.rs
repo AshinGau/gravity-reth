@@ -57,12 +57,19 @@ fn is_rsa_jwk(jwk: &JWKStruct) -> bool {
     jwk.type_name == "0x1::jwks::RSA_JWK"
 }
 
-/// Check if a JWKStruct is an UnsupportedJWK (blockchain/other oracle data)
-/// Checks for sourceType string (0, 1, 2, etc.) instead of fixed type_name
+/// GRETH-059: Known type name for unsupported/oracle JWK entries
+const UNSUPPORTED_JWK_TYPE_NAME: &str = "0x1::jwks::UnsupportedJWK";
+
+/// GRETH-059: Known source type identifiers used for blockchain oracle data.
+const KNOWN_SOURCE_TYPES: &[&str] = &["0", "1", "2"];
+
+/// Check if a JWKStruct is an UnsupportedJWK (blockchain/other oracle data).
+///
+/// GRETH-059: Matches either the canonical Move type name or known numeric source
+/// type identifiers, instead of accepting any numeric string.
 fn is_unsupported_jwk(jwk: &JWKStruct) -> bool {
-    // Check if type_name is a numeric string (sourceType)
-    // TODO(gravity): check if it should be "0x1::jwks::UNSUPPORTED_JWK"
-    jwk.type_name.parse::<u32>().is_ok()
+    jwk.type_name == UNSUPPORTED_JWK_TYPE_NAME
+        || KNOWN_SOURCE_TYPES.contains(&jwk.type_name.as_str())
 }
 
 /// Parse RSA JWK from BCS-encoded data

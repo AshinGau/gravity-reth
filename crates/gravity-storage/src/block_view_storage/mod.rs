@@ -56,6 +56,14 @@ where
     }
 
     fn state_root(&self, hashed_state: &HashedPostState) -> ProviderResult<(B256, TrieUpdatesV2)> {
+        // TODO(GRETH-034): Use a snapshot-backed read transaction to ensure cache misses
+        // fall back to the same DB state that was current at execution time,
+        // not a potentially newer state written by the persistence layer.
+        // Requires: database_provider_ro_with_snapshot() that captures RocksDB snapshots
+        // from all 3 DB instances (state_db, account_db, storage_db) atomically.
+        //
+        // TODO(GRETH-035): Coordinate RocksDB snapshots across all 3 DB instances
+        // under a shared mutex to ensure cross-DB consistency.
         let tx = self.client.database_provider_ro()?.into_tx();
         let nested_hash = NestedStateRoot::new(&tx, Some(self.cache.clone()));
         nested_hash.calculate(hashed_state)
@@ -147,8 +155,13 @@ impl<Tx: DbTx> DatabaseRef for RawBlockViewProvider<Tx> {
             .unwrap_or_default())
     }
 
-    fn block_hash_ref(&self, _number: u64) -> Result<B256, Self::Error> {
-        unimplemented!("not support block_hash_ref in BlockViewProvider")
+    fn block_hash_ref(&self, number: u64) -> Result<B256, Self::Error> {
+        // GRETH-031: Implement BLOCKHASH opcode support via CanonicalHeaders DB lookup.
+        // Previously panicked with unimplemented!(), enabling trivial validator DoS.
+        match self.tx.get_by_encoded_key::<tables::CanonicalHeaders>(&number)? {
+            Some(hash) => Ok(hash),
+            None => Ok(B256::ZERO),
+        }
     }
 }
 
@@ -207,7 +220,8 @@ impl DatabaseRef for BlockViewProvider {
         self.db.storage_ref(address, index)
     }
 
-    fn block_hash_ref(&self, _number: u64) -> Result<B256, Self::Error> {
-        unimplemented!("not support block_hash_ref in BlockViewProvider")
+    fn block_hash_ref(&self, number: u64) -> Result<B256, Self::Error> {
+        // GRETH-031: Delegate to underlying DB for BLOCKHASH opcode support.
+        self.db.block_hash_ref(number)
     }
 }

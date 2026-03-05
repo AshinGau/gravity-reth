@@ -29,6 +29,7 @@ pub use validator_set::ValidatorSetFetcher;
 
 // Common addresses and constants
 use alloy_primitives::{address, Address};
+use once_cell::sync::Lazy;
 
 pub const GRAVITY_FRAMEWORK_ADDRESS: Address = address!("00000000000000000000000000000000000000ff");
 pub const RECONFIGURATION_ADDRESS: Address = address!("00000000000000000000000000000000000000f0");
@@ -169,15 +170,32 @@ pub fn construct_validator_txn_from_extra_data(
     }
 }
 
+// GRETH-040: Allowlist of contract addresses that system transactions are permitted to call.
+static SYSTEM_TXN_TARGET_ALLOWLIST: Lazy<std::collections::HashSet<Address>> = Lazy::new(|| {
+    std::collections::HashSet::from([
+        BLOCK_ADDR,
+        NATIVE_ORACLE_ADDR,
+        RECONFIGURATION_WITH_DKG_ADDR,
+    ])
+});
+
 /// Create a new system call transaction
 ///
-/// Helper function used by both JWK and DKG transaction construction
+/// Helper function used by both JWK and DKG transaction construction.
+/// GRETH-040: Validates that the target contract is in the allowlist before construction.
+/// Panics if the target is not an approved system contract.
 pub(crate) fn new_system_call_txn(
     contract: Address,
     nonce: u64,
     gas_price: u128,
     input: Bytes,
 ) -> TransactionSigned {
+    // GRETH-040: Reject system transactions targeting non-allowlisted addresses
+    assert!(
+        SYSTEM_TXN_TARGET_ALLOWLIST.contains(&contract),
+        "GRETH-040: system transaction target {contract} is not in the allowlist"
+    );
+
     TransactionSigned::new_unhashed(
         Transaction::Legacy(TxLegacy {
             chain_id: None,

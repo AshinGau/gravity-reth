@@ -165,7 +165,7 @@ impl OracleRelayerManager {
                 state.get(uri),
                 onchain_nonce,
                 onchain_block_number,
-                task.from_block(),
+                task.from_block()?,
             )
         };
         scenario.log(uri);
@@ -200,7 +200,7 @@ impl OracleRelayerManager {
         match task.source_type {
             source_types::BLOCKCHAIN => {
                 let portal_address = task.portal_address()?;
-                let config_start_block = task.from_block();
+                let config_start_block = task.from_block()?;
                 let source = BlockchainEventSource::new_with_cursor(
                     task.source_id,
                     rpc_url,
@@ -260,7 +260,13 @@ impl OracleRelayerManager {
         let (nonce, last_nonce_block, max_block_number, source_type, source_id) =
             match source.as_ref() {
                 DataSourceKind::Blockchain(s) => (
-                    s.last_nonce().await.map(|n| n as u64),
+                    // GRETH-043: Use checked conversion instead of silent truncation
+                    s.last_nonce().await.map(|n| {
+                        u64::try_from(n).unwrap_or_else(|_| {
+                            tracing::error!(target: "oracle_manager", nonce = n, "Nonce exceeds u64::MAX");
+                            u64::MAX
+                        })
+                    }),
                     s.last_nonce_block().await,
                     s.cursor(),
                     source_types::BLOCKCHAIN,

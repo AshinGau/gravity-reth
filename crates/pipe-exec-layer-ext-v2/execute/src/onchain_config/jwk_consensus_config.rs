@@ -107,7 +107,11 @@ where
                 gravity_api_types::on_chain_config::jwks::OIDCProvider {
                     name: uri.clone(),
                     config_url: uri,
-                    onchain_nonce: Some(nonce as u64),
+                    // GRETH-043: Use checked conversion instead of silent truncation
+                    onchain_nonce: Some(u64::try_from(nonce).unwrap_or_else(|_| {
+                        tracing::error!(target: "jwk_consensus_config", nonce, "Nonce exceeds u64::MAX");
+                        u64::MAX
+                    })),
                 }
             })
             .collect()

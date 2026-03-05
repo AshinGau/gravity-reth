@@ -48,9 +48,22 @@ impl ParsedOracleTask {
         addr_str.parse::<Address>().map_err(|e| anyhow!("Invalid contract address: {}", e))
     }
 
-    /// Get fromBlock parameter
-    pub fn from_block(&self) -> u64 {
-        self.params.get("fromBlock").and_then(|s| s.parse().ok()).unwrap_or(0)
+    /// GRETH-063: Get fromBlock parameter (required).
+    ///
+    /// Returns an error if `fromBlock` is not specified or is not a valid u64.
+    /// Defaulting to 0 would scan the entire chain history, which is dangerous.
+    pub fn from_block(&self) -> Result<u64> {
+        let value_str = self
+            .params
+            .get("fromBlock")
+            .ok_or_else(|| anyhow!(
+                "Missing required 'fromBlock' parameter in oracle URI. \
+                 Defaulting to block 0 would scan entire chain history. \
+                 Specify the deployment block of the portal contract."
+            ))?;
+        value_str
+            .parse::<u64>()
+            .map_err(|e| anyhow!("Invalid 'fromBlock' value '{}': {}", value_str, e))
     }
 
     /// Check if this is a blockchain source
@@ -124,7 +137,7 @@ mod tests {
         assert_eq!(task.source_type, 0);
         assert_eq!(task.source_id, 1);
         assert_eq!(task.task_type, "events");
-        assert_eq!(task.from_block(), 9565280);
+        assert_eq!(task.from_block().unwrap(), 9565280);
         assert!(task.portal_address().is_ok());
     }
 

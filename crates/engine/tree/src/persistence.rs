@@ -222,6 +222,18 @@ where
                 // and storage_db internally. For fault tolerance, stage checkpoints ensure
                 // idempotency - each stage's checkpoint is verified before writing, guaranteeing
                 // exactly-once execution even if the process crashes mid-block.
+                // GRETH-069: ORDERING NOTE — State and trie writes execute concurrently
+                // in separate threads with independent commits. This is safe because:
+                //
+                // 1. Each stage uses per-stage checkpoints (StageId::Execution,
+                //    StageId::MerkleExecute, etc.) stored atomically with its data.
+                // 2. On crash, StorageRecoveryHelper re-executes only incomplete stages
+                //    by comparing checkpoint block numbers.
+                // 3. All stage writes are idempotent — re-executing produces identical data.
+                //
+                // The acceptable inconsistency window is: between the first thread's commit
+                // and the second thread's commit (~milliseconds). During this window, a crash
+                // would leave one stage ahead, which recovery handles correctly.
                 thread::scope(|scope| -> Result<(), PersistenceError> {
                     let state_handle = scope.spawn(|| -> Result<(), PersistenceError> {
                         let start = Instant::now();
