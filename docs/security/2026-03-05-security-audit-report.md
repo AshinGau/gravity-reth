@@ -39,6 +39,7 @@ This report covers findings **not** addressed in the 2026-02-23 audit. Cross-ref
 **Issue:** The `PersistBlockCache` eviction daemon computes `eviction_height = (persist_height + last_state_eviction_height) / 2`. When `last_state_eviction_height > persist_height` (from a previous cycle), `eviction_height > persist_height`. Trie cache entries (account_trie, storage_trie) at block numbers between `persist_height` and `eviction_height` are evicted despite not being persisted. Merklization falls back to DB which only has data up to `persist_height`, producing incorrect state roots.
 **Impact:** Silent state root divergence between validators (if eviction timing differs) or between the node and the network, causing consensus failure. No error or panic — wrong state root is computed silently.
 **Recommendation:** Cap `eviction_height` at `persist_height`: `eviction_height = min(midpoint, persist_height)`.
+**Review Comments** reviewer: Xin GAO; state: rejected; comments: The `last_state_eviction_height` can never be greater than `persist_height` by design. Therefore, this condition will not occur in practice and the cache entries will not be prematurely evicted.
 
 ---
 
@@ -57,6 +58,7 @@ This report covers findings **not** addressed in the 2026-02-23 audit. Cross-ref
 **Issue:** `execute_system_transactions()` creates a separate `ParallelState` (`state_for_precompile`) for the mint precompile. On epoch-change early return paths (lines 682 and 758), `inner_state.take_bundle()` is returned **without** extracting precompile state. The precompile merge block (lines 797-821) is only reached on the normal (non-epoch-change) path. Minted tokens in the dropped `state_for_precompile` are permanently lost.
 **Impact:** Native tokens minted in the epoch-change block are silently lost. Low probability (requires mint + epoch change in same block) but no recovery mechanism.
 **Recommendation:** Extract precompile state before every early return path.
+**Review Comments** reviewer: Xin GAO; state: rejected; comments: Minting operations do not occur during epoch changes, so this specific token loss scenario will not manifest. However, maintaining `inner_state` and `state_for_precompile` as two distinct states can indeed be confusing and we may consider refactoring this logic for better clarity in the future.
 
 ### GRETH-033: Mint Precompile Parallel State Divergence
 
@@ -69,6 +71,7 @@ This report covers findings **not** addressed in the 2026-02-23 audit. Cross-ref
 **Files:** `crates/gravity-storage/src/block_view_storage/mod.rs:58-61`, `crates/trie/parallel/src/nested_hash.rs:80-88`
 **Issue:** `state_root()` obtains a read-only DB transaction via `database_provider_ro().into_tx()` without a RocksDB snapshot. The DB state reflects the persist frontier (height P), while the cache contains data up to merge height M > P. Cache misses fall back to DB at height P. If GRETH-030's eviction removes cache entries, the fallback returns stale data from a different block height.
 **Impact:** Incorrect state root computation when cache entries are evicted before persistence catches up.
+**Review Comments** reviewer: Xin GAO; state: rejected; comments: This finding is dependent on GRETH-030. Since GRETH-030 is rejected (the premise of premature cache eviction is invalid), this related consistency gap is also invalid. Cache misses fallback will not return stale data.
 
 ### GRETH-035: Read-Only Transactions See Inconsistent Cross-DB State
 
@@ -76,6 +79,7 @@ This report covers findings **not** addressed in the 2026-02-23 audit. Cross-ref
 **Issue:** The three-database RocksDB design (state_db, account_db, storage_db) means a `Tx<RO>` reads from three independent DB instances without coordinated snapshots. During persistence, account_db might be at height H while storage_db is at H-1. A cache miss during merklization could return trie nodes from different heights.
 **Note:** Extends GRETH-005 (non-atomic parallel DB writes) with the read-path consequence.
 **Impact:** Inconsistent DB view during merklization if cache misses occur. Mitigated by cache overlay in normal operation.
+**Review Comments** reviewer: Xin GAO; state: rejected; comments: GRETH-034 and GRETH-030 are rejected.
 
 ### GRETH-036: Unbounded Channels Between Consensus and Execution
 
@@ -83,6 +87,7 @@ This report covers findings **not** addressed in the 2026-02-23 audit. Cross-ref
 **Issue:** All three inter-layer channels (`ordered_block_tx/rx`, `execution_result_tx/rx`, `discard_txs_tx/rx`) are `tokio::sync::mpsc::unbounded_channel()`. No backpressure from execution to consensus. Under sustained load or during catch-up, blocks accumulate without bound in the ordered_block channel. Each queued block holds a `Vec<TransactionSigned>` potentially containing thousands of transactions.
 **Impact:** OOM risk under sustained high load or adversarial block conditions. The 1 Gigagas block limit amplifies memory pressure.
 **Recommendation:** Replace with `bounded_channel(32-64)`.
+**Review Comments** reviewer: Xin GAO; state: rejected; comments: The `gravity-sdk` already implements comprehensive backpressure mechanisms. Therefore, the unbounded channels at the execution layer will not experience unbounded task accumulation or pose an Out-Of-Memory (OOM) risk during typical operations.
 
 ### GRETH-037: Type-Erased Event Bus Singleton with Panicking Downcast
 
@@ -95,6 +100,7 @@ This report covers findings **not** addressed in the 2026-02-23 audit. Cross-ref
 **File:** `crates/pipe-exec-layer-ext-v2/event-bus/src/lib.rs:17-29`
 **Issue:** `get_pipe_exec_layer_event_bus()` uses `std::thread::sleep(Duration::from_secs(1))` in a loop with no maximum retry count or timeout. Blocks the OS thread entirely. If the event bus is never initialized, this loops forever.
 **Impact:** Permanent thread hang if initialization fails. If called from a tokio async context (currently not, but no guard), would block a worker thread.
+**Review Comments** reviewer: Xin GAO; state: rejected; comments: The system correctly prints a waiting log every 5 seconds, which sufficiently reflects the system status to the node operator. A permanent thread block is intentional and acceptable here since the node cannot safely proceed without the event bus being fully initialized.
 
 ### GRETH-039: No Cryptographic Verification for Cross-Chain Oracle Data
 
@@ -108,6 +114,7 @@ This report covers findings **not** addressed in the 2026-02-23 audit. Cross-ref
 **Files:** `crates/pipe-exec-layer-ext-v2/execute/src/onchain_config/metadata_txn.rs:209-227`, `mod.rs:175-193`
 **Issue:** System transactions use `Signature::new(U256::ZERO, U256::ZERO, false)` with no chain_id and are attributed to `SYSTEM_CALLER` via `Recovered::new_unchecked()`. Security relies entirely on on-chain `SystemAccessControl` modifier. No allowlist of target contract addresses at the transaction construction layer.
 **Impact:** Full system compromise if system transaction construction can be influenced by external input. The `SYSTEM_CALLER` can update oracle data, trigger epoch transitions, finish DKG, and modify validator sets.
+**Review Comments** reviewer: Xin GAO; state: rejected; comments: By design, system accounts do not require signatures. Security is preserved because system transactions are solely constructed and injected internally by the trusted consensus layer, and external users cannot submit these transactions to bypass the `SystemAccessControl` modifier.
 
 ### GRETH-041: Duplicate `new_system_call_txn()` Definitions
 
@@ -119,6 +126,7 @@ This report covers findings **not** addressed in the 2026-02-23 audit. Cross-ref
 **File:** `crates/pipe-exec-layer-ext-v2/execute/src/onchain_config/metadata_txn.rs:249-250`
 **Issue:** The `onBlockStart` call always passes `failedProposerIndices: vec![]`. If the `Blocker.sol` contract uses this for slashing or reward distribution, the functionality is completely non-operative.
 **Impact:** No proposer slashing — validators that skip proposal slots face no consequences.
+**Review Comments** reviewer: Xin GAO; state: rejected; comments: Slashing based on `failedProposerIndices` is not required for the current milestone. This finding is tracked as a TODO for future implementations where proposer slashing and reward distribution features are finalized. It does not pose an immediate security vulnerability.
 
 ### GRETH-043: Nonce Truncation u128 to u64
 
@@ -134,6 +142,7 @@ This report covers findings **not** addressed in the 2026-02-23 audit. Cross-ref
 **File:** `crates/pipe-exec-layer-ext-v2/execute/src/lib.rs:269-273`
 **Issue:** `JoinHandle` from `tokio::spawn` discarded. Panics in `process()` are silently swallowed by tokio runtime.
 **Note:** Root cause of GRETH-029. Listed separately as it is independently fixable.
+**Review Comments** reviewer: Xin GAO; state: accepted; comments: Masking `JoinHandle` errors is indeed an issue that needs addressing. However, the root cause is the lack of proper error handling within the `process()` function itself. We need to design a more robust error management strategy rather than simply catching the panic.
 
 ### GRETH-045: Unbounded Task Accumulation in PipeExecService::run()
 
@@ -145,6 +154,7 @@ This report covers findings **not** addressed in the 2026-02-23 audit. Cross-ref
 **File:** `crates/storage/storage-api/src/cache.rs:525-579`
 **Issue:** `write_trie_updates()` performs individual `DashMap` operations without a transaction. Concurrent readers could observe partial trie updates.
 **Review Comment:** PARTIAL — DashMap operations are individually thread-safe (sharded locking), so no data corruption. The real risk is limited to concurrent readers observing a partially-applied trie update mid-write (some nodes removed, new nodes not yet inserted). Severity overstated.
+**Review Comments** reviewer: Xin GAO; state: rejected; comments: The cache only provides a latest view of the state. State root calculation utilizes a strict read/write separation, and the RPC services continue to rely on the overlay to guarantee block-level consistency. Concurrent partial trie updates will not lead to state root corruption or flawed RPC responses.
 
 ### ~~GRETH-047: wait_persist_gap Timeout Allows Unbounded Cache Growth~~ [INVALID]
 
@@ -168,6 +178,7 @@ This report covers findings **not** addressed in the 2026-02-23 audit. Cross-ref
 
 **File:** `crates/pipe-exec-layer-ext-v2/execute/src/lib.rs:802-821`
 **Issue:** Storage slots from precompile `BundleState` are converted using `present_value` only; original values discarded. This can cause incorrect gas refunds for `SSTORE` and incorrect state diffs for trie updates.
+**Review Comments** reviewer: Xin GAO; state: accepted; comments: The more severe issue highlighting this problem is that assigning `present_value` to `origin_value` makes it impossible to properly unwind system transactions in the event of a reversion. Fixing this is critical to ensure state rollbacks function reliably.
 
 ### GRETH-051: System Transaction State Merge Overwrites via HashMap::insert
 
@@ -179,6 +190,7 @@ This report covers findings **not** addressed in the 2026-02-23 audit. Cross-ref
 
 **File:** `crates/pipe-exec-layer-ext-v2/execute/src/lib.rs:533-535`
 **Issue:** When `block_hash` is `None`, the `assert_eq!` verification is skipped entirely. The `None` path exists for genesis/bootstrap but has no guard preventing it for post-genesis blocks.
+**Review Comments** reviewer: Xin GAO; state: accepted; comments: We acknowledge the risk of skipping block hash verification when `block_hash` is `None`. We will add proper safeguards to ensure this path is exclusively reachable during the genesis or bootstrap phases, preventing any accidental bypasses during standard, post-genesis operation.
 
 ### GRETH-053: Block Hash Mismatch Causes Deliberate Node Panic
 
@@ -189,6 +201,7 @@ This report covers findings **not** addressed in the 2026-02-23 audit. Cross-ref
 
 **File:** `crates/pipe-exec-layer-ext-v2/execute/src/lib.rs:1332-1341`
 **Issue:** `rx.await` with no timeout. If persistence never completes (disk full, I/O error), the commit loop stalls permanently. The epoch change does not complete. Consensus hangs.
+**Review Comments** reviewer: Xin GAO; state: rejected; comments: Adding a timeout here is undesirable. If persistence encounters an unrecoverable error (e.g., RocksDB I/O error or disk full), the node cannot safely proceed. Intentionally hanging the consensus is preferred over risking silent state divergence or data corruption.
 
 ### ~~GRETH-055: Unsafe Send Impl for MutexGuard Wrapper~~ [INVALID — Already Fixed]
 
@@ -211,6 +224,7 @@ This report covers findings **not** addressed in the 2026-02-23 audit. Cross-ref
 
 **File:** `crates/pipe-exec-layer-ext-v2/relayer/src/eth_client.rs:58`
 **Issue:** HTTP client uses `use_rustls_tls()` without certificate pinning. Vulnerable to TLS interception by compromised CA.
+**Review Comments** reviewer: Xin GAO; state: rejected; comments: Given our specific deployment topology and internal network constraints, utilizing TLS for this RPC connection is not strictly necessary. We will simply disable TLS for these internal connections, rendering the certificate pinning vulnerability inapplicable.
 
 ### GRETH-059: is_unsupported_jwk() Uses Type Name Parsing
 
@@ -221,6 +235,7 @@ This report covers findings **not** addressed in the 2026-02-23 audit. Cross-ref
 
 **Files:** `onchain_config/epoch.rs:65-66`, `dkg.rs:134-135`, `validator_set.rs:54-55,72-73,92-93`
 **Issue:** `expect()` on ABI decode operations. Malformed contract response crashes the node instead of allowing graceful error handling.
+**Review Comments** reviewer: Xin GAO; state: rejected; comments: Using `expect()` here is an intentional fail-fast design choice. If the configuration fetcher receives a malformed contract response, the node is in an invalid state and cannot continue safely. Crashing immediately is preferable to running with corrupted configuration parameters.
 
 ### ~~GRETH-061: OracleRelayerManager::new() Panics on None~~ [INVALID]
 
@@ -232,6 +247,7 @@ This report covers findings **not** addressed in the 2026-02-23 audit. Cross-ref
 
 **File:** `crates/pipe-exec-layer-ext-v2/relayer/src/blockchain_source.rs:157,206`
 **Issue:** `cursor` AtomicU64 uses `Ordering::Relaxed` for all loads/stores. No visibility ordering guarantee with respect to the `last_processed` Mutex-protected state.
+**Review Comments** reviewer: Xin GAO; state: accepted; comments: We agree that `Ordering::Relaxed` does not provide sufficient visibility guarantees and could lead to race conditions across threads. This will be updated to a stricter ordering (e.g., `Ordering::Acquire`/`Release` or `Ordering::SeqCst`) to properly synchronize with the `last_processed` state.
 
 ### GRETH-063: fromBlock Defaults to 0 When Parameter Missing
 
@@ -242,6 +258,7 @@ This report covers findings **not** addressed in the 2026-02-23 audit. Cross-ref
 
 **Files:** `crates/pipe-exec-layer-ext-v2/execute/src/onchain_config/dkg.rs:265-268`, `types.rs:98,131`
 **Issue:** Voting power divided by 10^18 (wei→ether) then truncated to u64. Validators with sub-ether voting power are silently zeroed out. If total exceeds `u64::MAX` ethers, `.to::<u64>()` panics.
+**Review Comments** reviewer: Xin GAO; state: accepted; comments: What is the exact unit scaling for `votingPower`? If it utilizes 18 decimals similarly to ether, truncation to u64 will indeed silence smaller validators. We will audit the unit definitions and implement appropriate scaling logic before conversion to preserve voting precision.
 
 ---
 
@@ -256,6 +273,7 @@ This report covers findings **not** addressed in the 2026-02-23 audit. Cross-ref
 
 **File:** `crates/pipe-exec-layer-ext-v2/execute/src/mint_precompile.rs:26`
 **Issue:** `MINT_BASE_GAS = 21,000` — same as a simple transfer but performs additional work (mutex, state load, balance modification).
+**Review Comments** reviewer: Xin GAO; state: rejected; comments: The `MINT_BASE_GAS` is a custom gas consumption value established deliberately for our ecosystem. Because minting transactions are restricted to authorized system callers, external actors cannot exploit this gas pricing for a computational Denial-of-Service attack.
 
 ### ~~GRETH-067: WrapDatabaseRef Pre-Execution State Loss~~ [INVALID]
 
@@ -267,6 +285,7 @@ This report covers findings **not** addressed in the 2026-02-23 audit. Cross-ref
 
 **File:** `crates/engine/tree/src/tree/mod.rs:541-545`
 **Issue:** Any error from `make_canonical` (including transient RocksDB I/O errors) causes immediate panic. No retry mechanism.
+**Review Comments** reviewer: Xin GAO; state: rejected; comments: A panic upon a `make_canonical` failure is fully intended. If a transient or permanent RocksDB I/O error occurs at this critical juncture, safely terminating the node for operator intervention is far safer than initiating an automated retry that could irreversibly corrupt the state.
 
 ### GRETH-069: Parallel State/Trie Persistence Ordering
 
@@ -277,6 +296,7 @@ This report covers findings **not** addressed in the 2026-02-23 audit. Cross-ref
 
 **File:** `crates/engine/tree/src/recovery.rs:113-142`
 **Issue:** Recovery uses `StageId::Execution` checkpoint as ground truth. If corrupted, recovery operates at wrong block number.
+**Review Comments** reviewer: Xin GAO; state: rejected; comments: The `StageId::Execution` checkpoint is explicitly trusted to guarantee the integrity of the execution phase. If this checkpoint is somehow corrupted, it points to a catastrophic underlying storage failure that necessitates manual data restoration, not a scenario the automated recovery should silently bypass.
 
 ### GRETH-071: Static File Pruning Assumes Block Body Indices Exist
 
@@ -287,6 +307,7 @@ This report covers findings **not** addressed in the 2026-02-23 audit. Cross-ref
 
 **Files:** `crates/engine/tree/src/persistence.rs:284`, `crates/storage/provider/src/providers/blockchain_provider.rs:510-531`
 **Issue:** Validator nodes skip history index writes but don't reject historical queries. RPC responses may be empty/incorrect without an explicit error.
+**Review Comments** reviewer: Xin GAO; state: accepted; comments: The `validator_node_only` configuration is currently an experimental feature. We accept this observation and will implement proper error handling for historical queries when the feature is completely standardized, ensuring explicit errors are returned instead of empty data.
 
 ### GRETH-073: Potential Arithmetic Underflow in Static File Pruning
 
@@ -297,6 +318,7 @@ This report covers findings **not** addressed in the 2026-02-23 audit. Cross-ref
 
 **File:** `crates/pipe-exec-layer-ext-v2/execute/src/lib.rs:1227-1241`
 **Issue:** Balance check uses `effective_gas_price` (min of max_fee and base_fee + priority_fee) instead of `max_fee_per_gas`. Filter is less strict than the EVM's actual validation, allowing some insufficient-balance transactions through to parallel execution.
+**Review Comments** reviewer: Xin GAO; state: rejected; comments: The `effective_gas_price` constitutes the actual, final gas price applied during execution. The filter deliberately utilizes this value since transactions will ultimately be charged based on the effective price, preventing valid transactions from being improperly dropped.
 
 ### GRETH-075: Schema Version Warning Without Action
 
