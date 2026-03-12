@@ -20,12 +20,16 @@ use reth_evm::{
         BlockExecutionError, BlockValidationError, ExecuteOutput, InternalBlockExecutionError,
     },
     parallel_execute::ParallelExecutor,
-    ConfigureEvm, ParallelDatabase,
+    ConfigureEvm, Evm, ParallelDatabase,
 };
 use reth_execution_types::BlockExecutionResult;
 use reth_primitives_traits::{BlockBody, NodePrimitives, RecoveredBlock, SignedTransaction};
 use revm::{
     bytecode::Bytecode,
+    context::{
+        result::{ExecutionResult, HaltReason},
+        TxEnv,
+    },
     database::{
         states::bundle_state::BundleRetention, BundleState, TransitionState, WrapDatabaseRef,
     },
@@ -333,8 +337,7 @@ where
             self.execute_transactions(block)?
         };
         let requests = self.apply_post_execution_changes(block, &receipts)?;
-        let state_mut =
-            self.state.as_mut().expect("state should be set before calling merge_transitions");
+        let state_mut = self.state.as_mut().unwrap();
         if let Some(transition_state) =
             state_mut.transition_state.as_mut().map(TransitionState::take)
         {
@@ -347,23 +350,36 @@ where
     }
 
     fn take_bundle(&mut self) -> BundleState {
-        self.state.as_mut().expect("state should be set before calling take_bundle").take_bundle()
+        self.state.as_mut().unwrap().take_bundle()
     }
 
     fn size_hint(&self) -> usize {
-        self.state
-            .as_ref()
-            .expect("state should be set before calling size_hint")
-            .bundle_size_hint()
+        self.state.as_ref().unwrap().bundle_size_hint()
     }
 
-    fn commit_changes(&mut self, changes: EvmState) {
-        // Load all accounts in the changes map to ensure they are cached before committing.
-        let state = self.state.as_mut().expect("state should be set before calling commit_changes");
-        for address in changes.keys() {
-            state.load_mut_cache_account(*address).unwrap();
-        }
-        state.commit(changes);
+    fn transact_system_txn(
+        &mut self,
+        evm_env: EvmEnv,
+        precompiles: Vec<(Address, DynPrecompile)>,
+        tx_env: TxEnv,
+    ) -> Result<ExecutionResult<HaltReason>, Self::Error> {
+        // Phase 1: execute with WrapDatabaseRef(state).
+        let (execution_result, evm_state) = {
+            let state = self.state.as_mut().unwrap();
+            let mut evm = self.evm_config.evm_with_env(WrapDatabaseRef(state), evm_env);
+            // Inject per-transaction system precompiles (mint, BLS, etc.)
+            for (addr, precompile) in precompiles {
+                evm.precompiles_mut().apply_precompile(&addr, move |_| Some(precompile));
+            }
+            let result = evm.transact_raw(tx_env).map_err(|e| {
+                BlockExecutionError::msg(alloc::format!("system txn execution failed: {e:?}"))
+            })?;
+            (result.result, result.state)
+        };
+
+        // Phase 2: commit the state changes directly into the executor's ParallelState.
+        self.state.as_mut().unwrap().commit(evm_state);
+        Ok(execution_result)
     }
 
     fn apply_custom_precompiles(&mut self, custom_precompiles: Arc<Vec<(Address, DynPrecompile)>>) {

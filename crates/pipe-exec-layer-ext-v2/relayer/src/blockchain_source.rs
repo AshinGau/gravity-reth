@@ -6,7 +6,7 @@ use crate::{
     data_source::{source_types, OracleData, OracleDataSource},
     eth_client::EthHttpCli,
 };
-use alloy_primitives::{hex, Address, Bytes, U256};
+use alloy_primitives::{Address, Bytes, U256};
 use alloy_rpc_types::Filter;
 use alloy_sol_macro::sol;
 use alloy_sol_types::SolEvent;
