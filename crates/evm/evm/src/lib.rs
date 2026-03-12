@@ -26,7 +26,7 @@ use alloy_eips::{
 };
 use alloy_evm::{
     block::{BlockExecutorFactory, BlockExecutorFor},
-    precompiles::PrecompilesMap,
+    precompiles::{DynPrecompile, PrecompilesMap},
 };
 use alloy_primitives::{Address, B256};
 use core::{error::Error, fmt::Debug};
@@ -35,7 +35,11 @@ use reth_execution_errors::BlockExecutionError;
 use reth_primitives_traits::{
     BlockTy, HeaderTy, NodePrimitives, ReceiptTy, SealedBlock, SealedHeader, TxTy,
 };
-use revm::{context::TxEnv, context_interface::result::HaltReason, database::State};
+use revm::{
+    context::{result::ExecutionResult, TxEnv},
+    context_interface::result::HaltReason,
+    database::State,
+};
 
 pub mod either;
 /// EVM environment configuration.
@@ -447,12 +451,7 @@ pub trait ConfigureEvm: Clone + Debug + Send + Sync + Unpin {
     fn executor<DB: Database>(
         &self,
         db: DB,
-    ) -> impl Executor<DB, Primitives = Self::Primitives, Error = BlockExecutionError>
-    where
-        EvmEnvFor<Self>: From<EvmEnv>,
-        TxEnvFor<Self>: From<TxEnv>,
-        HaltReasonFor<Self>: Into<HaltReason>,
-    {
+    ) -> impl Executor<DB, Primitives = Self::Primitives, Error = BlockExecutionError> {
         BasicBlockExecutor::new(self, db)
     }
 
@@ -461,13 +460,23 @@ pub trait ConfigureEvm: Clone + Debug + Send + Sync + Unpin {
     fn batch_executor<DB: Database>(
         &self,
         db: DB,
-    ) -> impl Executor<DB, Primitives = Self::Primitives, Error = BlockExecutionError>
-    where
-        EvmEnvFor<Self>: From<EvmEnv>,
-        TxEnvFor<Self>: From<TxEnv>,
-        HaltReasonFor<Self>: Into<HaltReason>,
-    {
+    ) -> impl Executor<DB, Primitives = Self::Primitives, Error = BlockExecutionError> {
         BasicBlockExecutor::new(self, db)
+    }
+
+    /// Executes a single system transaction directly against the given database state and commits
+    /// the resulting state changes immediately.
+    ///
+    /// Default: `unimplemented!()` — override in every `ConfigureEvm` impl that supports system
+    /// transactions.
+    fn transact_system_txn<DB: Database>(
+        &self,
+        _db: &mut State<DB>,
+        _evm_env: EvmEnv,
+        _precompiles: Vec<(Address, DynPrecompile)>,
+        _tx_env: TxEnv,
+    ) -> Result<ExecutionResult<HaltReason>, BlockExecutionError> {
+        unimplemented!("transact_system_txn not implemented for this ConfigureEvm")
     }
 
     /// Returns a new [`ParallelExecutor`].

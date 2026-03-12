@@ -263,7 +263,6 @@ where
         let (execution_result, evm_state) = {
             let state = self.state.as_mut().unwrap();
             let mut evm = self.evm_config.evm_with_env(WrapDatabaseRef(state), evm_env);
-            evm.block().basefee;
             // Inject per-transaction system precompiles (mint, BLS, etc.)
             for (addr, precompile) in precompiles {
                 evm.precompiles_mut().apply_precompile(&addr, move |_| Some(precompile));

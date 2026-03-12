@@ -1,6 +1,6 @@
 //! Traits for execution.
 
-use crate::{ConfigureEvm, Database, EvmEnvFor, HaltReasonFor, OnStateHook, TxEnvFor};
+use crate::{ConfigureEvm, Database, OnStateHook, TxEnvFor};
 use alloc::{boxed::Box, vec::Vec};
 use alloy_consensus::{BlockHeader, Header};
 use alloy_eips::eip2718::WithEncoded;
@@ -28,7 +28,6 @@ use revm::{
         TxEnv,
     },
     database::{states::bundle_state::BundleRetention, BundleState, State},
-    DatabaseCommit,
 };
 
 /// A type that knows how to execute a block. It is assumed to operate on a
@@ -564,9 +563,6 @@ impl<F, DB> Executor<DB> for BasicBlockExecutor<F, DB>
 where
     F: ConfigureEvm,
     DB: Database,
-    EvmEnvFor<F>: From<EvmEnv>,
-    TxEnvFor<F>: From<TxEnv>,
-    HaltReasonFor<F>: Into<HaltReason>,
 {
     type Primitives = F::Primitives;
     type Error = BlockExecutionError;
@@ -625,20 +621,7 @@ where
         precompiles: Vec<(Address, DynPrecompile)>,
         tx_env: TxEnv,
     ) -> Result<ExecutionResult<HaltReason>, Self::Error> {
-        // Build EVM directly on top of &mut self.db (State<DB> implements Database).
-        let (execution_result, evm_state) = {
-            let mut evm = self.strategy_factory.evm_with_env(&mut self.db, evm_env.into());
-            for (addr, precompile) in precompiles {
-                evm.precompiles_mut().apply_precompile(&addr, move |_| Some(precompile));
-            }
-            let result = evm.transact_raw(tx_env.into()).map_err(|e| {
-                BlockExecutionError::msg(alloc::format!("system txn execution failed: {e:?}"))
-            })?;
-            // Destructure while evm is still alive so the &mut self.db borrow ends here.
-            (result.result.map_haltreason(Into::into), result.state)
-        };
-        self.db.commit(evm_state);
-        Ok(execution_result)
+        self.strategy_factory.transact_system_txn(&mut self.db, evm_env, precompiles, tx_env)
     }
 }
 
