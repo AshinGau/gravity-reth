@@ -35,7 +35,7 @@ use reth_execution_errors::BlockExecutionError;
 use reth_primitives_traits::{
     BlockTy, HeaderTy, NodePrimitives, ReceiptTy, SealedBlock, SealedHeader, TxTy,
 };
-use revm::{context::TxEnv, database::State};
+use revm::{context::TxEnv, context_interface::result::HaltReason, database::State};
 
 pub mod either;
 /// EVM environment configuration.
@@ -447,7 +447,12 @@ pub trait ConfigureEvm: Clone + Debug + Send + Sync + Unpin {
     fn executor<DB: Database>(
         &self,
         db: DB,
-    ) -> impl Executor<DB, Primitives = Self::Primitives, Error = BlockExecutionError> {
+    ) -> impl Executor<DB, Primitives = Self::Primitives, Error = BlockExecutionError>
+    where
+        EvmEnvFor<Self>: From<EvmEnv>,
+        TxEnvFor<Self>: From<TxEnv>,
+        HaltReasonFor<Self>: Into<HaltReason>,
+    {
         BasicBlockExecutor::new(self, db)
     }
 
@@ -456,7 +461,12 @@ pub trait ConfigureEvm: Clone + Debug + Send + Sync + Unpin {
     fn batch_executor<DB: Database>(
         &self,
         db: DB,
-    ) -> impl Executor<DB, Primitives = Self::Primitives, Error = BlockExecutionError> {
+    ) -> impl Executor<DB, Primitives = Self::Primitives, Error = BlockExecutionError>
+    where
+        EvmEnvFor<Self>: From<EvmEnv>,
+        TxEnvFor<Self>: From<TxEnv>,
+        HaltReasonFor<Self>: Into<HaltReason>,
+    {
         BasicBlockExecutor::new(self, db)
     }
 

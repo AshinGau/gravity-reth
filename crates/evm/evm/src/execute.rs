@@ -1,12 +1,13 @@
 //! Traits for execution.
 
-use crate::{ConfigureEvm, Database, OnStateHook, TxEnvFor};
+use crate::{ConfigureEvm, Database, EvmEnvFor, HaltReasonFor, OnStateHook, TxEnvFor};
 use alloc::{boxed::Box, vec::Vec};
 use alloy_consensus::{BlockHeader, Header};
 use alloy_eips::eip2718::WithEncoded;
 pub use alloy_evm::block::{BlockExecutor, BlockExecutorFactory};
 use alloy_evm::{
     block::{CommitChanges, ExecutableTx},
+    precompiles::DynPrecompile,
     Evm, EvmEnv, EvmFactory, RecoveredTx, ToTxEnv,
 };
 use alloy_primitives::{Address, B256};
@@ -22,9 +23,11 @@ use reth_storage_api::StateProvider;
 pub use reth_storage_errors::provider::ProviderError;
 use reth_trie_common::{updates::TrieUpdates, HashedPostState};
 use revm::{
-    context::result::ExecutionResult,
+    context::{
+        result::{ExecutionResult, HaltReason},
+        TxEnv,
+    },
     database::{states::bundle_state::BundleRetention, BundleState, State},
-    state::EvmState,
     DatabaseCommit,
 };
 
@@ -135,8 +138,14 @@ pub trait Executor<DB: Database>: Sized {
     /// This is used to optimize DB commits depending on the size of the state.
     fn size_hint(&self) -> usize;
 
-    /// Commits the changes to the executor state.
-    fn commit_changes(&mut self, changes: EvmState);
+    /// Executes a single system transaction on the executor's own internal state and commits
+    /// the resulting state changes immediately.
+    fn transact_system_txn(
+        &mut self,
+        evm_env: EvmEnv,
+        precompiles: Vec<(Address, DynPrecompile)>,
+        tx_env: TxEnv,
+    ) -> Result<ExecutionResult<HaltReason>, Self::Error>;
 }
 
 /// Helper type for the output of executing a block.
@@ -555,6 +564,9 @@ impl<F, DB> Executor<DB> for BasicBlockExecutor<F, DB>
 where
     F: ConfigureEvm,
     DB: Database,
+    EvmEnvFor<F>: From<EvmEnv>,
+    TxEnvFor<F>: From<TxEnv>,
+    HaltReasonFor<F>: Into<HaltReason>,
 {
     type Primitives = F::Primitives;
     type Error = BlockExecutionError;
@@ -603,16 +615,30 @@ where
         self.db.take_bundle()
     }
 
-    fn commit_changes(&mut self, changes: EvmState) {
-        // Load all accounts in the changes map to ensure they are cached before committing.
-        for address in changes.keys() {
-            self.db.load_cache_account(*address).unwrap();
-        }
-        self.db.commit(changes);
-    }
-
     fn size_hint(&self) -> usize {
         self.db.bundle_state.size_hint()
+    }
+
+    fn transact_system_txn(
+        &mut self,
+        evm_env: EvmEnv,
+        precompiles: Vec<(Address, DynPrecompile)>,
+        tx_env: TxEnv,
+    ) -> Result<ExecutionResult<HaltReason>, Self::Error> {
+        // Build EVM directly on top of &mut self.db (State<DB> implements Database).
+        let (execution_result, evm_state) = {
+            let mut evm = self.strategy_factory.evm_with_env(&mut self.db, evm_env.into());
+            for (addr, precompile) in precompiles {
+                evm.precompiles_mut().apply_precompile(&addr, move |_| Some(precompile));
+            }
+            let result = evm.transact_raw(tx_env.into()).map_err(|e| {
+                BlockExecutionError::msg(alloc::format!("system txn execution failed: {e:?}"))
+            })?;
+            // Destructure while evm is still alive so the &mut self.db borrow ends here.
+            (result.result.map_haltreason(Into::into), result.state)
+        };
+        self.db.commit(evm_state);
+        Ok(execution_result)
     }
 }
 
@@ -712,12 +738,17 @@ mod tests {
             unreachable!()
         }
 
-        fn commit_changes(&mut self, _changes: EvmState) {
-            unreachable!()
-        }
-
         fn size_hint(&self) -> usize {
             0
+        }
+
+        fn transact_system_txn(
+            &mut self,
+            _evm_env: EvmEnv,
+            _precompiles: Vec<(Address, DynPrecompile)>,
+            _tx_env: TxEnv,
+        ) -> Result<ExecutionResult<HaltReason>, Self::Error> {
+            unreachable!()
         }
     }
 
