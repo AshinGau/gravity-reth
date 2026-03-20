@@ -6,7 +6,7 @@ use alloy_primitives::{keccak256, map::HashMap, Address, B256, U256};
 use reth_chainspec::EthChainSpec;
 use reth_codecs::Compact;
 use reth_config::config::EtlConfig;
-use reth_db_api::{tables, transaction::DbTxMut, DatabaseError};
+use reth_db_api::{table::Value, tables, transaction::DbTxMut, DatabaseError};
 use reth_etl::Collector;
 use reth_execution_errors::StateRootError;
 use reth_primitives_traits::{Account, Bytecode, GotExpected, NodePrimitives, StorageEntry};
@@ -87,7 +87,7 @@ impl From<DatabaseError> for InitStorageError {
 pub fn init_genesis<PF>(factory: &PF) -> Result<B256, InitStorageError>
 where
     PF: DatabaseProviderFactory
-        + StaticFileProviderFactory<Primitives: NodePrimitives<BlockHeader: Compact>>
+        + StaticFileProviderFactory<Primitives: NodePrimitives<BlockHeader: Compact + Value>>
         + ChainSpecProvider
         + StageCheckpointReader
         + BlockHashReader,
@@ -381,24 +381,31 @@ pub fn insert_genesis_header<Provider, Spec>(
     chain: &Spec,
 ) -> ProviderResult<()>
 where
-    Provider: StaticFileProviderFactory<Primitives: NodePrimitives<BlockHeader: Compact>>
+    Provider: StaticFileProviderFactory<Primitives: NodePrimitives<BlockHeader: Compact + Value>>
         + DBProvider<Tx: DbTxMut>,
     Spec: EthChainSpec<Header = <Provider::Primitives as NodePrimitives>::BlockHeader>,
 {
     let (header, block_hash) = (chain.genesis_header(), chain.genesis_hash());
+    let difficulty = header.difficulty();
     let static_file_provider = provider.static_file_provider();
 
     match static_file_provider.block_hash(0) {
         Ok(None) | Err(ProviderError::MissingStaticFileBlock(StaticFileSegment::Headers, 0)) => {
-            let (difficulty, hash) = (header.difficulty(), block_hash);
             let mut writer = static_file_provider.latest_writer(StaticFileSegment::Headers)?;
-            writer.append_header(header, difficulty, &hash)?;
+            writer.append_header(header, difficulty, &block_hash)?;
         }
         Ok(Some(_)) => {}
         Err(e) => return Err(e),
     }
 
     provider.tx_ref().put::<tables::CanonicalHeaders>(0, block_hash)?;
+    provider
+        .tx_ref()
+        .put::<tables::Headers<<Provider::Primitives as NodePrimitives>::BlockHeader>>(
+            0,
+            header.clone(),
+        )?;
+    provider.tx_ref().put::<tables::HeaderTerminalDifficulties>(0, difficulty.into())?;
     provider.tx_ref().put::<tables::HeaderNumbers>(block_hash, 0)?;
     provider.tx_ref().put::<tables::BlockBodyIndices>(0, Default::default())?;
 
