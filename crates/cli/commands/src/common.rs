@@ -30,7 +30,7 @@ use reth_stages::{sets::DefaultStages, Pipeline, PipelineTarget, StageId};
 use reth_static_file::StaticFileProducer;
 use std::{path::PathBuf, sync::Arc};
 use tokio::sync::watch;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 /// Struct to hold config and datadir paths
 #[derive(Debug, Parser)]
