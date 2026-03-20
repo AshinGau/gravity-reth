@@ -62,6 +62,14 @@ where
             }
         };
 
+        tracing::info!(
+            target: "pruner",
+            block_range_start,
+            block_range_end,
+            previous_checkpoint = ?input.previous_checkpoint,
+            "Pruning headers segment"
+        );
+
         let last_pruned_block =
             if block_range_start == 0 { None } else { Some(block_range_start - 1) };
 
@@ -199,6 +207,13 @@ where
         }
 
         if ![pruned_block_headers, pruned_block_td, pruned_block_canonical].iter().all_equal() {
+            tracing::error!(
+                target: "pruner",
+                ?pruned_block_headers,
+                ?pruned_block_td,
+                ?pruned_block_canonical,
+                "Headers-related tables are inconsistent"
+            );
             return Some(Err(PrunerError::InconsistentData(
                 "All headers-related tables should be pruned up to the same height",
             )))
