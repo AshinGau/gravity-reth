@@ -120,7 +120,7 @@ where
                     return Err(InitStorageError::UninitializedDatabase)
                 }
 
-                debug!("Genesis already written, skipping.");
+                info!("Genesis already written, skipping.");
                 return Ok(hash)
             }
 
@@ -398,6 +398,7 @@ where
         Err(e) => return Err(e),
     }
 
+    provider.tx_ref().put::<tables::CanonicalHeaders>(0, block_hash)?;
     provider.tx_ref().put::<tables::HeaderNumbers>(block_hash, 0)?;
     provider.tx_ref().put::<tables::BlockBodyIndices>(0, Default::default())?;
 
