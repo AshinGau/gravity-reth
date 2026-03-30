@@ -7,6 +7,7 @@ use reth_evm::ConfigureEvm;
 use reth_exex_types::ExExHead;
 use reth_node_api::NodePrimitives;
 use reth_provider::{BlockReader, Chain, HeaderProvider, StateProviderFactory};
+use reth_stages_api::ExecutionStageThresholds;
 use reth_tracing::tracing::debug;
 use std::{
     fmt::Debug,
@@ -61,6 +62,15 @@ pub trait ExExNotificationsStream<N: NodePrimitives = EthPrimitives>:
     fn with_head(self, exex_head: ExExHead) -> Self
     where
         Self: Sized;
+
+    /// Sets custom thresholds for the backfill job.
+    ///
+    /// These thresholds control how many blocks are included in each backfill notification.
+    /// Only takes effect when the stream is configured with a head.
+    ///
+    /// By default, the backfill job uses [`BackfillJobFactory`] defaults (up to 500,000 blocks
+    /// per batch, bounded by 30s execution time).
+    fn set_backfill_thresholds(&mut self, _thresholds: ExecutionStageThresholds) {}
 }
 
 #[derive(Debug)]
@@ -150,6 +160,12 @@ where
     fn with_head(mut self, exex_head: ExExHead) -> Self {
         self.set_with_head(exex_head);
         self
+    }
+
+    fn set_backfill_thresholds(&mut self, thresholds: ExecutionStageThresholds) {
+        if let ExExNotificationsInner::WithHead(notifications) = &mut self.inner {
+            notifications.backfill_thresholds = Some(thresholds);
+        }
     }
 }
 
@@ -268,6 +284,8 @@ where
     pending_check_backfill: bool,
     /// The backfill job to run before consuming any notifications.
     backfill_job: Option<StreamBackfillJob<E, P, Chain<E::Primitives>>>,
+    /// Custom thresholds for the backfill job, if set.
+    backfill_thresholds: Option<ExecutionStageThresholds>,
 }
 
 impl<P, E> ExExNotificationsWithHead<P, E>
@@ -293,7 +311,21 @@ where
             pending_check_canonical: true,
             pending_check_backfill: true,
             backfill_job: None,
+            backfill_thresholds: None,
         }
+    }
+
+    /// Sets custom thresholds for the backfill job.
+    ///
+    /// These thresholds control how many blocks are included in each backfill notification.
+    /// By default, the backfill job uses [`BackfillJobFactory`] defaults (up to 500,000 blocks
+    /// per batch, bounded by 30s execution time).
+    ///
+    /// If your ExEx is memory-constrained, consider setting a lower `max_blocks` value to
+    /// reduce the size of each backfill notification.
+    pub const fn with_backfill_thresholds(mut self, thresholds: ExecutionStageThresholds) -> Self {
+        self.backfill_thresholds = Some(thresholds);
+        self
     }
 }
 
@@ -308,7 +340,7 @@ where
     /// we're not on the canonical chain and we need to revert the notification with the ExEx
     /// head block.
     fn check_canonical(&mut self) -> eyre::Result<Option<ExExNotification<E::Primitives>>> {
-        if self.provider.is_known(&self.initial_exex_head.block.hash)? &&
+        if self.provider.is_known(self.initial_exex_head.block.hash)? &&
             self.initial_exex_head.block.number <= self.initial_local_head.number
         {
             // we have the targeted block and that block is below the current head
@@ -354,13 +386,16 @@ where
     /// canonical chain.
     ///
     /// Possible situations are:
-    /// - ExEx is behind the node head (`node_head.number < exex_head.number`). Backfill from the
+    /// - ExEx is behind the node head (`exex_head.number < node_head.number`). Backfill from the
     ///   node database.
-    /// - ExEx is at the same block number as the node head (`node_head.number ==
-    ///   exex_head.number`). Nothing to do.
+    /// - ExEx is at the same block number as the node head (`exex_head.number ==
+    ///   node_head.number`). Nothing to do.
     fn check_backfill(&mut self) -> eyre::Result<()> {
-        let backfill_job_factory =
+        let mut backfill_job_factory =
             BackfillJobFactory::new(self.evm_config.clone(), self.provider.clone());
+        if let Some(thresholds) = self.backfill_thresholds.clone() {
+            backfill_job_factory = backfill_job_factory.with_thresholds(thresholds);
+        }
         match self.initial_exex_head.block.number.cmp(&self.initial_local_head.number) {
             std::cmp::Ordering::Less => {
                 // ExEx is behind the node head, start backfill
@@ -457,9 +492,10 @@ mod tests {
     use reth_primitives_traits::Block as _;
     use reth_provider::{
         providers::BlockchainProvider, test_utils::create_test_provider_factory, BlockWriter,
-        Chain, DatabaseProviderFactory, StorageLocation,
+        Chain, DBProvider, DatabaseProviderFactory,
     };
     use reth_testing_utils::generators::{self, random_block, BlockParams};
+    use std::collections::BTreeMap;
     use tokio::sync::mpsc;
 
     #[tokio::test]
@@ -481,13 +517,12 @@ mod tests {
             &mut rng,
             genesis_block.number + 1,
             BlockParams { parent: Some(genesis_hash), tx_count: Some(0), ..Default::default() },
-        );
-        let provider_rw = provider_factory.provider_rw()?;
-        provider_rw
-            .insert_block(node_head_block.clone().try_recover()?, StorageLocation::Database)?;
-        provider_rw.commit()?;
-
+        )
+        .try_recover()?;
         let node_head = node_head_block.num_hash();
+        let provider_rw = provider_factory.provider_rw()?;
+        provider_rw.insert_block(&node_head_block)?;
+        provider_rw.commit()?;
         let exex_head =
             ExExHead { block: BlockNumHash { number: genesis_block.number, hash: genesis_hash } };
 
@@ -500,7 +535,7 @@ mod tests {
                 )
                 .try_recover()?],
                 Default::default(),
-                None,
+                BTreeMap::new(),
             )),
         };
 
@@ -568,7 +603,7 @@ mod tests {
                 .seal_slow()
                 .try_recover()?],
                 Default::default(),
-                None,
+                BTreeMap::new(),
             )),
         };
 
@@ -614,7 +649,7 @@ mod tests {
         .try_recover()?;
         let node_head = node_head_block.num_hash();
         let provider_rw = provider.database_provider_rw()?;
-        provider_rw.insert_block(node_head_block, StorageLocation::Database)?;
+        provider_rw.insert_block(&node_head_block)?;
         provider_rw.commit()?;
         let node_head_notification = ExExNotification::ChainCommitted {
             new: Arc::new(
@@ -635,7 +670,7 @@ mod tests {
             new: Arc::new(Chain::new(
                 vec![exex_head_block.clone().try_recover()?],
                 Default::default(),
-                None,
+                BTreeMap::new(),
             )),
         };
         wal.commit(&exex_head_notification)?;
@@ -649,7 +684,7 @@ mod tests {
                 )
                 .try_recover()?],
                 Default::default(),
-                None,
+                BTreeMap::new(),
             )),
         };
 
@@ -706,7 +741,7 @@ mod tests {
             new: Arc::new(Chain::new(
                 vec![exex_head_block.clone().try_recover()?],
                 Default::default(),
-                None,
+                BTreeMap::new(),
             )),
         };
         wal.commit(&exex_head_notification)?;
@@ -725,7 +760,7 @@ mod tests {
                 )
                 .try_recover()?],
                 Default::default(),
-                None,
+                BTreeMap::new(),
             )),
         };
 

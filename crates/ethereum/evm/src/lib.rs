@@ -12,11 +12,12 @@
     issue_tracker_base_url = "https://github.com/paradigmxyz/reth/issues/"
 )]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;
 
+<<<<<<< HEAD
 use crate::parallel_execute::GrevmExecutor;
 use alloc::{borrow::Cow, boxed::Box, sync::Arc, vec::Vec};
 use alloy_consensus::{BlockHeader, Header};
@@ -59,6 +60,45 @@ use alloy_evm::{eth::spec::EthExecutorSpec, Database, Evm};
 pub use config::{revm_spec, revm_spec_by_timestamp_and_block_number};
 use reth_ethereum_forks::{EthereumHardfork, Hardforks};
 use revm::{context::TxEnv, DatabaseCommit};
+=======
+use alloc::{borrow::Cow, sync::Arc};
+use alloy_consensus::Header;
+use alloy_evm::{
+    eth::{EthBlockExecutionCtx, EthBlockExecutorFactory},
+    EthEvmFactory, FromRecoveredTx, FromTxWithEncoded,
+};
+use core::{convert::Infallible, fmt::Debug};
+use reth_chainspec::{ChainSpec, EthChainSpec, MAINNET};
+use reth_ethereum_primitives::{Block, EthPrimitives, TransactionSigned};
+use reth_evm::{
+    eth::NextEvmEnvAttributes, precompiles::PrecompilesMap, ConfigureEvm, EvmEnv, EvmFactory,
+    NextBlockEnvAttributes, TransactionEnv,
+};
+use reth_primitives_traits::{SealedBlock, SealedHeader};
+use revm::{context::BlockEnv, primitives::hardfork::SpecId};
+
+#[cfg(feature = "std")]
+use reth_evm::{ConfigureEngineEvm, ExecutableTxIterator};
+#[allow(unused_imports)]
+use {
+    alloy_eips::Decodable2718,
+    alloy_primitives::{Bytes, U256},
+    alloy_rpc_types_engine::ExecutionData,
+    reth_chainspec::EthereumHardforks,
+    reth_evm::{EvmEnvFor, ExecutionCtxFor},
+    reth_primitives_traits::{constants::MAX_TX_GAS_LIMIT_OSAKA, SignedTransaction, TxTy},
+    reth_storage_errors::any::AnyError,
+    revm::context::CfgEnv,
+    revm::context_interface::block::BlobExcessGasAndPrice,
+};
+
+pub use alloy_evm::EthEvm;
+
+mod config;
+use alloy_evm::eth::spec::EthExecutorSpec;
+pub use config::{revm_spec, revm_spec_by_timestamp_and_block_number};
+use reth_ethereum_forks::Hardforks;
+>>>>>>> v1.11.3
 
 /// Helper type with backwards compatible methods to obtain Ethereum executor
 /// providers.
@@ -70,8 +110,11 @@ pub mod execute {
     pub type EthExecutorProvider = EthEvmConfig;
 }
 
+<<<<<<< HEAD
 pub mod parallel_execute;
 
+=======
+>>>>>>> v1.11.3
 mod build;
 pub use build::EthBlockAssembler;
 
@@ -96,6 +139,7 @@ impl EthEvmConfig {
     /// Creates a new Ethereum EVM configuration for the ethereum mainnet.
     pub fn mainnet() -> Self {
         Self::ethereum(MAINNET.clone())
+<<<<<<< HEAD
     }
 }
 
@@ -192,11 +236,88 @@ where
         Ok(EvmEnv { cfg_env, block_env })
     }
 
+=======
+    }
+}
+
+impl<ChainSpec> EthEvmConfig<ChainSpec> {
+    /// Creates a new Ethereum EVM configuration with the given chain spec.
+    pub fn new(chain_spec: Arc<ChainSpec>) -> Self {
+        Self::ethereum(chain_spec)
+    }
+
+    /// Creates a new Ethereum EVM configuration.
+    pub fn ethereum(chain_spec: Arc<ChainSpec>) -> Self {
+        Self::new_with_evm_factory(chain_spec, EthEvmFactory::default())
+    }
+}
+
+impl<ChainSpec, EvmFactory> EthEvmConfig<ChainSpec, EvmFactory> {
+    /// Creates a new Ethereum EVM configuration with the given chain spec and EVM factory.
+    pub fn new_with_evm_factory(chain_spec: Arc<ChainSpec>, evm_factory: EvmFactory) -> Self {
+        Self {
+            block_assembler: EthBlockAssembler::new(chain_spec.clone()),
+            executor_factory: EthBlockExecutorFactory::new(
+                RethReceiptBuilder::default(),
+                chain_spec,
+                evm_factory,
+            ),
+        }
+    }
+
+    /// Returns the chain spec associated with this configuration.
+    pub const fn chain_spec(&self) -> &Arc<ChainSpec> {
+        self.executor_factory.spec()
+    }
+}
+
+impl<ChainSpec, EvmF> ConfigureEvm for EthEvmConfig<ChainSpec, EvmF>
+where
+    ChainSpec: EthExecutorSpec + EthChainSpec<Header = Header> + Hardforks + 'static,
+    EvmF: EvmFactory<
+            Tx: TransactionEnv
+                    + FromRecoveredTx<TransactionSigned>
+                    + FromTxWithEncoded<TransactionSigned>,
+            Spec = SpecId,
+            BlockEnv = BlockEnv,
+            Precompiles = PrecompilesMap,
+        > + Clone
+        + Debug
+        + Send
+        + Sync
+        + Unpin
+        + 'static,
+{
+    type Primitives = EthPrimitives;
+    type Error = Infallible;
+    type NextBlockEnvCtx = NextBlockEnvAttributes;
+    type BlockExecutorFactory = EthBlockExecutorFactory<RethReceiptBuilder, Arc<ChainSpec>, EvmF>;
+    type BlockAssembler = EthBlockAssembler<ChainSpec>;
+
+    fn block_executor_factory(&self) -> &Self::BlockExecutorFactory {
+        &self.executor_factory
+    }
+
+    fn block_assembler(&self) -> &Self::BlockAssembler {
+        &self.block_assembler
+    }
+
+    fn evm_env(&self, header: &Header) -> Result<EvmEnv<SpecId>, Self::Error> {
+        Ok(EvmEnv::for_eth_block(
+            header,
+            self.chain_spec(),
+            self.chain_spec().chain().id(),
+            self.chain_spec().blob_params_at_timestamp(header.timestamp),
+        ))
+    }
+
+>>>>>>> v1.11.3
     fn next_evm_env(
         &self,
         parent: &Header,
         attributes: &NextBlockEnvAttributes,
     ) -> Result<EvmEnv, Self::Error> {
+<<<<<<< HEAD
         // ensure we're not missing any timestamp based hardforks
         let chain_spec = self.chain_spec();
         let blob_params = chain_spec.blob_params_at_timestamp(attributes.timestamp);
@@ -247,9 +368,102 @@ where
 
             // set the base fee to the initial base fee from the EIP-1559 spec
             basefee = Some(INITIAL_BASE_FEE)
+=======
+        Ok(EvmEnv::for_eth_next_block(
+            parent,
+            NextEvmEnvAttributes {
+                timestamp: attributes.timestamp,
+                suggested_fee_recipient: attributes.suggested_fee_recipient,
+                prev_randao: attributes.prev_randao,
+                gas_limit: attributes.gas_limit,
+            },
+            self.chain_spec().next_block_base_fee(parent, attributes.timestamp).unwrap_or_default(),
+            self.chain_spec(),
+            self.chain_spec().chain().id(),
+            self.chain_spec().blob_params_at_timestamp(attributes.timestamp),
+        ))
+    }
+
+    fn context_for_block<'a>(
+        &self,
+        block: &'a SealedBlock<Block>,
+    ) -> Result<EthBlockExecutionCtx<'a>, Self::Error> {
+        Ok(EthBlockExecutionCtx {
+            tx_count_hint: Some(block.transaction_count()),
+            parent_hash: block.header().parent_hash,
+            parent_beacon_block_root: block.header().parent_beacon_block_root,
+            ommers: &block.body().ommers,
+            withdrawals: block.body().withdrawals.as_ref().map(Cow::Borrowed),
+            extra_data: block.header().extra_data.clone(),
+        })
+    }
+
+    fn context_for_next_block(
+        &self,
+        parent: &SealedHeader,
+        attributes: Self::NextBlockEnvCtx,
+    ) -> Result<EthBlockExecutionCtx<'_>, Self::Error> {
+        Ok(EthBlockExecutionCtx {
+            tx_count_hint: None,
+            parent_hash: parent.hash(),
+            parent_beacon_block_root: attributes.parent_beacon_block_root,
+            ommers: &[],
+            withdrawals: attributes.withdrawals.map(Cow::Owned),
+            extra_data: attributes.extra_data,
+        })
+    }
+}
+
+#[cfg(feature = "std")]
+impl<ChainSpec, EvmF> ConfigureEngineEvm<ExecutionData> for EthEvmConfig<ChainSpec, EvmF>
+where
+    ChainSpec: EthExecutorSpec + EthChainSpec<Header = Header> + Hardforks + 'static,
+    EvmF: EvmFactory<
+            Tx: TransactionEnv
+                    + FromRecoveredTx<TransactionSigned>
+                    + FromTxWithEncoded<TransactionSigned>,
+            Spec = SpecId,
+            BlockEnv = BlockEnv,
+            Precompiles = PrecompilesMap,
+        > + Clone
+        + Debug
+        + Send
+        + Sync
+        + Unpin
+        + 'static,
+{
+    fn evm_env_for_payload(&self, payload: &ExecutionData) -> Result<EvmEnvFor<Self>, Self::Error> {
+        let timestamp = payload.payload.timestamp();
+        let block_number = payload.payload.block_number();
+
+        let blob_params = self.chain_spec().blob_params_at_timestamp(timestamp);
+        let spec =
+            revm_spec_by_timestamp_and_block_number(self.chain_spec(), timestamp, block_number);
+
+        // configure evm env based on parent block
+        let mut cfg_env = CfgEnv::new()
+            .with_chain_id(self.chain_spec().chain().id())
+            .with_spec_and_mainnet_gas_params(spec);
+
+        if let Some(blob_params) = &blob_params {
+            cfg_env.set_max_blobs_per_tx(blob_params.max_blobs_per_tx);
+>>>>>>> v1.11.3
         }
 
+        if self.chain_spec().is_osaka_active_at_timestamp(timestamp) {
+            cfg_env.tx_gas_limit_cap = Some(MAX_TX_GAS_LIMIT_OSAKA);
+        }
+
+        // derive the EIP-4844 blob fees from the header's `excess_blob_gas` and the current
+        // blobparams
+        let blob_excess_gas_and_price =
+            payload.payload.excess_blob_gas().zip(blob_params).map(|(excess_blob_gas, params)| {
+                let blob_gasprice = params.calc_blob_fee(excess_blob_gas);
+                BlobExcessGasAndPrice { excess_blob_gas, blob_gasprice }
+            });
+
         let block_env = BlockEnv {
+<<<<<<< HEAD
             number: U256::from(parent.number + 1),
             beneficiary: attributes.suggested_fee_recipient,
             timestamp: U256::from(attributes.timestamp),
@@ -321,9 +535,26 @@ where
         };
         db.commit(evm_state);
         Ok(execution_result)
-    }
-}
+=======
+            number: U256::from(block_number),
+            beneficiary: payload.payload.fee_recipient(),
+            timestamp: U256::from(timestamp),
+            difficulty: if spec >= SpecId::MERGE {
+                U256::ZERO
+            } else {
+                payload.payload.as_v1().prev_randao.into()
+            },
+            prevrandao: (spec >= SpecId::MERGE).then(|| payload.payload.as_v1().prev_randao),
+            gas_limit: payload.payload.gas_limit(),
+            basefee: payload.payload.saturated_base_fee_per_gas(),
+            blob_excess_gas_and_price,
+        };
 
+        Ok(EvmEnv { cfg_env, block_env })
+>>>>>>> v1.11.3
+    }
+
+<<<<<<< HEAD
 impl<ChainSpec> ConfigureEngineEvm<ExecutionData> for EthEvmConfig<ChainSpec>
 where
     ChainSpec: EthExecutorSpec + EthChainSpec<Header = Header> + Hardforks + 'static,
@@ -385,11 +616,39 @@ where
 
     fn tx_iterator_for_payload(&self, payload: &ExecutionData) -> impl ExecutableTxIterator<Self> {
         payload.payload.transactions().clone().into_iter().map(|tx| {
+=======
+    fn context_for_payload<'a>(
+        &self,
+        payload: &'a ExecutionData,
+    ) -> Result<ExecutionCtxFor<'a, Self>, Self::Error> {
+        Ok(EthBlockExecutionCtx {
+            tx_count_hint: Some(payload.payload.transactions().len()),
+            parent_hash: payload.parent_hash(),
+            parent_beacon_block_root: payload.sidecar.parent_beacon_block_root(),
+            ommers: &[],
+            withdrawals: payload.payload.withdrawals().map(|w| Cow::Owned(w.clone().into())),
+            extra_data: payload.payload.as_v1().extra_data.clone(),
+        })
+    }
+
+    fn tx_iterator_for_payload(
+        &self,
+        payload: &ExecutionData,
+    ) -> Result<impl ExecutableTxIterator<Self>, Self::Error> {
+        let txs = payload.payload.transactions().clone();
+        let convert = |tx: Bytes| {
+>>>>>>> v1.11.3
             let tx =
                 TxTy::<Self::Primitives>::decode_2718_exact(tx.as_ref()).map_err(AnyError::new)?;
             let signer = tx.try_recover().map_err(AnyError::new)?;
             Ok::<_, AnyError>(tx.with_signer(signer))
+<<<<<<< HEAD
         })
+=======
+        };
+
+        Ok((txs, convert))
+>>>>>>> v1.11.3
     }
 }
 
@@ -496,7 +755,11 @@ mod tests {
         let db = CacheDB::<EmptyDBTyped<ProviderError>>::default();
 
         let evm_env = EvmEnv {
+<<<<<<< HEAD
             cfg_env: CfgEnv::new().with_spec(SpecId::CONSTANTINOPLE),
+=======
+            cfg_env: CfgEnv::new().with_spec_and_mainnet_gas_params(SpecId::CONSTANTINOPLE),
+>>>>>>> v1.11.3
             ..Default::default()
         };
 
@@ -563,7 +826,11 @@ mod tests {
         let db = CacheDB::<EmptyDBTyped<ProviderError>>::default();
 
         let evm_env = EvmEnv {
+<<<<<<< HEAD
             cfg_env: CfgEnv::new().with_spec(SpecId::CONSTANTINOPLE),
+=======
+            cfg_env: CfgEnv::new().with_spec_and_mainnet_gas_params(SpecId::CONSTANTINOPLE),
+>>>>>>> v1.11.3
             ..Default::default()
         };
 

@@ -22,7 +22,7 @@
     issue_tracker_base_url = "https://github.com/paradigmxyz/reth/issues/"
 )]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 use crate::{
     error::{DecodePacketError, Discv4Error},
@@ -213,12 +213,16 @@ impl Discv4 {
     /// Binds a new `UdpSocket` and creates the service
     ///
     /// ```
+<<<<<<< HEAD
     /// # use std::io;
+=======
+>>>>>>> v1.11.3
     /// use reth_discv4::{Discv4, Discv4Config};
     /// use reth_network_peers::{pk2id, NodeRecord, PeerId};
     /// use secp256k1::SECP256K1;
     /// use std::{net::SocketAddr, str::FromStr};
-    /// # async fn t() -> io::Result<()> {
+    /// # async fn t() -> std:: io::Result<()> {
+    ///
     /// // generate a (random) keypair
     /// let (secret_key, pk) = SECP256K1.generate_keypair(&mut rand_08::thread_rng());
     /// let id = pk2id(&pk);
@@ -459,7 +463,7 @@ pub struct Discv4Service {
     ingress: IngressReceiver,
     /// Sender for sending outgoing messages
     ///
-    /// Sends outgoind messages to the UDP task.
+    /// Sends outgoing messages to the UDP task.
     egress: EgressSender,
     /// Buffered pending pings to apply backpressure.
     ///
@@ -479,7 +483,7 @@ pub struct Discv4Service {
     pending_find_nodes: HashMap<PeerId, FindNodeRequest>,
     /// Currently active ENR requests
     pending_enr_requests: HashMap<PeerId, EnrRequestState>,
-    /// Copy of he sender half of the commands channel for [Discv4]
+    /// Copy of the sender half of the commands channel for [Discv4]
     to_service: mpsc::UnboundedSender<Discv4Command>,
     /// Receiver half of the commands channel for [Discv4]
     commands_rx: mpsc::UnboundedReceiver<Discv4Command>,
@@ -625,10 +629,20 @@ impl Discv4Service {
         self.lookup_interval = tokio::time::interval(duration);
     }
 
+<<<<<<< HEAD
     /// Sets the external Ip to the configured external IP if [`NatResolver::ExternalIp`].
     fn resolve_external_ip(&mut self) {
         if let Some(r) = &self.resolve_external_ip_interval &&
             let Some(external_ip) = r.resolver().as_external_ip()
+=======
+    /// Sets the external Ip to the configured external IP if [`NatResolver::ExternalIp`] or
+    /// [`NatResolver::ExternalAddr`]. In the case of [`NatResolver::ExternalAddr`], it will return
+    /// the first IP address found for the domain associated with the discv4 UDP port.
+    fn resolve_external_ip(&mut self) {
+        if let Some(r) = &self.resolve_external_ip_interval &&
+            let Some(external_ip) =
+                r.resolver().clone().as_external_ip(self.local_node_record.udp_port)
+>>>>>>> v1.11.3
         {
             self.set_external_ip_addr(external_ip);
         }
@@ -2109,7 +2123,7 @@ impl Default for LookupTargetRotator {
 }
 
 impl LookupTargetRotator {
-    /// this will return the next node id to lookup
+    /// This will return the next node id to lookup
     fn next(&mut self, local: &PeerId) -> PeerId {
         self.counter += 1;
         self.counter %= self.interval;
@@ -3042,7 +3056,11 @@ mod tests {
 
         // Poll for events for a reasonable time
         let mut bootnode_appeared = false;
+<<<<<<< HEAD
         let timeout = tokio::time::sleep(Duration::from_secs(3));
+=======
+        let timeout = tokio::time::sleep(Duration::from_secs(1));
+>>>>>>> v1.11.3
         tokio::pin!(timeout);
 
         loop {

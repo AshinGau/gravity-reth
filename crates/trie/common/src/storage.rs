@@ -1,8 +1,16 @@
 use reth_primitives_traits::SubkeyContainedValue;
 
 use super::{BranchNodeCompact, StoredNibblesSubKey};
+<<<<<<< HEAD
 
 /// Account storage trie node.
+=======
+use reth_primitives_traits::ValueWithSubKey;
+
+/// Account storage trie node.
+///
+/// `nibbles` is the subkey when used as a value in the `StorageTrie` table.
+>>>>>>> v1.11.3
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(any(test, feature = "serde"), derive(serde::Serialize, serde::Deserialize))]
 pub struct StorageTrieEntry {
@@ -12,9 +20,17 @@ pub struct StorageTrieEntry {
     pub node: BranchNodeCompact,
 }
 
+<<<<<<< HEAD
 impl SubkeyContainedValue for StorageTrieEntry {
     fn subkey_length(&self) -> Option<usize> {
         Some(self.nibbles.len().div_ceil(2) + 1)
+=======
+impl ValueWithSubKey for StorageTrieEntry {
+    type SubKey = StoredNibblesSubKey;
+
+    fn get_subkey(&self) -> Self::SubKey {
+        self.nibbles.clone()
+>>>>>>> v1.11.3
     }
 }
 
@@ -33,6 +49,7 @@ impl reth_codecs::Compact for StorageTrieEntry {
     }
 
     fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
+<<<<<<< HEAD
         use nybbles::Nibbles;
 
         let encoded_len = buf[0];
@@ -45,6 +62,11 @@ impl reth_codecs::Compact for StorageTrieEntry {
         let path = StoredNibblesSubKey(nibbles);
         let (node, buf) = BranchNodeCompact::from_compact(&buf[pack_len + 1..], len - pack_len - 1);
         let this = Self { nibbles: path, node };
+=======
+        let (nibbles, buf) = StoredNibblesSubKey::from_compact(buf, 65);
+        let (node, buf) = BranchNodeCompact::from_compact(buf, len - 65);
+        let this = Self { nibbles, node };
+>>>>>>> v1.11.3
         (this, buf)
     }
 }

@@ -2,6 +2,7 @@
 
 use crate::{execute::Executor, Database, OnStateHook};
 
+<<<<<<< HEAD
 use alloy_evm::{precompiles::DynPrecompile, EvmEnv};
 use alloy_primitives::Address;
 pub use futures_util::future::Either;
@@ -14,6 +15,12 @@ use revm::{
     },
     database::BundleState,
 };
+=======
+// re-export Either
+pub use futures_util::future::Either;
+use reth_execution_types::{BlockExecutionOutput, BlockExecutionResult};
+use reth_primitives_traits::{NodePrimitives, RecoveredBlock};
+>>>>>>> v1.11.3
 
 impl<A, B, DB> Executor<DB> for Either<A, B>
 where
@@ -81,6 +88,7 @@ where
         }
     }
 
+<<<<<<< HEAD
     fn take_bundle(&mut self) -> BundleState {
         match self {
             Self::Left(a) => a.take_bundle(),
@@ -88,12 +96,15 @@ where
         }
     }
 
+=======
+>>>>>>> v1.11.3
     fn size_hint(&self) -> usize {
         match self {
             Self::Left(a) => a.size_hint(),
             Self::Right(b) => b.size_hint(),
         }
     }
+<<<<<<< HEAD
 
     fn transact_system_txn(
         &mut self,
@@ -106,4 +117,6 @@ where
             Self::Right(b) => b.transact_system_txn(evm_env, precompiles, tx_env),
         }
     }
+=======
+>>>>>>> v1.11.3
 }

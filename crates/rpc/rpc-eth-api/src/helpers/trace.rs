@@ -1,6 +1,10 @@
 //! Loads a pending block from database. Helper trait for `eth_` call and trace RPC methods.
 
+<<<<<<< HEAD
 use super::{Call, LoadBlock, LoadPendingBlock, LoadState, LoadTransaction};
+=======
+use super::{Call, LoadBlock, LoadState, LoadTransaction};
+>>>>>>> v1.11.3
 use crate::FromEvmError;
 use alloy_consensus::{transaction::TxHashRef, BlockHeader};
 use alloy_primitives::B256;
@@ -13,6 +17,7 @@ use reth_evm::{
     Evm, EvmEnvFor, EvmFor, HaltReasonFor, InspectorFor, TxEnvFor,
 };
 use reth_primitives_traits::{BlockBody, Recovered, RecoveredBlock};
+<<<<<<< HEAD
 use reth_revm::{database::StateProviderDatabase, db::CacheDB};
 use reth_rpc_eth_types::{
     cache::db::{StateCacheDb, StateCacheDbRefMutWrapper, StateProviderTraitObjWrapper},
@@ -20,13 +25,28 @@ use reth_rpc_eth_types::{
 };
 use reth_storage_api::{ProviderBlock, ProviderTx};
 use revm::{context_interface::result::ResultAndState, DatabaseCommit};
+=======
+use reth_revm::{
+    database::StateProviderDatabase,
+    db::{bal::EvmDatabaseError, State},
+};
+use reth_rpc_eth_types::{cache::db::StateCacheDb, EthApiError};
+use reth_storage_api::{ProviderBlock, ProviderTx};
+use revm::{context::Block, context_interface::result::ResultAndState, DatabaseCommit};
+>>>>>>> v1.11.3
 use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
 use std::sync::Arc;
 
 /// Executes CPU heavy tasks.
+<<<<<<< HEAD
 pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
     /// Executes the [`TxEnvFor`] with [`EvmEnvFor`] against the given [Database] without committing
     /// state changes.
+=======
+pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
+    /// Executes the [`TxEnvFor`] with [`reth_evm::EvmEnv`] against the given [Database] without
+    /// committing state changes.
+>>>>>>> v1.11.3
     fn inspect<DB, I>(
         &self,
         db: DB,
@@ -35,7 +55,11 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
         inspector: I,
     ) -> Result<ResultAndState<HaltReasonFor<Self::Evm>>, Self::Error>
     where
+<<<<<<< HEAD
         DB: Database<Error = ProviderError>,
+=======
+        DB: Database<Error = EvmDatabaseError<ProviderError>>,
+>>>>>>> v1.11.3
         I: InspectorFor<Self::Evm, DB>,
     {
         let mut evm = self.evm_config().evm_with_env_and_inspector(db, evm_env, inspector);
@@ -58,7 +82,10 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
         f: F,
     ) -> impl Future<Output = Result<R, Self::Error>> + Send
     where
+<<<<<<< HEAD
         Self: Call,
+=======
+>>>>>>> v1.11.3
         R: Send + 'static,
         F: FnOnce(
                 TracingInspector,
@@ -68,7 +95,11 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
             + 'static,
     {
         self.with_state_at_block(at, move |this, state| {
+<<<<<<< HEAD
             let mut db = CacheDB::new(StateProviderDatabase::new(state));
+=======
+            let mut db = State::builder().with_database(StateProviderDatabase::new(state)).build();
+>>>>>>> v1.11.3
             let mut inspector = TracingInspector::new(config);
             let res = this.inspect(&mut db, evm_env, tx_env, &mut inspector)?;
             f(inspector, res)
@@ -91,19 +122,24 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
         f: F,
     ) -> impl Future<Output = Result<R, Self::Error>> + Send
     where
+<<<<<<< HEAD
         Self: LoadPendingBlock + Call,
         F: FnOnce(
                 TracingInspector,
                 ResultAndState<HaltReasonFor<Self::Evm>>,
                 StateCacheDb<'_>,
+=======
+        F: FnOnce(
+                TracingInspector,
+                ResultAndState<HaltReasonFor<Self::Evm>>,
+                StateCacheDb,
+>>>>>>> v1.11.3
             ) -> Result<R, Self::Error>
             + Send
             + 'static,
         R: Send + 'static,
     {
-        let this = self.clone();
-        self.spawn_with_state_at_block(at, move |state| {
-            let mut db = CacheDB::new(StateProviderDatabase::new(state));
+        self.spawn_with_state_at_block(at, move |this, mut db| {
             let mut inspector = TracingInspector::new(config);
             let res = this.inspect(&mut db, evm_env, tx_env, &mut inspector)?;
             f(inspector, res, db)
@@ -126,12 +162,16 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
         f: F,
     ) -> impl Future<Output = Result<Option<R>, Self::Error>> + Send
     where
-        Self: LoadPendingBlock + LoadTransaction + Call,
+        Self: LoadTransaction,
         F: FnOnce(
                 TransactionInfo,
                 TracingInspector,
                 ResultAndState<HaltReasonFor<Self::Evm>>,
+<<<<<<< HEAD
                 StateCacheDb<'_>,
+=======
+                StateCacheDb,
+>>>>>>> v1.11.3
             ) -> Result<R, Self::Error>
             + Send
             + 'static,
@@ -156,17 +196,25 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
         f: F,
     ) -> impl Future<Output = Result<Option<R>, Self::Error>> + Send
     where
-        Self: LoadPendingBlock + LoadTransaction + Call,
+        Self: LoadTransaction,
         F: FnOnce(
                 TransactionInfo,
                 Insp,
                 ResultAndState<HaltReasonFor<Self::Evm>>,
+<<<<<<< HEAD
                 StateCacheDb<'_>,
             ) -> Result<R, Self::Error>
             + Send
             + 'static,
         Insp:
             for<'a, 'b> InspectorFor<Self::Evm, StateCacheDbRefMutWrapper<'a, 'b>> + Send + 'static,
+=======
+                StateCacheDb,
+            ) -> Result<R, Self::Error>
+            + Send
+            + 'static,
+        Insp: for<'a> InspectorFor<Self::Evm, &'a mut StateCacheDb> + Send + 'static,
+>>>>>>> v1.11.3
         R: Send + 'static,
     {
         async move {
@@ -176,15 +224,23 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
             };
             let (tx, tx_info) = transaction.split();
 
+<<<<<<< HEAD
             let (evm_env, _) = self.evm_env_at(block.hash().into()).await?;
+=======
+            let evm_env = self.evm_env_for_header(block.sealed_block().sealed_header())?;
+>>>>>>> v1.11.3
 
             // we need to get the state of the parent block because we're essentially replaying the
             // block the transaction is included in
             let parent_block = block.parent_hash();
 
+<<<<<<< HEAD
             let this = self.clone();
             self.spawn_with_state_at_block(parent_block.into(), move |state| {
                 let mut db = CacheDB::new(StateProviderDatabase::new(state));
+=======
+            self.spawn_with_state_at_block(parent_block, move |this, mut db| {
+>>>>>>> v1.11.3
                 let block_txs = block.transactions_recovered();
 
                 this.apply_pre_execution_changes(&block, &mut db, &evm_env)?;
@@ -193,12 +249,16 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
                 this.replay_transactions_until(&mut db, evm_env.clone(), block_txs, *tx.tx_hash())?;
 
                 let tx_env = this.evm_config().tx_env(tx);
+<<<<<<< HEAD
                 let res = this.inspect(
                     StateCacheDbRefMutWrapper(&mut db),
                     evm_env,
                     tx_env,
                     &mut inspector,
                 )?;
+=======
+                let res = this.inspect(&mut db, evm_env, tx_env, &mut inspector)?;
+>>>>>>> v1.11.3
                 f(tx_info, inspector, res, db)
             })
             .await
@@ -227,7 +287,11 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
                 TracingCtx<
                     '_,
                     Recovered<&ProviderTx<Self::Provider>>,
+<<<<<<< HEAD
                     EvmFor<Self::Evm, StateCacheDbRefMutWrapper<'_, '_>, TracingInspector>,
+=======
+                    EvmFor<Self::Evm, &mut StateCacheDb, TracingInspector>,
+>>>>>>> v1.11.3
                 >,
             ) -> Result<R, Self::Error>
             + Send
@@ -268,13 +332,21 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
                 TracingCtx<
                     '_,
                     Recovered<&ProviderTx<Self::Provider>>,
+<<<<<<< HEAD
                     EvmFor<Self::Evm, StateCacheDbRefMutWrapper<'_, '_>, Insp>,
+=======
+                    EvmFor<Self::Evm, &mut StateCacheDb, Insp>,
+>>>>>>> v1.11.3
                 >,
             ) -> Result<R, Self::Error>
             + Send
             + 'static,
         Setup: FnMut() -> Insp + Send + 'static,
+<<<<<<< HEAD
         Insp: Clone + for<'a, 'b> InspectorFor<Self::Evm, StateCacheDbRefMutWrapper<'a, 'b>>,
+=======
+        Insp: Clone + for<'a> InspectorFor<Self::Evm, &'a mut StateCacheDb>,
+>>>>>>> v1.11.3
         R: Send + 'static,
     {
         async move {
@@ -295,6 +367,7 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
             }
 
             // replay all transactions of the block
+<<<<<<< HEAD
             self.spawn_blocking_io_fut(move |this| async move {
                 // we need to get the state of the parent block because we're replaying this block
                 // on top of its parent block's state
@@ -308,6 +381,15 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
                 let state = this.state_at_block_id(state_at.into()).await?;
                 let mut db =
                     CacheDB::new(StateProviderDatabase::new(StateProviderTraitObjWrapper(&state)));
+=======
+            // we need to get the state of the parent block because we're replaying this block
+            // on top of its parent block's state
+            self.spawn_with_state_at_block(block.parent_hash(), move |this, mut db| {
+                let block_hash = block.hash();
+
+                let block_number = evm_env.block_env.number().saturating_to();
+                let base_fee = evm_env.block_env.basefee();
+>>>>>>> v1.11.3
 
                 this.apply_pre_execution_changes(&block, &mut db, &evm_env)?;
 
@@ -326,14 +408,21 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
                 let results = this
                     .evm_config()
                     .evm_factory()
+<<<<<<< HEAD
                     .create_tracer(StateCacheDbRefMutWrapper(&mut db), evm_env, inspector_setup())
                     .try_trace_many(block.transactions_recovered().take(max_transactions), |ctx| {
+=======
+                    .create_tracer(&mut db, evm_env, inspector_setup())
+                    .try_trace_many(block.transactions_recovered().take(max_transactions), |ctx| {
+                        #[allow(clippy::needless_update)]
+>>>>>>> v1.11.3
                         let tx_info = TransactionInfo {
                             hash: Some(*ctx.tx.tx_hash()),
                             index: Some(idx),
                             block_hash: Some(block_hash),
                             block_number: Some(block_number),
                             base_fee: Some(base_fee),
+                            ..Default::default()
                         };
                         idx += 1;
 
@@ -373,7 +462,11 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
                 TracingCtx<
                     '_,
                     Recovered<&ProviderTx<Self::Provider>>,
+<<<<<<< HEAD
                     EvmFor<Self::Evm, StateCacheDbRefMutWrapper<'_, '_>, TracingInspector>,
+=======
+                    EvmFor<Self::Evm, &mut StateCacheDb, TracingInspector>,
+>>>>>>> v1.11.3
                 >,
             ) -> Result<R, Self::Error>
             + Send
@@ -413,13 +506,21 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
                 TracingCtx<
                     '_,
                     Recovered<&ProviderTx<Self::Provider>>,
+<<<<<<< HEAD
                     EvmFor<Self::Evm, StateCacheDbRefMutWrapper<'_, '_>, Insp>,
+=======
+                    EvmFor<Self::Evm, &mut StateCacheDb, Insp>,
+>>>>>>> v1.11.3
                 >,
             ) -> Result<R, Self::Error>
             + Send
             + 'static,
         Setup: FnMut() -> Insp + Send + 'static,
+<<<<<<< HEAD
         Insp: Clone + for<'a, 'b> InspectorFor<Self::Evm, StateCacheDbRefMutWrapper<'a, 'b>>,
+=======
+        Insp: Clone + for<'a> InspectorFor<Self::Evm, &'a mut StateCacheDb>,
+>>>>>>> v1.11.3
         R: Send + 'static,
     {
         self.trace_block_until_with_inspector(block_id, block, None, insp_setup, f)

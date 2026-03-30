@@ -1,9 +1,16 @@
+use alloy_eip7928::BlockAccessList;
 use alloy_eips::{BlockId, BlockNumberOrTag};
 use alloy_genesis::ChainConfig;
 use alloy_json_rpc::RpcObject;
+<<<<<<< HEAD
 use alloy_primitives::{Address, Bytes, B256};
 use alloy_rpc_types_debug::ExecutionWitness;
 use alloy_rpc_types_eth::{Block, Bundle, StateContext};
+=======
+use alloy_primitives::{Address, Bytes, B256, U64};
+use alloy_rpc_types_debug::ExecutionWitness;
+use alloy_rpc_types_eth::{Bundle, StateContext};
+>>>>>>> v1.11.3
 use alloy_rpc_types_trace::geth::{
     BlockTraceResult, GethDebugTracingCallOptions, GethDebugTracingOptions, GethTrace, TraceResult,
 };
@@ -38,7 +45,7 @@ pub trait DebugApi<TxReq: RpcObject> {
 
     /// Returns an array of recent bad blocks that the client has seen on the network.
     #[method(name = "getBadBlocks")]
-    async fn bad_blocks(&self) -> RpcResult<Vec<Block>>;
+    async fn bad_blocks(&self) -> RpcResult<Vec<serde_json::Value>>;
 
     /// Returns the structured logs created during the execution of EVM between two blocks
     /// (excluding start) as a JSON object.
@@ -156,6 +163,10 @@ pub trait DebugApi<TxReq: RpcObject> {
         hash: B256,
     ) -> RpcResult<ExecutionWitness>;
 
+    /// Re-executes a block and returns the Block Access List (BAL) as defined in EIP-7928.
+    #[method(name = "getBlockAccessList")]
+    async fn debug_get_block_access_list(&self, block_id: BlockId) -> RpcResult<BlockAccessList>;
+
     /// Sets the logging backtrace location. When a backtrace location is set and a log message is
     /// emitted at that location, the stack of the goroutine executing the log statement will
     /// be printed to stderr.
@@ -222,7 +233,7 @@ pub trait DebugApi<TxReq: RpcObject> {
 
     /// Returns the raw value of a key stored in the database.
     #[method(name = "dbGet")]
-    async fn debug_db_get(&self, key: String) -> RpcResult<()>;
+    async fn debug_db_get(&self, key: String) -> RpcResult<Option<Bytes>>;
 
     /// Retrieves the state that corresponds to the block number and returns a list of accounts
     /// (including storage and code).
@@ -320,7 +331,7 @@ pub trait DebugApi<TxReq: RpcObject> {
     /// Sets the current head of the local chain by block number. Note, this is a destructive action
     /// and may severely damage your chain. Use with extreme caution.
     #[method(name = "setHead")]
-    async fn debug_set_head(&self, number: u64) -> RpcResult<()>;
+    async fn debug_set_head(&self, number: U64) -> RpcResult<()>;
 
     /// Sets the rate of mutex profiling.
     #[method(name = "setMutexProfileFraction")]
@@ -431,6 +442,29 @@ pub trait DebugApi<TxReq: RpcObject> {
     /// Note: Only available when built with the `failpoints` feature.
     #[method(name = "setFailpoint")]
     async fn debug_set_failpoint(&self, name: String, actions: String) -> RpcResult<()>;
+}
+
+/// An extension to the `debug_` namespace that provides additional methods for retrieving
+/// witnesses.
+///
+/// This is separate from the regular `debug_` api, because this depends on the network specific
+/// params. For optimism this will expect the optimism specific payload attributes
+#[cfg_attr(not(feature = "client"), rpc(server, namespace = "debug"))]
+#[cfg_attr(feature = "client", rpc(server, client, namespace = "debug"))]
+pub trait DebugExecutionWitnessApi<Attributes> {
+    /// The `debug_executePayload` method allows for re-execution of a group of transactions with
+    /// the purpose of generating an execution witness. The witness comprises of a map of all
+    /// hashed trie nodes to their preimages that were required during the execution of the block,
+    /// including during state root recomputation.
+    ///
+    /// The first argument is the parent block hash. The second argument is the payload
+    /// attributes for the new block.
+    #[method(name = "executePayload")]
+    async fn execute_payload(
+        &self,
+        parent_block_hash: B256,
+        attributes: Attributes,
+    ) -> RpcResult<ExecutionWitness>;
 }
 
 /// An extension to the `debug_` namespace that provides additional methods for retrieving

@@ -1,20 +1,32 @@
+<<<<<<< HEAD
 use alloy_consensus::BlockHeader;
+=======
+use alloy_consensus::{constants::KECCAK_EMPTY, BlockHeader};
+>>>>>>> v1.11.3
 use alloy_primitives::{BlockNumber, Sealable, B256};
 use reth_codecs::Compact;
 use reth_consensus::ConsensusError;
 use reth_db_api::{
+<<<<<<< HEAD
     cursor::DbCursorRO,
+=======
+>>>>>>> v1.11.3
     tables,
     transaction::{DbTx, DbTxMut},
 };
 use reth_primitives_traits::{GotExpected, SealedHeader};
 use reth_provider::{
+<<<<<<< HEAD
     DBProvider, HeaderProvider, ProviderError, StageCheckpointReader, StageCheckpointWriter,
     StatsReader, TrieWriter, TrieWriterV2,
+=======
+    ChangeSetReader, DBProvider, HeaderProvider, ProviderError, StageCheckpointReader,
+    StageCheckpointWriter, StatsReader, StorageChangeSetReader, StorageSettingsCache, TrieWriter,
+>>>>>>> v1.11.3
 };
 use reth_stages_api::{
     BlockErrorKind, EntitiesCheckpoint, ExecInput, ExecOutput, MerkleCheckpoint, Stage,
-    StageCheckpoint, StageError, StageId, UnwindInput, UnwindOutput,
+    StageCheckpoint, StageError, StageId, StorageRootMerkleCheckpoint, UnwindInput, UnwindOutput,
 };
 use reth_trie::{HashedPostState, HashedStorage, EMPTY_ROOT_HASH};
 use reth_trie_parallel::nested_hash::NestedStateRoot;
@@ -51,7 +63,7 @@ pub const MERKLE_STAGE_DEFAULT_INCREMENTAL_THRESHOLD: u64 = 7_000;
 
 /// The merkle hashing stage uses input from
 /// [`AccountHashingStage`][crate::stages::AccountHashingStage] and
-/// [`StorageHashingStage`][crate::stages::AccountHashingStage] to calculate intermediate hashes
+/// [`StorageHashingStage`][crate::stages::StorageHashingStage] to calculate intermediate hashes
 /// and state roots.
 ///
 /// This stage should be run with the above two stages, otherwise it is a no-op.
@@ -160,6 +172,9 @@ where
         + TrieWriterV2
         + StatsReader
         + HeaderProvider
+        + ChangeSetReader
+        + StorageChangeSetReader
+        + StorageSettingsCache
         + StageCheckpointReader
         + StageCheckpointWriter,
 {
@@ -201,7 +216,12 @@ where
         let (trie_root, entities_checkpoint) = if range.is_empty() {
             (target_block_root, input.checkpoint().entities_stage_checkpoint().unwrap_or_default())
         } else if to_block - from_block > threshold || from_block == 1 {
+<<<<<<< HEAD
             info!(target: "sync::stages::merkle::exec", current = ?current_block_number, target = ?to_block, "Rebuilding trie from hashed state");
+=======
+            let mut checkpoint = self.get_execution_checkpoint(provider)?;
+
+>>>>>>> v1.11.3
             // if there are more blocks than threshold it is faster to rebuild the trie
             provider.tx_ref().clear::<tables::AccountsTrieV2>()?;
             provider.tx_ref().clear::<tables::StoragesTrieV2>()?;
@@ -220,6 +240,7 @@ where
             let mut processed_num_accounts: usize = 0;
             let mut chunk_num_entries: usize = 0;
 
+<<<<<<< HEAD
             for account_entry in account_cursor.walk(None)? {
                 let (hashed_address, account) = account_entry?;
                 processed_num_accounts += 1;
@@ -262,6 +283,66 @@ where
                     );
                     chunk_num_entries = 0;
                     hashed_state.clear();
+=======
+            let tx = provider.tx_ref();
+            let progress = StateRoot::from_tx(tx)
+                .with_intermediate_state(checkpoint.map(IntermediateStateRootState::from))
+                .root_with_progress()
+                .map_err(|e| {
+                    error!(target: "sync::stages::merkle", %e, ?current_block_number, ?to_block, "State root with progress failed! {INVALID_STATE_ROOT_ERROR_MESSAGE}");
+                    StageError::Fatal(Box::new(e))
+                })?;
+            match progress {
+                StateRootProgress::Progress(state, hashed_entries_walked, updates) => {
+                    provider.write_trie_updates(updates)?;
+
+                    let mut checkpoint = MerkleCheckpoint::new(
+                        to_block,
+                        state.account_root_state.last_hashed_key,
+                        state
+                            .account_root_state
+                            .walker_stack
+                            .into_iter()
+                            .map(StoredSubNode::from)
+                            .collect(),
+                        state.account_root_state.hash_builder.into(),
+                    );
+
+                    // Save storage root state if present
+                    if let Some(storage_state) = state.storage_root_state {
+                        checkpoint.storage_root_checkpoint =
+                            Some(StorageRootMerkleCheckpoint::new(
+                                storage_state.state.last_hashed_key,
+                                storage_state
+                                    .state
+                                    .walker_stack
+                                    .into_iter()
+                                    .map(StoredSubNode::from)
+                                    .collect(),
+                                storage_state.state.hash_builder.into(),
+                                storage_state.account.nonce,
+                                storage_state.account.balance,
+                                storage_state.account.bytecode_hash.unwrap_or(KECCAK_EMPTY),
+                            ));
+                    }
+                    self.save_execution_checkpoint(provider, Some(checkpoint))?;
+
+                    entities_checkpoint.processed += hashed_entries_walked as u64;
+
+                    return Ok(ExecOutput {
+                        checkpoint: input
+                            .checkpoint()
+                            .with_entities_stage_checkpoint(entities_checkpoint),
+                        done: false,
+                    })
+                }
+                StateRootProgress::Complete(root, hashed_entries_walked, updates) => {
+                    provider.write_trie_updates(updates)?;
+
+                    entities_checkpoint.processed += hashed_entries_walked as u64;
+
+                    (root, entities_checkpoint)
+>>>>>>> v1.11.3
                 }
             }
 
@@ -283,6 +364,7 @@ where
 
             (final_root.unwrap_or(EMPTY_ROOT_HASH), entities_checkpoint)
         } else {
+<<<<<<< HEAD
             info!(target: "sync::stages::merkle::exec", current = ?current_block_number, target = ?to_block, "Incremental updating trie in chunks");
             let mut final_root = None;
             let mut start_block = from_block;
@@ -308,6 +390,36 @@ where
                 final_root = Some(root);
                 start_block = chunk_to + 1;
             }
+=======
+            debug!(target: "sync::stages::merkle::exec", current = ?current_block_number, target = ?to_block, "Updating trie in chunks");
+            let mut final_root = None;
+            for start_block in range.step_by(incremental_threshold as usize) {
+                let chunk_to = std::cmp::min(start_block + incremental_threshold, to_block);
+                let chunk_range = start_block..=chunk_to;
+                debug!(
+                    target: "sync::stages::merkle::exec",
+                    current = ?current_block_number,
+                    target = ?to_block,
+                    incremental_threshold,
+                    chunk_range = ?chunk_range,
+                    "Processing chunk"
+                );
+                let (root, updates) =
+                StateRoot::incremental_root_with_updates(provider, chunk_range)
+                    .map_err(|e| {
+                        error!(target: "sync::stages::merkle", %e, ?current_block_number, ?to_block, "Incremental state root failed! {INVALID_STATE_ROOT_ERROR_MESSAGE}");
+                        StageError::Fatal(Box::new(e))
+                    })?;
+                provider.write_trie_updates(updates)?;
+                final_root = Some(root);
+            }
+
+            // if we had no final root, we must have not looped above, which should not be possible
+            let final_root = final_root.ok_or(StageError::Fatal(
+                "Incremental merkle hashing did not produce a final root".into(),
+            ))?;
+
+>>>>>>> v1.11.3
             let total_hashed_entries = (provider.count_entries::<tables::HashedAccounts>()? +
                 provider.count_entries::<tables::HashedStorages>()?)
                 as u64;
@@ -320,7 +432,11 @@ where
                 total: total_hashed_entries,
             };
             // Save the checkpoint
+<<<<<<< HEAD
             (final_root.unwrap(), entities_checkpoint)
+=======
+            (final_root, entities_checkpoint)
+>>>>>>> v1.11.3
         };
 
         // Reset the checkpoint
@@ -371,10 +487,15 @@ where
         if range.is_empty() {
             info!(target: "sync::stages::merkle::unwind", "Nothing to unwind");
         } else {
+<<<<<<< HEAD
             // Use optimized nested hash algorithm for state root calculation
             let nested_state_root = NestedStateRoot::new(provider.tx_ref(), None);
             let hashed_state = nested_state_root.read_hashed_state(Some(range))?;
             let (block_root, trie_updates_v2) = nested_state_root.calculate(&hashed_state)?;
+=======
+            let (block_root, updates) = StateRoot::incremental_root_with_updates(provider, range)
+                .map_err(|e| StageError::Fatal(Box::new(e)))?;
+>>>>>>> v1.11.3
 
             // Validate the calculated state root
             let target = provider
@@ -384,7 +505,11 @@ where
             validate_state_root(block_root, SealedHeader::seal_slow(target), input.unwind_to)?;
 
             // Validation passed, apply unwind changes to the database.
+<<<<<<< HEAD
             provider.write_trie_updatesv2(&trie_updates_v2)?;
+=======
+            provider.write_trie_updates(updates)?;
+>>>>>>> v1.11.3
 
             // Update entities checkpoint to reflect the unwind operation
             // Since we're unwinding, we need to recalculate the total entities at the target block
@@ -483,8 +608,8 @@ mod tests {
                 done: true
             }) if block_number == previous_stage && processed == total &&
                 total == (
-                    runner.db.table::<tables::HashedAccounts>().unwrap().len() +
-                    runner.db.table::<tables::HashedStorages>().unwrap().len()
+                    runner.db.count_entries::<tables::HashedAccounts>().unwrap() +
+                    runner.db.count_entries::<tables::HashedStorages>().unwrap()
                 ) as u64
         );
 
@@ -524,8 +649,8 @@ mod tests {
                 done: true
             }) if block_number == previous_stage && processed == total &&
                 total == (
-                    runner.db.table::<tables::HashedAccounts>().unwrap().len() +
-                    runner.db.table::<tables::HashedStorages>().unwrap().len()
+                    runner.db.count_entries::<tables::HashedAccounts>().unwrap() +
+                    runner.db.count_entries::<tables::HashedStorages>().unwrap()
                 ) as u64
         );
 
@@ -534,7 +659,10 @@ mod tests {
     }
 
     #[tokio::test]
+<<<<<<< HEAD
     #[ignore = "todo fix"]
+=======
+>>>>>>> v1.11.3
     async fn execute_chunked_merkle() {
         let (previous_stage, stage_progress) = (200, 100);
         let clean_threshold = 100;
@@ -567,8 +695,13 @@ mod tests {
                 done: true
             }) if block_number == previous_stage && processed == total &&
                 total == (
+<<<<<<< HEAD
                     runner.db.table::<tables::HashedAccounts>().unwrap().len() +
                     runner.db.table::<tables::HashedStorages>().unwrap().len()
+=======
+                    runner.db.count_entries::<tables::HashedAccounts>().unwrap() +
+                    runner.db.count_entries::<tables::HashedStorages>().unwrap()
+>>>>>>> v1.11.3
                 ) as u64
         );
 
@@ -579,9 +712,15 @@ mod tests {
 
         let actual_root = runner
             .db
+<<<<<<< HEAD
             .query(|tx| {
                 Ok(StateRoot::incremental_root_with_updates(
                     tx,
+=======
+            .query_with_provider(|provider| {
+                Ok(StateRoot::incremental_root_with_updates(
+                    &provider,
+>>>>>>> v1.11.3
                     stage_progress + 1..=previous_stage,
                 ))
             })
@@ -730,7 +869,7 @@ mod tests {
             let hash = last_header.hash_slow();
             writer.prune_headers(1).unwrap();
             writer.commit().unwrap();
-            writer.append_header(&last_header, U256::ZERO, &hash).unwrap();
+            writer.append_header(&last_header, &hash).unwrap();
             writer.commit().unwrap();
 
             Ok(blocks)

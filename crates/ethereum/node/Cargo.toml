@@ -24,7 +24,11 @@ reth-provider.workspace = true
 reth-transaction-pool.workspace = true
 reth-network.workspace = true
 reth-evm.workspace = true
+<<<<<<< HEAD
 reth-evm-ethereum.workspace = true
+=======
+reth-evm-ethereum = { workspace = true, features = ["std"] }
+>>>>>>> v1.11.3
 reth-rpc.workspace = true
 reth-rpc-api.workspace = true
 reth-rpc-eth-api.workspace = true
@@ -35,7 +39,11 @@ reth-chainspec.workspace = true
 reth-revm = { workspace = true, features = ["std"] }
 reth-rpc-eth-types.workspace = true
 reth-engine-local.workspace = true
+<<<<<<< HEAD
 reth-engine-primitives.workspace = true
+=======
+reth-engine-primitives = { workspace = true, features = ["std"] }
+>>>>>>> v1.11.3
 reth-payload-primitives.workspace = true
 
 # ethereum
@@ -49,7 +57,11 @@ tokio.workspace = true
 
 # revm with required ethereum features
 # Note: this must be kept to ensure all features are properly enabled/forwarded
+<<<<<<< HEAD
 revm = { workspace = true, features = ["secp256k1", "blst", "c-kzg"] }
+=======
+revm = { workspace = true, features = ["secp256k1", "blst", "c-kzg", "memory_limit"] }
+>>>>>>> v1.11.3
 
 # misc
 eyre.workspace = true
@@ -60,6 +72,13 @@ reth-exex.workspace = true
 reth-node-core.workspace = true
 reth-e2e-test-utils.workspace = true
 reth-tasks.workspace = true
+<<<<<<< HEAD
+=======
+reth-testing-utils.workspace = true
+reth-stages-types.workspace = true
+tempfile.workspace = true
+jsonrpsee-core.workspace = true
+>>>>>>> v1.11.3
 
 alloy-primitives.workspace = true
 alloy-provider.workspace = true
@@ -74,6 +93,12 @@ futures.workspace = true
 tokio.workspace = true
 serde_json.workspace = true
 rand.workspace = true
+<<<<<<< HEAD
+=======
+serde.workspace = true
+alloy-rpc-types-trace.workspace = true
+similar-asserts.workspace = true
+>>>>>>> v1.11.3
 
 [features]
 default = []
@@ -82,7 +107,20 @@ asm-keccak = [
     "reth-node-core/asm-keccak",
     "revm/asm-keccak",
 ]
+<<<<<<< HEAD
 js-tracer = ["reth-node-builder/js-tracer"]
+=======
+keccak-cache-global = [
+    "alloy-primitives/keccak-cache-global",
+    "reth-node-core/keccak-cache-global",
+]
+js-tracer = [
+    "reth-node-builder/js-tracer",
+    "reth-rpc/js-tracer",
+    "reth-rpc-eth-api/js-tracer",
+    "reth-rpc-eth-types/js-tracer",
+]
+>>>>>>> v1.11.3
 test-utils = [
     "reth-node-builder/test-utils",
     "reth-chainspec/test-utils",
@@ -95,5 +133,11 @@ test-utils = [
     "reth-evm/test-utils",
     "reth-primitives-traits/test-utils",
     "reth-evm-ethereum/test-utils",
+<<<<<<< HEAD
 ]
 failpoints = ["reth-node-builder/failpoints"]
+=======
+    "reth-stages-types/test-utils",
+    "reth-tasks/test-utils",
+]
+>>>>>>> v1.11.3

@@ -10,14 +10,22 @@ use reth_evm::{
     ConfigureEvm,
 };
 use reth_evm_ethereum::EthEvmConfig;
+<<<<<<< HEAD
 use reth_node_api::FullNodePrimitives;
 use reth_primitives_traits::{Block as _, RecoveredBlock};
 use reth_provider::{
     providers::ProviderNodeTypes, BlockWriter as _, ExecutionOutcome, LatestStateProviderRef,
+=======
+use reth_node_api::NodePrimitives;
+use reth_primitives_traits::{Block as _, RecoveredBlock};
+use reth_provider::{
+    providers::ProviderNodeTypes, BlockWriter as _, ExecutionOutcome, LatestStateProvider,
+>>>>>>> v1.11.3
     ProviderFactory,
 };
 use reth_revm::database::StateProviderDatabase;
 use reth_testing_utils::generators::sign_tx_with_key_pair;
+use reth_trie_common::KeccakKeyHasher;
 use secp256k1::Keypair;
 
 pub(crate) fn to_execution_outcome(
@@ -58,7 +66,11 @@ pub(crate) fn execute_block_and_commit_to_database<N>(
 ) -> eyre::Result<BlockExecutionOutput<Receipt>>
 where
     N: ProviderNodeTypes<
+<<<<<<< HEAD
         Primitives: FullNodePrimitives<
+=======
+        Primitives: NodePrimitives<
+>>>>>>> v1.11.3
             Block = reth_ethereum_primitives::Block,
             BlockBody = reth_ethereum_primitives::BlockBody,
             Receipt = reth_ethereum_primitives::Receipt,
@@ -69,7 +81,11 @@ where
 
     // Execute the block to produce a block execution output
     let mut block_execution_output = EthEvmConfig::ethereum(chain_spec)
+<<<<<<< HEAD
         .batch_executor(StateProviderDatabase::new(LatestStateProviderRef::new(&provider)))
+=======
+        .batch_executor(StateProviderDatabase::new(LatestStateProvider::new(provider)))
+>>>>>>> v1.11.3
         .execute(block)?;
     block_execution_output.state.reverts.sort();
 
@@ -77,12 +93,17 @@ where
     let execution_outcome = to_execution_outcome(block.number(), &block_execution_output);
 
     // Commit the block's execution outcome to the database
+    let hashed_state = execution_outcome.hash_state_slow::<KeccakKeyHasher>().into_sorted();
     let provider_rw = provider_factory.provider_rw()?;
+<<<<<<< HEAD
     provider_rw.append_blocks_with_state(
         vec![block.clone()],
         &execution_outcome,
         Default::default(),
     )?;
+=======
+    provider_rw.append_blocks_with_state(vec![block.clone()], &execution_outcome, hashed_state)?;
+>>>>>>> v1.11.3
     provider_rw.commit()?;
 
     Ok(block_execution_output)
@@ -169,7 +190,11 @@ pub(crate) fn blocks_and_execution_outputs<N>(
 >
 where
     N: ProviderNodeTypes<
+<<<<<<< HEAD
         Primitives: FullNodePrimitives<
+=======
+        Primitives: NodePrimitives<
+>>>>>>> v1.11.3
             Block = reth_ethereum_primitives::Block,
             BlockBody = reth_ethereum_primitives::BlockBody,
             Receipt = reth_ethereum_primitives::Receipt,
@@ -193,7 +218,11 @@ pub(crate) fn blocks_and_execution_outcome<N>(
 ) -> eyre::Result<(Vec<RecoveredBlock<reth_ethereum_primitives::Block>>, ExecutionOutcome)>
 where
     N: ProviderNodeTypes,
+<<<<<<< HEAD
     N::Primitives: FullNodePrimitives<
+=======
+    N::Primitives: NodePrimitives<
+>>>>>>> v1.11.3
         Block = reth_ethereum_primitives::Block,
         Receipt = reth_ethereum_primitives::Receipt,
     >,
@@ -203,18 +232,28 @@ where
     let provider = provider_factory.provider()?;
 
     let evm_config = EthEvmConfig::new(chain_spec);
+<<<<<<< HEAD
     let executor = evm_config
         .batch_executor(StateProviderDatabase::new(LatestStateProviderRef::new(&provider)));
+=======
+    let executor =
+        evm_config.batch_executor(StateProviderDatabase::new(LatestStateProvider::new(provider)));
+>>>>>>> v1.11.3
 
     let mut execution_outcome = executor.execute_batch(vec![&block1, &block2])?;
     execution_outcome.state_mut().reverts.sort();
 
     // Commit the block's execution outcome to the database
+    let hashed_state = execution_outcome.hash_state_slow::<KeccakKeyHasher>().into_sorted();
     let provider_rw = provider_factory.provider_rw()?;
     provider_rw.append_blocks_with_state(
         vec![block1.clone(), block2.clone()],
         &execution_outcome,
+<<<<<<< HEAD
         Default::default(),
+=======
+        hashed_state,
+>>>>>>> v1.11.3
     )?;
     provider_rw.commit()?;
 

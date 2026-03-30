@@ -2,6 +2,7 @@
 //! loads receipt data w.r.t. network.
 
 use crate::{EthApiTypes, RpcNodeCoreExt, RpcReceipt};
+<<<<<<< HEAD
 use alloy_consensus::{
     transaction::{Recovered, TransactionMeta},
     TxReceipt,
@@ -30,11 +31,22 @@ pub fn calculate_gas_used_and_next_log_index(
 
     (gas_used, next_log_index)
 }
+=======
+use alloy_consensus::{transaction::TransactionMeta, TxReceipt};
+use futures::Future;
+use reth_primitives_traits::SignerRecoverable;
+use reth_rpc_convert::{transaction::ConvertReceiptInput, RpcConvert};
+use reth_rpc_eth_types::{
+    error::FromEthApiError, utils::calculate_gas_used_and_next_log_index, EthApiError,
+};
+use reth_storage_api::{ProviderReceipt, ProviderTx};
+>>>>>>> v1.11.3
 
 /// Assembles transaction receipt data w.r.t to network.
 ///
 /// Behaviour shared by several `eth_` RPC methods, not exclusive to `eth_` receipts RPC methods.
 pub trait LoadReceipt:
+<<<<<<< HEAD
     EthApiTypes<
         RpcConvert: RpcConvert<
             Primitives = Self::Primitives,
@@ -45,6 +57,9 @@ pub trait LoadReceipt:
     > + RpcNodeCoreExt
     + Send
     + Sync
+=======
+    EthApiTypes<RpcConvert: RpcConvert<Primitives = Self::Primitives>> + RpcNodeCoreExt + Send + Sync
+>>>>>>> v1.11.3
 {
     /// Helper method for `eth_getBlockReceipts` and `eth_getTransactionReceipt`.
     fn build_transaction_receipt(
@@ -67,11 +82,20 @@ pub trait LoadReceipt:
                 calculate_gas_used_and_next_log_index(meta.index, &all_receipts);
 
             Ok(self
+<<<<<<< HEAD
                 .tx_resp_builder()
                 .convert_receipts(vec![ConvertReceiptInput {
                     tx: tx
                         .try_to_recovered_ref_unchecked()
                         .unwrap_or_else(|_| Recovered::new_unchecked(&tx, Address::ZERO)),
+=======
+                .converter()
+                .convert_receipts(vec![ConvertReceiptInput {
+                    tx: tx
+                        .try_into_recovered_unchecked()
+                        .map_err(Self::Error::from_eth_err)?
+                        .as_recovered_ref(),
+>>>>>>> v1.11.3
                     gas_used: receipt.cumulative_gas_used() - gas_used,
                     receipt,
                     next_log_index,

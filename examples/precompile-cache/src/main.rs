@@ -16,7 +16,7 @@ use reth_ethereum::{
     evm::{
         primitives::{Database, EvmEnv},
         revm::{
-            context::{Context, TxEnv},
+            context::{BlockEnv, Context, TxEnv},
             context_interface::result::{EVMError, HaltReason},
             inspector::{Inspector, NoOpInspector},
             interpreter::interpreter::EthInterpreter,
@@ -33,7 +33,7 @@ use reth_ethereum::{
         node::EthereumAddOns,
         EthEvmConfig, EthereumNode,
     },
-    tasks::TaskManager,
+    tasks::Runtime,
     EthPrimitives,
 };
 use reth_tracing::{RethTracer, Tracer};
@@ -69,6 +69,7 @@ impl EvmFactory for MyEvmFactory {
     type HaltReason = HaltReason;
     type Context<DB: Database> = EthEvmContext<DB>;
     type Spec = SpecId;
+    type BlockEnv = BlockEnv;
     type Precompiles = PrecompilesMap;
 
     fn create_evm<DB: Database>(&self, db: DB, input: EvmEnv) -> Self::Evm<DB, NoOpInspector> {
@@ -176,7 +177,7 @@ where
     async fn build_evm(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::EVM> {
         let evm_config = EthEvmConfig::new_with_evm_factory(
             ctx.chain_spec(),
-            MyEvmFactory { precompile_cache: self.precompile_cache.clone() },
+            MyEvmFactory { precompile_cache: self.precompile_cache },
         );
         Ok(evm_config)
     }
@@ -186,7 +187,7 @@ where
 async fn main() -> eyre::Result<()> {
     let _guard = RethTracer::new().init()?;
 
-    let tasks = TaskManager::current();
+    let runtime = Runtime::with_existing_handle(tokio::runtime::Handle::current())?;
 
     // create a custom chain spec
     let spec = ChainSpec::builder()
@@ -202,7 +203,7 @@ async fn main() -> eyre::Result<()> {
         NodeConfig::test().with_rpc(RpcServerArgs::default().with_http()).with_chain(spec);
 
     let handle = NodeBuilder::new(node_config)
-        .testing_node(tasks.executor())
+        .testing_node(runtime)
         // configure the node with regular ethereum types
         .with_types::<EthereumNode>()
         // use default ethereum components but with our executor

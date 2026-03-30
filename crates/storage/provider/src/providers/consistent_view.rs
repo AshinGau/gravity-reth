@@ -83,6 +83,7 @@ mod tests {
     use std::str::FromStr;
 
     use super::*;
+<<<<<<< HEAD
     use crate::{
         test_utils::create_test_provider_factory_with_chain_spec, BlockWriter,
         StaticFileProviderFactory, StaticFileWriter,
@@ -102,12 +103,33 @@ mod tests {
         let genesis_header = MAINNET.genesis_header();
         let genesis_block =
             SealedBlock::<Block>::seal_parts(genesis_header.clone(), BlockBody::default());
+=======
+    use crate::{test_utils::create_test_provider_factory, BlockWriter};
+    use alloy_primitives::Bytes;
+    use assert_matches::assert_matches;
+    use reth_chainspec::{ChainSpecProvider, EthChainSpec};
+    use reth_ethereum_primitives::{Block, BlockBody};
+    use reth_primitives_traits::{block::TestBlock, RecoveredBlock, SealedBlock};
+
+    #[test]
+    fn test_consistent_view_extend() {
+        let provider_factory = create_test_provider_factory();
+
+        let genesis_block = SealedBlock::<Block>::seal_parts(
+            provider_factory.chain_spec().genesis_header().clone(),
+            BlockBody::default(),
+        );
+>>>>>>> v1.11.3
         let genesis_hash: B256 = genesis_block.hash();
         let genesis_block = RecoveredBlock::new_sealed(genesis_block, vec![]);
 
         // insert the block
         let provider_rw = provider_factory.provider_rw().unwrap();
+<<<<<<< HEAD
         provider_rw.insert_block(genesis_block, StorageLocation::StaticFiles).unwrap();
+=======
+        provider_rw.insert_block(&genesis_block).unwrap();
+>>>>>>> v1.11.3
         provider_rw.commit().unwrap();
 
         // create a consistent view provider and check that a ro provider can be made
@@ -125,7 +147,11 @@ mod tests {
 
         // insert the block
         let provider_rw = provider_factory.provider_rw().unwrap();
+<<<<<<< HEAD
         provider_rw.insert_block(recovered_block, StorageLocation::StaticFiles).unwrap();
+=======
+        provider_rw.insert_block(&recovered_block).unwrap();
+>>>>>>> v1.11.3
         provider_rw.commit().unwrap();
 
         // ensure successful creation of a read-only provider, based on this new db state.
@@ -140,7 +166,11 @@ mod tests {
 
         // insert the block
         let provider_rw = provider_factory.provider_rw().unwrap();
+<<<<<<< HEAD
         provider_rw.insert_block(recovered_block, StorageLocation::StaticFiles).unwrap();
+=======
+        provider_rw.insert_block(&recovered_block).unwrap();
+>>>>>>> v1.11.3
         provider_rw.commit().unwrap();
 
         // check that creation of a read-only provider still works
@@ -149,18 +179,31 @@ mod tests {
 
     #[test]
     fn test_consistent_view_remove() {
+<<<<<<< HEAD
         let provider_factory = create_test_provider_factory_with_chain_spec(MAINNET.clone());
 
         let genesis_header = MAINNET.genesis_header();
         let genesis_block =
             SealedBlock::<Block>::seal_parts(genesis_header.clone(), BlockBody::default());
+=======
+        let provider_factory = create_test_provider_factory();
+
+        let genesis_block = SealedBlock::<Block>::seal_parts(
+            provider_factory.chain_spec().genesis_header().clone(),
+            BlockBody::default(),
+        );
+>>>>>>> v1.11.3
         let genesis_hash: B256 = genesis_block.hash();
         let genesis_block = RecoveredBlock::new_sealed(genesis_block, vec![]);
 
         // insert the block
         let provider_rw = provider_factory.provider_rw().unwrap();
+<<<<<<< HEAD
         provider_rw.insert_block(genesis_block, StorageLocation::Both).unwrap();
         provider_rw.0.static_file_provider().commit().unwrap();
+=======
+        provider_rw.insert_block(&genesis_block).unwrap();
+>>>>>>> v1.11.3
         provider_rw.commit().unwrap();
 
         // create a consistent view provider and check that a ro provider can be made
@@ -178,8 +221,12 @@ mod tests {
 
         // insert the block
         let provider_rw = provider_factory.provider_rw().unwrap();
+<<<<<<< HEAD
         provider_rw.insert_block(recovered_block, StorageLocation::Both).unwrap();
         provider_rw.0.static_file_provider().commit().unwrap();
+=======
+        provider_rw.insert_block(&recovered_block).unwrap();
+>>>>>>> v1.11.3
         provider_rw.commit().unwrap();
 
         // create a second consistent view provider and check that a ro provider can be made
@@ -191,10 +238,14 @@ mod tests {
 
         // remove the block above the genesis block
         let provider_rw = provider_factory.provider_rw().unwrap();
+<<<<<<< HEAD
         provider_rw.remove_blocks_above(0, StorageLocation::Both).unwrap();
         let sf_provider = provider_rw.0.static_file_provider();
         sf_provider.get_writer(1, StaticFileSegment::Headers).unwrap().prune_headers(1).unwrap();
         sf_provider.commit().unwrap();
+=======
+        provider_rw.remove_blocks_above(0).unwrap();
+>>>>>>> v1.11.3
         provider_rw.commit().unwrap();
 
         // ensure unsuccessful creation of a read-only provider, based on this new db state.
@@ -216,8 +267,12 @@ mod tests {
 
         // reinsert the block at the same height, but with a different hash
         let provider_rw = provider_factory.provider_rw().unwrap();
+<<<<<<< HEAD
         provider_rw.insert_block(recovered_block, StorageLocation::Both).unwrap();
         provider_rw.0.static_file_provider().commit().unwrap();
+=======
+        provider_rw.insert_block(&recovered_block).unwrap();
+>>>>>>> v1.11.3
         provider_rw.commit().unwrap();
 
         // ensure unsuccessful creation of a read-only provider, based on this new db state.

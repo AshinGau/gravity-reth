@@ -83,6 +83,7 @@ proptest! {
         let provider = factory.provider_rw().unwrap();
 
         // Insert init state into database
+<<<<<<< HEAD
         {
             let mut hashed_storage_cursor =
                 provider.tx_ref().cursor_write::<tables::HashedStorages>().unwrap();
@@ -91,6 +92,12 @@ proptest! {
                     .upsert(hashed_address, &StorageEntry { key: hashed_slot, value })
                     .unwrap();
             }
+=======
+        for (hashed_slot, value) in init_storage.clone() {
+            hashed_storage_cursor
+                .upsert(hashed_address, &StorageEntry { key: hashed_slot, value })
+                .unwrap();
+>>>>>>> v1.11.3
         }
         provider.tx_ref().commit_view().unwrap();
 

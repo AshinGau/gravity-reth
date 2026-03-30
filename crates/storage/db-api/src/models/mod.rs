@@ -9,24 +9,39 @@ use alloy_genesis::GenesisAccount;
 use alloy_primitives::{Address, Bytes, Log, B256, U256};
 use reth_codecs::{add_arbitrary_tests, Compact};
 use reth_ethereum_primitives::{Receipt, TransactionSigned, TxType};
+<<<<<<< HEAD
 use reth_primitives_traits::{Account, Bytecode, StorageEntry, SubkeyContainedValue};
 use reth_prune_types::{PruneCheckpoint, PruneSegment};
 use reth_stages_types::StageCheckpoint;
 use reth_trie_common::{nested_trie::StorageNodeEntry, StoredNibbles, StoredNibblesSubKey, *};
+=======
+use reth_primitives_traits::{Account, Bytecode, StorageEntry};
+use reth_prune_types::{PruneCheckpoint, PruneSegment};
+use reth_stages_types::StageCheckpoint;
+use reth_trie_common::{StorageTrieEntry, StoredNibbles, StoredNibblesSubKey, *};
+>>>>>>> v1.11.3
 use serde::{Deserialize, Serialize};
 
 pub mod accounts;
 pub mod blocks;
 pub mod integer_list;
+pub mod metadata;
 pub mod sharded_key;
 pub mod storage_sharded_key;
 
 pub use accounts::*;
 pub use blocks::*;
 pub use integer_list::IntegerList;
+<<<<<<< HEAD
 pub use reth_db_models::{
     AccountBeforeTx, ClientVersion, StaticFileBlockWithdrawals, StoredBlockBodyIndices,
     StoredBlockWithdrawals,
+=======
+pub use metadata::*;
+pub use reth_db_models::{
+    AccountBeforeTx, ClientVersion, StaticFileBlockWithdrawals, StorageBeforeTx,
+    StoredBlockBodyIndices, StoredBlockWithdrawals,
+>>>>>>> v1.11.3
 };
 pub use sharded_key::ShardedKey;
 
@@ -122,13 +137,16 @@ impl Decode for String {
 }
 
 impl Encode for StoredNibbles {
-    type Encoded = Vec<u8>;
+    type Encoded = arrayvec::ArrayVec<u8, 64>;
 
-    // Delegate to the Compact implementation
     fn encode(self) -> Self::Encoded {
+<<<<<<< HEAD
         // NOTE: This used to be `to_compact`, but all it does is append the bytes to the buffer,
         // so we can just use the implementation of `Into<Vec<u8>>` to reuse the buffer.
         self.0.to_vec()
+=======
+        self.0.iter().collect()
+>>>>>>> v1.11.3
     }
 }
 
@@ -203,6 +221,7 @@ macro_rules! impl_compression_for_compact {
             impl$(<$($generic: core::fmt::Debug + Send + Sync + Compact),*>)? Decompress for $name$(<$($generic),*>)? {
                 fn decompress(value: &[u8]) -> Result<$name$(<$($generic),*>)?, $crate::DatabaseError> {
                     let (obj, _) = Compact::from_compact(value, value.len());
+<<<<<<< HEAD
                     Ok(obj)
                 }
             }
@@ -229,6 +248,8 @@ macro_rules! impl_compression_for_value_with_subkey {
             impl$(<$($generic: core::fmt::Debug + Send + Sync + Compact),*>)? Decompress for $name$(<$($generic),*>)? {
                 fn decompress(value: &[u8]) -> Result<$name$(<$($generic),*>)?, $crate::DatabaseError> {
                     let (obj, _) = Compact::from_compact(value, value.len());
+=======
+>>>>>>> v1.11.3
                     Ok(obj)
                 }
             }
@@ -251,6 +272,11 @@ impl_compression_for_compact!(
     StoredBlockWithdrawals,
     StaticFileBlockWithdrawals,
     Bytecode,
+<<<<<<< HEAD
+=======
+    AccountBeforeTx,
+    StorageBeforeTx,
+>>>>>>> v1.11.3
     TransactionSigned,
     CompactU256,
     StageCheckpoint,
@@ -260,6 +286,7 @@ impl_compression_for_compact!(
     GenesisAccount
 );
 
+<<<<<<< HEAD
 impl_compression_for_value_with_subkey!(
     StorageEntry,
     AccountBeforeTx,
@@ -273,6 +300,14 @@ mod op {
     use reth_optimism_primitives::{OpReceipt, OpTransactionSigned};
 
     impl_compression_for_compact!(OpTransactionSigned, OpReceipt);
+=======
+#[cfg(feature = "op")]
+mod op {
+    use super::*;
+    use op_alloy_consensus::{OpReceipt, OpTxEnvelope};
+
+    impl_compression_for_compact!(OpTxEnvelope, OpReceipt);
+>>>>>>> v1.11.3
 }
 
 macro_rules! impl_compression_fixed_compact {
@@ -286,7 +321,11 @@ macro_rules! impl_compression_fixed_compact {
                 }
 
                 fn compress_to_buf<B: bytes::BufMut + AsMut<[u8]>>(&self, buf: &mut B) {
+<<<<<<< HEAD
                     let _  = Compact::to_compact(self, buf);
+=======
+                    let _ = Compact::to_compact(self, buf);
+>>>>>>> v1.11.3
                 }
             }
 

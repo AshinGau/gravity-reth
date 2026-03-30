@@ -83,7 +83,15 @@ fn incremental_vs_full_root(inputs: &[&str], modified: &str) {
     let modified_root = loader.root().unwrap();
 
     // Update the intermediate roots table so that we can run the incremental verification
+<<<<<<< HEAD
     tx.write_storage_trie_updates(core::iter::once((&hashed_address, &trie_updates))).unwrap();
+=======
+    tx.write_storage_trie_updates_sorted(core::iter::once((
+        &hashed_address,
+        &trie_updates.into_sorted(),
+    )))
+    .unwrap();
+>>>>>>> v1.11.3
 
     // 3. Calculate the incremental root
     let mut storage_changes = PrefixSetMut::default();
@@ -622,7 +630,7 @@ fn account_trie_around_extension_node_with_dbtrie() {
 
     let (got, updates) = StateRoot::from_tx(tx.tx_ref()).root_with_updates().unwrap();
     assert_eq!(expected, got);
-    tx.write_trie_updates(&updates).unwrap();
+    tx.write_trie_updates(updates).unwrap();
 
     // read the account updates from the db
     let mut accounts_trie = tx.tx_ref().cursor_read::<tables::AccountsTrie>().unwrap();
@@ -669,7 +677,7 @@ proptest! {
                 state.iter().map(|(&key, &balance)| (key, (Account { balance, ..Default::default() }, std::iter::empty())))
             );
             assert_eq!(expected_root, state_root);
-            tx.write_trie_updates(&trie_updates).unwrap();
+            tx.write_trie_updates(trie_updates).unwrap();
         }
     }
 }

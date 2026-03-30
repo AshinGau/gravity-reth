@@ -6,7 +6,11 @@ use crate::{
 };
 use alloy_consensus::Transaction;
 use alloy_eips::Typed2718;
+<<<<<<< HEAD
 use alloy_primitives::Address;
+=======
+use alloy_primitives::map::AddressSet;
+>>>>>>> v1.11.3
 use core::fmt;
 use reth_primitives_traits::transaction::error::InvalidTransactionError;
 use std::{
@@ -16,13 +20,19 @@ use std::{
 use tokio::sync::broadcast::{error::TryRecvError, Receiver};
 use tracing::debug;
 
+<<<<<<< HEAD
 const MAX_NEW_TRANSACTIONS_PER_BATCH: usize = 1024;
+=======
+const MAX_NEW_TRANSACTIONS_PER_BATCH: usize = 16;
+
+>>>>>>> v1.11.3
 /// An iterator that returns transactions that can be executed on the current state (*best*
 /// transactions).
 ///
 /// This is a wrapper around [`BestTransactions`] that also enforces a specific basefee.
 ///
-/// This iterator guarantees that all transaction it returns satisfy both the base fee and blob fee!
+/// This iterator guarantees that all transactions it returns satisfy both the base fee and blob
+/// fee!
 pub(crate) struct BestTransactionsWithFees<T: TransactionOrdering> {
     pub(crate) best: BestTransactions<T>,
     pub(crate) base_fee: u64,
@@ -30,7 +40,11 @@ pub(crate) struct BestTransactionsWithFees<T: TransactionOrdering> {
 }
 
 impl<T: TransactionOrdering> crate::traits::BestTransactions for BestTransactionsWithFees<T> {
+<<<<<<< HEAD
     fn mark_invalid(&mut self, tx: &Self::Item, kind: InvalidPoolTransactionError) {
+=======
+    fn mark_invalid(&mut self, tx: &Self::Item, kind: &InvalidPoolTransactionError) {
+>>>>>>> v1.11.3
         BestTransactions::mark_invalid(&mut self.best, tx, kind)
     }
 
@@ -66,7 +80,11 @@ impl<T: TransactionOrdering> Iterator for BestTransactionsWithFees<T> {
             crate::traits::BestTransactions::mark_invalid(
                 self,
                 &best,
+<<<<<<< HEAD
                 InvalidPoolTransactionError::Underpriced,
+=======
+                &InvalidPoolTransactionError::Underpriced,
+>>>>>>> v1.11.3
             );
         }
     }
@@ -99,18 +117,30 @@ pub struct BestTransactions<T: TransactionOrdering> {
     pub(crate) new_transaction_receiver: Option<Receiver<PendingTransaction<T>>>,
     /// The priority value of most recently yielded transaction.
     ///
+<<<<<<< HEAD
     /// This is required if we new pending transactions are fed in while it yields new values.
+=======
+    /// This is required if new pending transactions are fed in while it yields new values.
+>>>>>>> v1.11.3
     pub(crate) last_priority: Option<Priority<T::PriorityValue>>,
     /// Flag to control whether to skip blob transactions (EIP4844).
     pub(crate) skip_blobs: bool,
 }
 
 impl<T: TransactionOrdering> BestTransactions<T> {
+<<<<<<< HEAD
     /// Mark the transaction and it's descendants as invalid.
     pub(crate) fn mark_invalid(
         &mut self,
         tx: &Arc<ValidPoolTransaction<T::Transaction>>,
         _kind: InvalidPoolTransactionError,
+=======
+    /// Mark the transaction and its descendants as invalid.
+    pub(crate) fn mark_invalid(
+        &mut self,
+        tx: &Arc<ValidPoolTransaction<T::Transaction>>,
+        _kind: &InvalidPoolTransactionError,
+>>>>>>> v1.11.3
     ) {
         self.invalid.insert(tx.sender_id());
     }
@@ -118,7 +148,7 @@ impl<T: TransactionOrdering> BestTransactions<T> {
     /// Returns the ancestor the given transaction, the transaction with `nonce - 1`.
     ///
     /// Note: for a transaction with nonce higher than the current on chain nonce this will always
-    /// return an ancestor since all transaction in this pool are gapless.
+    /// return an ancestor since all transactions in this pool are gapless.
     pub(crate) fn ancestor(&self, id: &TransactionId) -> Option<&PendingTransaction<T>> {
         self.all.get(&id.unchecked_ancestor()?)
     }
@@ -184,6 +214,53 @@ impl<T: TransactionOrdering> BestTransactions<T> {
                 }
             } else {
                 break;
+<<<<<<< HEAD
+=======
+            }
+        }
+    }
+
+    /// Returns the next best transaction and its priority value.
+    #[allow(clippy::type_complexity)]
+    pub fn next_tx_and_priority(
+        &mut self,
+    ) -> Option<(Arc<ValidPoolTransaction<T::Transaction>>, Priority<T::PriorityValue>)> {
+        loop {
+            self.add_new_transactions();
+            // Remove the next independent tx with the highest priority
+            let best = self.pop_best()?;
+            let sender_id = best.transaction.sender_id();
+
+            // skip transactions for which sender was marked as invalid
+            if self.invalid.contains(&sender_id) {
+                debug!(
+                    target: "txpool",
+                    "[{:?}] skipping invalid transaction",
+                    best.transaction.hash()
+                );
+                continue
+            }
+
+            // Insert transactions that just got unlocked.
+            if let Some(unlocked) = self.all.get(&best.unlocks()) {
+                self.independent.insert(unlocked.clone());
+            }
+
+            if self.skip_blobs && best.transaction.transaction.is_eip4844() {
+                // blobs should be skipped, marking them as invalid will ensure that no dependent
+                // transactions are returned
+                self.mark_invalid(
+                    &best.transaction,
+                    &InvalidPoolTransactionError::Eip4844(
+                        Eip4844PoolTransactionError::NoEip4844Blobs,
+                    ),
+                )
+            } else {
+                if self.new_transaction_receiver.is_some() {
+                    self.last_priority = Some(best.priority.clone())
+                }
+                return Some((best.transaction, best.priority))
+>>>>>>> v1.11.3
             }
         }
     }
@@ -217,7 +294,11 @@ enum IncomingTransaction<T: TransactionOrdering> {
 }
 
 impl<T: TransactionOrdering> crate::traits::BestTransactions for BestTransactions<T> {
+<<<<<<< HEAD
     fn mark_invalid(&mut self, tx: &Self::Item, kind: InvalidPoolTransactionError) {
+=======
+    fn mark_invalid(&mut self, tx: &Self::Item, kind: &InvalidPoolTransactionError) {
+>>>>>>> v1.11.3
         Self::mark_invalid(self, tx, kind)
     }
 
@@ -239,6 +320,7 @@ impl<T: TransactionOrdering> Iterator for BestTransactions<T> {
     type Item = Arc<ValidPoolTransaction<T::Transaction>>;
 
     fn next(&mut self) -> Option<Self::Item> {
+<<<<<<< HEAD
         loop {
             self.add_new_transactions();
             // Remove the next independent tx with the highest priority
@@ -276,6 +358,9 @@ impl<T: TransactionOrdering> Iterator for BestTransactions<T> {
                 return Some(best.transaction)
             }
         }
+=======
+        self.next_tx_and_priority().map(|(tx, _)| tx)
+>>>>>>> v1.11.3
     }
 }
 
@@ -311,7 +396,13 @@ where
             }
             self.best.mark_invalid(
                 &best,
+<<<<<<< HEAD
                 InvalidPoolTransactionError::Consensus(InvalidTransactionError::TxTypeNotSupported),
+=======
+                &InvalidPoolTransactionError::Consensus(
+                    InvalidTransactionError::TxTypeNotSupported,
+                ),
+>>>>>>> v1.11.3
             );
         }
     }
@@ -322,7 +413,11 @@ where
     I: crate::traits::BestTransactions,
     P: FnMut(&<I as Iterator>::Item) -> bool + Send,
 {
+<<<<<<< HEAD
     fn mark_invalid(&mut self, tx: &Self::Item, kind: InvalidPoolTransactionError) {
+=======
+    fn mark_invalid(&mut self, tx: &Self::Item, kind: &InvalidPoolTransactionError) {
+>>>>>>> v1.11.3
         crate::traits::BestTransactions::mark_invalid(&mut self.best, tx, kind)
     }
 
@@ -352,7 +447,11 @@ pub struct BestTransactionsWithPrioritizedSenders<I: Iterator> {
     /// Inner iterator
     inner: I,
     /// A set of senders which transactions should be prioritized
+<<<<<<< HEAD
     prioritized_senders: HashSet<Address>,
+=======
+    prioritized_senders: AddressSet,
+>>>>>>> v1.11.3
     /// Maximum total gas limit of prioritized transactions
     max_prioritized_gas: u64,
     /// Buffer with transactions that are not being prioritized. Those will be the first to be
@@ -365,7 +464,11 @@ pub struct BestTransactionsWithPrioritizedSenders<I: Iterator> {
 
 impl<I: Iterator> BestTransactionsWithPrioritizedSenders<I> {
     /// Constructs a new [`BestTransactionsWithPrioritizedSenders`].
+<<<<<<< HEAD
     pub fn new(prioritized_senders: HashSet<Address>, max_prioritized_gas: u64, inner: I) -> Self {
+=======
+    pub fn new(prioritized_senders: AddressSet, max_prioritized_gas: u64, inner: I) -> Self {
+>>>>>>> v1.11.3
         Self {
             inner,
             prioritized_senders,
@@ -411,7 +514,11 @@ where
     I: crate::traits::BestTransactions<Item = Arc<ValidPoolTransaction<T>>>,
     T: PoolTransaction,
 {
+<<<<<<< HEAD
     fn mark_invalid(&mut self, tx: &Self::Item, kind: InvalidPoolTransactionError) {
+=======
+    fn mark_invalid(&mut self, tx: &Self::Item, kind: &InvalidPoolTransactionError) {
+>>>>>>> v1.11.3
         self.inner.mark_invalid(tx, kind)
     }
 
@@ -482,7 +589,11 @@ mod tests {
         let invalid = best.independent.iter().next().unwrap();
         best.mark_invalid(
             &invalid.transaction.clone(),
+<<<<<<< HEAD
             InvalidPoolTransactionError::Consensus(InvalidTransactionError::TxTypeNotSupported),
+=======
+            &InvalidPoolTransactionError::Consensus(InvalidTransactionError::TxTypeNotSupported),
+>>>>>>> v1.11.3
         );
 
         // iterator is empty
@@ -511,7 +622,11 @@ mod tests {
         crate::traits::BestTransactions::mark_invalid(
             &mut *best,
             &tx,
+<<<<<<< HEAD
             InvalidPoolTransactionError::Consensus(InvalidTransactionError::TxTypeNotSupported),
+=======
+            &InvalidPoolTransactionError::Consensus(InvalidTransactionError::TxTypeNotSupported),
+>>>>>>> v1.11.3
         );
         assert!(Iterator::next(&mut best).is_none());
     }
@@ -845,7 +960,11 @@ mod tests {
         pool.add_transaction(Arc::new(valid_prioritized_tx2), 0);
 
         let prioritized_senders =
+<<<<<<< HEAD
             HashSet::from([prioritized_tx.sender(), prioritized_tx2.sender()]);
+=======
+            AddressSet::from_iter([prioritized_tx.sender(), prioritized_tx2.sender()]);
+>>>>>>> v1.11.3
         let best =
             BestTransactionsWithPrioritizedSenders::new(prioritized_senders, 200, pool.best());
 
@@ -859,7 +978,11 @@ mod tests {
             assert_eq!(iter.next().unwrap().max_fee_per_gas(), (gas_price + 1) * 10);
         }
 
+<<<<<<< HEAD
         // Due to the gas limit, the transaction from second prioritized sender was not
+=======
+        // Due to the gas limit, the transaction from second-prioritized sender was not
+>>>>>>> v1.11.3
         // prioritized.
         let top_of_block_tx2 = iter.next().unwrap();
         assert_eq!(top_of_block_tx2.max_fee_per_gas(), 3);

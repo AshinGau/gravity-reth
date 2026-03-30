@@ -1,9 +1,13 @@
+<<<<<<< HEAD
 use alloy_primitives::{bytes::BufMut, keccak256, B256};
+=======
+use alloy_primitives::{b256, bytes::BufMut, keccak256, Address, B256};
+>>>>>>> v1.11.3
 use itertools::Itertools;
 use reth_config::config::{EtlConfig, HashingConfig};
 use reth_db_api::{
     cursor::{DbCursorRO, DbDupCursorRW},
-    models::{BlockNumberAddress, CompactU256},
+    models::CompactU256,
     table::Decompress,
     tables,
     transaction::{DbTx, DbTxMut},
@@ -15,6 +19,7 @@ use reth_stages_api::{
     EntitiesCheckpoint, ExecInput, ExecOutput, Stage, StageCheckpoint, StageError, StageId,
     StorageHashingCheckpoint, UnwindInput, UnwindOutput,
 };
+use reth_storage_api::StorageSettingsCache;
 use reth_storage_errors::provider::ProviderResult;
 use std::{
     fmt::Debug,
@@ -27,6 +32,10 @@ const MAXIMUM_CHANNELS: usize = 10_000;
 
 /// Maximum number of storage entries to hash per rayon worker job.
 const WORKER_CHUNK_SIZE: usize = 100;
+
+/// Keccak256 hash of the zero address.
+const HASHED_ZERO_ADDRESS: B256 =
+    b256!("0x5380c7b7ae81a58eb98d9c78de4a1fd7fd9535fc953ed2be602daaa41767312a");
 
 /// Storage hashing stage hashes plain storage.
 /// This is preparation before generating intermediate hashes and calculating Merkle tree root.
@@ -64,7 +73,11 @@ impl Default for StorageHashingStage {
 
 impl<Provider> Stage<Provider> for StorageHashingStage
 where
-    Provider: DBProvider<Tx: DbTxMut> + StorageReader + HashingWriter + StatsReader,
+    Provider: DBProvider<Tx: DbTxMut>
+        + StorageReader
+        + HashingWriter
+        + StatsReader
+        + StorageSettingsCache,
 {
     /// Return the id of the stage
     fn id(&self) -> StageId {
@@ -76,6 +89,12 @@ where
         let tx = provider.tx_ref();
         if input.target_reached() {
             return Ok(ExecOutput::done(input.checkpoint()))
+        }
+
+        // If use_hashed_state is enabled, execution writes directly to `HashedStorages`,
+        // so this stage becomes a no-op.
+        if provider.cached_storage_settings().use_hashed_state() {
+            return Ok(ExecOutput::done(input.checkpoint().with_block_number(input.target())));
         }
 
         let (from_block, to_block) = input.next_block_range().into_inner();
@@ -101,9 +120,15 @@ where
                 let chunk = chunk.collect::<Result<Vec<_>, _>>()?;
                 // Spawn the hashing task onto the global rayon pool
                 rayon::spawn(move || {
+                    // Cache hashed address since PlainStorageState is sorted by address
+                    let (mut last_addr, mut hashed_addr) = (Address::ZERO, HASHED_ZERO_ADDRESS);
                     for (address, slot) in chunk {
+                        if address != last_addr {
+                            last_addr = address;
+                            hashed_addr = keccak256(address);
+                        }
                         let mut addr_key = Vec::with_capacity(64);
-                        addr_key.put_slice(keccak256(address).as_slice());
+                        addr_key.put_slice(hashed_addr.as_slice());
                         addr_key.put_slice(keccak256(slot.key).as_slice());
                         let _ = tx.send((addr_key, CompactU256::from(slot.value)));
                     }
@@ -166,10 +191,19 @@ where
         provider: &Provider,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
+        // NOTE: this runs in both v1 and v2 mode. In v2 mode, execution writes
+        // directly to `HashedStorages`, but the unwind must still revert those
+        // entries here because `MerkleUnwind` runs after this stage (in unwind
+        // order) and needs `HashedStorages` to reflect the target block state
+        // before it can verify the state root.
         let (range, unwind_progress, _) =
             input.unwind_block_range_with_threshold(self.commit_threshold);
 
+<<<<<<< HEAD
         provider.unwind_storage_hashing_range(BlockNumberAddress::range(range))?;
+=======
+        provider.unwind_storage_hashing_range(range)?;
+>>>>>>> v1.11.3
 
         let mut stage_checkpoint =
             input.checkpoint.storage_hashing_stage_checkpoint().unwrap_or_default();
@@ -217,7 +251,7 @@ mod tests {
     use rand::Rng;
     use reth_db_api::{
         cursor::{DbCursorRW, DbDupCursorRO},
-        models::StoredBlockBodyIndices,
+        models::{BlockNumberAddress, StoredBlockBodyIndices},
     };
     use reth_ethereum_primitives::Block;
     use reth_primitives_traits::SealedBlock;
@@ -266,7 +300,7 @@ mod tests {
                         },
                         ..
                     }) if processed == previous_checkpoint.progress.processed + 1 &&
-                        total == runner.db.table::<tables::PlainStorageState>().unwrap().len() as u64);
+                        total == runner.db.count_entries::<tables::PlainStorageState>().unwrap() as u64);
 
                     // Continue from checkpoint
                     input.checkpoint = Some(checkpoint);
@@ -281,8 +315,14 @@ mod tests {
                     Some(StorageHashingCheckpoint {
                         progress: EntitiesCheckpoint { processed: _, total: _ },
                         ..
+<<<<<<< HEAD
                     })
                 );
+=======
+                    }) if processed == total &&
+                        total == runner.db.count_entries::<tables::PlainStorageState>().unwrap() as u64);
+
+>>>>>>> v1.11.3
                 // Validate the stage execution
                 assert!(
                     runner.validate_execution(input, Some(result)).is_ok(),
@@ -347,6 +387,10 @@ mod tests {
             );
 
             self.db.insert_headers(blocks.iter().map(|block| block.sealed_header()))?;
+<<<<<<< HEAD
+=======
+            let mut tx_hash_numbers = Vec::new();
+>>>>>>> v1.11.3
 
             let iter = blocks.iter();
             let mut next_tx_num = 0;
@@ -357,10 +401,14 @@ mod tests {
                 self.db.commit(|tx| {
                     progress.body().transactions.iter().try_for_each(
                         |transaction| -> Result<(), reth_db::DatabaseError> {
+<<<<<<< HEAD
                             tx.put::<tables::TransactionHashNumbers>(
                                 *transaction.tx_hash(),
                                 next_tx_num,
                             )?;
+=======
+                            tx_hash_numbers.push((*transaction.tx_hash(), next_tx_num));
+>>>>>>> v1.11.3
                             tx.put::<tables::Transactions>(next_tx_num, transaction.clone())?;
 
                             let (addr, _) = accounts
@@ -410,6 +458,7 @@ mod tests {
                     Ok(())
                 })?;
             }
+            self.db.insert_tx_hash_numbers(tx_hash_numbers)?;
 
             Ok(blocks)
         }

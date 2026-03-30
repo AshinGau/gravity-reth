@@ -95,7 +95,10 @@ pub trait TableViewer<R> {
     /// Operate on the dupsort table in a generic way.
     ///
     /// By default, the `view` function is invoked unless overridden.
-    fn view_dupsort<T: DupSort>(&self) -> Result<R, Self::Error> {
+    fn view_dupsort<T: DupSort>(&self) -> Result<R, Self::Error>
+    where
+        T::Value: reth_primitives_traits::ValueWithSubKey<SubKey = T::SubKey>,
+    {
         self.view::<T>()
     }
 }
@@ -309,7 +312,12 @@ tables! {
         type Value = HeaderHash;
     }
 
+<<<<<<< HEAD
     /// Stores the total difficulty from a block header.
+=======
+    /// Stores the total difficulty from block headers.
+    /// Note: Deprecated.
+>>>>>>> v1.11.3
     table HeaderTerminalDifficulties {
         type Key = BlockNumber;
         type Value = CompactU256;
@@ -475,11 +483,14 @@ tables! {
         type Value = StorageEntry;
         type SubKey = B256;
     }
+<<<<<<< HEAD
 
     table AccountsTrieV2 {
         type Key = StoredNibbles;
         type Value = StoredNode;
     }
+=======
+>>>>>>> v1.11.3
 
     /// Stores the current state's Merkle Patricia Tree.
     table AccountsTrie {
@@ -487,12 +498,15 @@ tables! {
         type Value = BranchNodeCompact;
     }
 
+<<<<<<< HEAD
     table StoragesTrieV2 {
         type Key = B256;
         type Value = StorageNodeEntry;
         type SubKey = StoredNibblesSubKey;
     }
 
+=======
+>>>>>>> v1.11.3
     /// From `HashedAddress` => `NibblesSubKey` => Intermediate value
     table StoragesTrie {
         type Key = B256;
@@ -537,6 +551,16 @@ tables! {
         type Key = ChainStateKey;
         type Value = BlockNumber;
     }
+<<<<<<< HEAD
+=======
+
+    /// Stores generic node metadata as key-value pairs.
+    /// Can store feature flags, configuration markers, and other node-specific data.
+    table Metadata {
+        type Key = String;
+        type Value = Vec<u8>;
+    }
+>>>>>>> v1.11.3
 }
 
 /// Keys for the `ChainState` table.
@@ -545,7 +569,11 @@ pub enum ChainStateKey {
     /// Last finalized block key
     LastFinalizedBlock,
     /// Last safe block key
+<<<<<<< HEAD
     LastSafeBlockBlock,
+=======
+    LastSafeBlock,
+>>>>>>> v1.11.3
 }
 
 impl Encode for ChainStateKey {
@@ -554,7 +582,11 @@ impl Encode for ChainStateKey {
     fn encode(self) -> Self::Encoded {
         match self {
             Self::LastFinalizedBlock => [0],
+<<<<<<< HEAD
             Self::LastSafeBlockBlock => [1],
+=======
+            Self::LastSafeBlock => [1],
+>>>>>>> v1.11.3
         }
     }
 }
@@ -563,7 +595,11 @@ impl Decode for ChainStateKey {
     fn decode(value: &[u8]) -> Result<Self, crate::DatabaseError> {
         match value {
             [0] => Ok(Self::LastFinalizedBlock),
+<<<<<<< HEAD
             [1] => Ok(Self::LastSafeBlockBlock),
+=======
+            [1] => Ok(Self::LastSafeBlock),
+>>>>>>> v1.11.3
             _ => Err(crate::DatabaseError::Decode),
         }
     }

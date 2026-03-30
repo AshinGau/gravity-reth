@@ -12,13 +12,21 @@
     issue_tracker_base_url = "https://github.com/paradigmxyz/reth/issues/"
 )]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
+<<<<<<< HEAD
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+=======
+#![cfg_attr(docsrs, feature(doc_cfg))]
+>>>>>>> v1.11.3
 #![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;
 
 use crate::execute::{BasicBlockBuilder, Executor};
+<<<<<<< HEAD
 use alloc::{boxed::Box, vec::Vec};
+=======
+use alloc::vec::Vec;
+>>>>>>> v1.11.3
 use alloy_eips::{
     eip2718::{EIP2930_TX_TYPE_ID, LEGACY_TX_TYPE_ID},
     eip2930::AccessList,
@@ -26,32 +34,52 @@ use alloy_eips::{
 };
 use alloy_evm::{
     block::{BlockExecutorFactory, BlockExecutorFor},
+<<<<<<< HEAD
     precompiles::{DynPrecompile, PrecompilesMap},
 };
 use alloy_primitives::{Address, B256};
+=======
+    precompiles::PrecompilesMap,
+};
+use alloy_primitives::{Address, Bytes, B256};
+>>>>>>> v1.11.3
 use core::{error::Error, fmt::Debug};
 use execute::{BasicBlockExecutor, BlockAssembler, BlockBuilder};
 use reth_execution_errors::BlockExecutionError;
 use reth_primitives_traits::{
     BlockTy, HeaderTy, NodePrimitives, ReceiptTy, SealedBlock, SealedHeader, TxTy,
 };
+<<<<<<< HEAD
 use revm::{
     context::{result::ExecutionResult, TxEnv},
     context_interface::result::HaltReason,
     database::State,
 };
+=======
+use revm::{context::TxEnv, database::State, primitives::hardfork::SpecId};
+>>>>>>> v1.11.3
 
 pub mod either;
 /// EVM environment configuration.
 pub mod execute;
+<<<<<<< HEAD
 pub mod parallel_execute;
 use parallel_execute::ParallelExecutor;
+=======
+>>>>>>> v1.11.3
 
 mod aliases;
 pub use aliases::*;
 
+<<<<<<< HEAD
 mod engine;
 pub use engine::{ConfigureEngineEvm, ExecutableTxIterator};
+=======
+#[cfg(feature = "std")]
+mod engine;
+#[cfg(feature = "std")]
+pub use engine::{ConfigureEngineEvm, ConvertTx, ExecutableTxIterator, ExecutableTxTuple};
+>>>>>>> v1.11.3
 
 #[cfg(feature = "metrics")]
 pub mod metrics;
@@ -65,6 +93,7 @@ pub use alloy_evm::{
     *,
 };
 
+<<<<<<< HEAD
 pub use alloy_evm::block::state_changes as state_change;
 
 /// Database abstraction for parallel execution.
@@ -77,6 +106,8 @@ impl<T> ParallelDatabase for T where
 {
 }
 
+=======
+>>>>>>> v1.11.3
 /// A complete configuration of EVM for Reth.
 ///
 /// This trait encapsulates complete configuration required for transaction execution and block
@@ -219,6 +250,10 @@ pub trait ConfigureEvm: Clone + Debug + Send + Sync + Unpin {
                     + FromRecoveredTx<TxTy<Self::Primitives>>
                     + FromTxWithEncoded<TxTy<Self::Primitives>>,
             Precompiles = PrecompilesMap,
+<<<<<<< HEAD
+=======
+            Spec: Into<SpecId>,
+>>>>>>> v1.11.3
         >,
     >;
 
@@ -272,7 +307,11 @@ pub trait ConfigureEvm: Clone + Debug + Send + Sync + Unpin {
         attributes: Self::NextBlockEnvCtx,
     ) -> Result<ExecutionCtxFor<'_, Self>, Self::Error>;
 
+<<<<<<< HEAD
     /// Returns a [`TxEnv`] from a transaction and [`Address`].
+=======
+    /// Returns a [`TxEnv`] from a transaction.
+>>>>>>> v1.11.3
     fn tx_env(&self, transaction: impl IntoTxEnv<TxEnvFor<Self>>) -> TxEnvFor<Self> {
         transaction.into_tx_env()
     }
@@ -415,12 +454,26 @@ pub trait ConfigureEvm: Clone + Debug + Send + Sync + Unpin {
     /// // Complete block building
     /// let outcome = builder.finish(state_provider)?;
     /// ```
+<<<<<<< HEAD
     fn builder_for_next_block<'a, DB: Database>(
+=======
+    fn builder_for_next_block<'a, DB: Database + 'a>(
+>>>>>>> v1.11.3
         &'a self,
         db: &'a mut State<DB>,
         parent: &'a SealedHeader<<Self::Primitives as NodePrimitives>::BlockHeader>,
         attributes: Self::NextBlockEnvCtx,
+<<<<<<< HEAD
     ) -> Result<impl BlockBuilder<Primitives = Self::Primitives>, Self::Error> {
+=======
+    ) -> Result<
+        impl BlockBuilder<
+            Primitives = Self::Primitives,
+            Executor: BlockExecutorFor<'a, Self::BlockExecutorFactory, DB>,
+        >,
+        Self::Error,
+    > {
+>>>>>>> v1.11.3
         let evm_env = self.next_evm_env(parent, &attributes)?;
         let evm = self.evm_with_env(db, evm_env);
         let ctx = self.context_for_next_block(parent, attributes)?;
@@ -463,6 +516,7 @@ pub trait ConfigureEvm: Clone + Debug + Send + Sync + Unpin {
     ) -> impl Executor<DB, Primitives = Self::Primitives, Error = BlockExecutionError> {
         BasicBlockExecutor::new(self, db)
     }
+<<<<<<< HEAD
 
     /// Executes a single system transaction directly against the given database state and commits
     /// the resulting state changes immediately.
@@ -484,6 +538,8 @@ pub trait ConfigureEvm: Clone + Debug + Send + Sync + Unpin {
         &self,
         db: DB,
     ) -> Box<dyn ParallelExecutor<Primitives = Self::Primitives, Error = BlockExecutionError> + 'a>;
+=======
+>>>>>>> v1.11.3
 }
 
 /// Represents additional attributes required to configure the next block.
@@ -532,6 +588,11 @@ pub struct NextBlockEnvAttributes {
     pub parent_beacon_block_root: Option<B256>,
     /// Withdrawals
     pub withdrawals: Option<Withdrawals>,
+<<<<<<< HEAD
+=======
+    /// Optional extra data.
+    pub extra_data: Bytes,
+>>>>>>> v1.11.3
 }
 
 /// Abstraction over transaction environment.

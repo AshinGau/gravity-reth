@@ -94,6 +94,10 @@ impl RethRpcServerConfig for RpcServerArgs {
     fn eth_config(&self) -> EthConfig {
         EthConfig::default()
             .max_tracing_requests(self.rpc_max_tracing_requests)
+<<<<<<< HEAD
+=======
+            .max_blocking_io_requests(self.rpc_max_blocking_io_requests)
+>>>>>>> v1.11.3
             .max_trace_filter_blocks(self.rpc_max_trace_filter_blocks)
             .max_blocks_per_filter(self.rpc_max_blocks_per_filter.unwrap_or_max())
             .max_logs_per_response(self.rpc_max_logs_per_response.unwrap_or_max() as usize)
@@ -105,6 +109,11 @@ impl RethRpcServerConfig for RpcServerArgs {
             .proof_permits(self.rpc_proof_permits)
             .pending_block_kind(self.rpc_pending_block)
             .raw_tx_forwarder(self.rpc_forwarder.clone())
+<<<<<<< HEAD
+=======
+            .rpc_evm_memory_limit(self.rpc_evm_memory_limit)
+            .force_blob_sidecar_upcasting(self.rpc_force_blob_sidecar_upcasting)
+>>>>>>> v1.11.3
     }
 
     fn flashbots_config(&self) -> ValidationApiConfig {
@@ -120,6 +129,7 @@ impl RethRpcServerConfig for RpcServerArgs {
             max_receipts: self.rpc_state_cache.max_receipts,
             max_headers: self.rpc_state_cache.max_headers,
             max_concurrent_db_requests: self.rpc_state_cache.max_concurrent_db_requests,
+            max_cached_tx_hashes: self.rpc_state_cache.max_cached_tx_hashes,
         }
     }
 
@@ -189,19 +199,37 @@ impl RethRpcServerConfig for RpcServerArgs {
             );
         }
 
+<<<<<<< HEAD
+=======
+        if self.ws_api.is_some() && !self.ws {
+            warn!(
+                target: "reth::cli",
+                "The --ws.api flag is set but --ws is not enabled. WS RPC API will not be exposed."
+            );
+        }
+
+>>>>>>> v1.11.3
         if self.http {
             let socket_address = SocketAddr::new(self.http_addr, self.http_port);
             config = config
                 .with_http_address(socket_address)
                 .with_http(self.http_ws_server_builder())
                 .with_http_cors(self.http_corsdomain.clone())
+<<<<<<< HEAD
                 .with_http_disable_compression(self.http_disable_compression)
                 .with_ws_cors(self.ws_allowed_origins.clone());
+=======
+                .with_http_disable_compression(self.http_disable_compression);
+>>>>>>> v1.11.3
         }
 
         if self.ws {
             let socket_address = SocketAddr::new(self.ws_addr, self.ws_port);
-            config = config.with_ws_address(socket_address).with_ws(self.http_ws_server_builder());
+            // Ensure WS CORS is applied regardless of HTTP being enabled
+            config = config
+                .with_ws_address(socket_address)
+                .with_ws(self.http_ws_server_builder())
+                .with_ws_cors(self.ws_allowed_origins.clone());
         }
 
         if self.is_ipc_enabled() {

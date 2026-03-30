@@ -2,11 +2,11 @@ use crate::{network::NetworkTestContext, payload::PayloadTestContext, rpc::RpcTe
 use alloy_consensus::{transaction::TxHashRef, BlockHeader};
 use alloy_eips::BlockId;
 use alloy_primitives::{BlockHash, BlockNumber, Bytes, Sealable, B256};
-use alloy_rpc_types_engine::ForkchoiceState;
+use alloy_rpc_types_engine::{ExecutionPayloadEnvelopeV5, ForkchoiceState};
 use alloy_rpc_types_eth::BlockNumberOrTag;
 use eyre::Ok;
 use futures_util::Future;
-use jsonrpsee::http_client::HttpClient;
+use jsonrpsee::{core::client::ClientT, http_client::HttpClient};
 use reth_chainspec::EthereumHardforks;
 use reth_network_api::test_utils::PeersHandleProvider;
 use reth_node_api::{
@@ -20,6 +20,7 @@ use reth_provider::{
     BlockReader, BlockReaderIdExt, CanonStateNotificationStream, CanonStateSubscriptions,
     HeaderProvider, StageCheckpointReader,
 };
+use reth_rpc_api::TestingBuildBlockRequestV1;
 use reth_rpc_builder::auth::AuthServerHandle;
 use reth_rpc_eth_api::helpers::{EthApiSpec, EthTransactions, TraceExt};
 use reth_stages_types::StageId;
@@ -302,5 +303,37 @@ where
     /// Returns an Engine API client.
     pub fn auth_server_handle(&self) -> AuthServerHandle {
         self.inner.auth_server_handle().clone()
+    }
+
+    /// Creates a [`crate::testsuite::NodeClient`] from this test context.
+    ///
+    /// This helper method extracts the necessary handles and creates a client
+    /// that can interact with both the regular RPC and Engine API endpoints.
+    /// It automatically includes the beacon engine handle for direct consensus engine interaction.
+    pub fn to_node_client(&self) -> eyre::Result<crate::testsuite::NodeClient<Payload>> {
+        let rpc = self
+            .rpc_client()
+            .ok_or_else(|| eyre::eyre!("Failed to create HTTP RPC client for node"))?;
+        let auth = self.auth_server_handle();
+        let url = self.rpc_url();
+        let beacon_handle = self.inner.add_ons_handle.beacon_engine_handle.clone();
+
+        Ok(crate::testsuite::NodeClient::new_with_beacon_engine(rpc, auth, url, beacon_handle))
+    }
+
+    /// Calls the `testing_buildBlockV1` RPC on this node.
+    ///
+    /// This endpoint builds a block using the provided parent, payload attributes, and
+    /// transactions. Requires the `Testing` RPC module to be enabled.
+    pub async fn testing_build_block_v1(
+        &self,
+        request: TestingBuildBlockRequestV1,
+    ) -> eyre::Result<ExecutionPayloadEnvelopeV5> {
+        let client =
+            self.rpc_client().ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+
+        let res: ExecutionPayloadEnvelopeV5 =
+            client.request("testing_buildBlockV1", [request]).await?;
+        eyre::Ok(res)
     }
 }

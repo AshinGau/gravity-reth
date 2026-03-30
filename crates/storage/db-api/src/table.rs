@@ -33,11 +33,14 @@ pub trait Compress: Send + Sync + Sized + Debug {
 
     /// Compresses data to a given buffer.
     fn compress_to_buf<B: bytes::BufMut + AsMut<[u8]>>(&self, buf: &mut B);
+<<<<<<< HEAD
 
     /// Return the compressed length of prefix subkey
     fn subkey_compress_length(&self) -> Option<usize> {
         None
     }
+=======
+>>>>>>> v1.11.3
 }
 
 /// Trait that will transform the data to be read from the DB.
@@ -48,13 +51,46 @@ pub trait Decompress: Send + Sync + Sized + Debug {
     /// Decompresses owned data coming from the database.
     fn decompress_owned(value: Vec<u8>) -> Result<Self, DatabaseError> {
         Self::decompress(&value)
+<<<<<<< HEAD
+=======
+    }
+}
+
+/// Trait for converting encoded types to `Vec<u8>`.
+///
+/// This is implemented for all `AsRef<[u8]>` types. For `Vec<u8>` this is a no-op,
+/// for other types like `ArrayVec` or fixed arrays it performs a copy.
+pub trait IntoVec: AsRef<[u8]> {
+    /// Convert to a `Vec<u8>`.
+    fn into_vec(self) -> Vec<u8>;
+}
+
+impl IntoVec for Vec<u8> {
+    #[inline]
+    fn into_vec(self) -> Vec<u8> {
+        self
+    }
+}
+
+impl<const N: usize> IntoVec for [u8; N] {
+    #[inline]
+    fn into_vec(self) -> Vec<u8> {
+        self.to_vec()
+    }
+}
+
+impl<const N: usize> IntoVec for arrayvec::ArrayVec<u8, N> {
+    #[inline]
+    fn into_vec(self) -> Vec<u8> {
+        self.to_vec()
+>>>>>>> v1.11.3
     }
 }
 
 /// Trait that will transform the data to be saved in the DB.
 pub trait Encode: Send + Sync + Sized + Debug {
     /// Encoded type.
-    type Encoded: AsRef<[u8]> + Into<Vec<u8>> + Send + Sync + Ord + Debug;
+    type Encoded: AsRef<[u8]> + IntoVec + Send + Sync + Ord + Debug;
 
     /// Encodes data going into the database.
     fn encode(self) -> Self::Encoded;
@@ -144,6 +180,9 @@ pub trait TableImporter: DbTxMut {
     }
 
     /// Imports table data from another transaction within a range.
+    ///
+    /// This method works correctly with both regular and `DupSort` tables. For `DupSort` tables,
+    /// all duplicate entries within the range are preserved during import.
     fn import_table_with_range<T: Table, R: DbTx>(
         &self,
         source_tx: &R,

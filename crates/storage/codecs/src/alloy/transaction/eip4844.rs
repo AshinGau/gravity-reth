@@ -68,7 +68,8 @@ impl Compact for AlloyTxEip4844 {
     }
 
     fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
-        let (tx, _) = TxEip4844::from_compact(buf, len);
+        // Return the remaining slice from the inner from_compact to advance the cursor correctly.
+        let (tx, remaining) = TxEip4844::from_compact(buf, len);
         let alloy_tx = Self {
             chain_id: tx.chain_id,
             nonce: tx.nonce,
@@ -82,7 +83,55 @@ impl Compact for AlloyTxEip4844 {
             max_fee_per_blob_gas: tx.max_fee_per_blob_gas,
             input: tx.input,
         };
-        (alloy_tx, buf)
+        (alloy_tx, remaining)
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl<'a> arbitrary::Arbitrary<'a> for TxEip4844 {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            chain_id: ChainId::arbitrary(u)?,
+            nonce: u64::arbitrary(u)?,
+            gas_limit: u64::arbitrary(u)?,
+            max_fee_per_gas: u128::arbitrary(u)?,
+            max_priority_fee_per_gas: u128::arbitrary(u)?,
+            // Should always be Some for TxEip4844
+            placeholder: Some(()),
+            to: Address::arbitrary(u)?,
+            value: U256::arbitrary(u)?,
+            access_list: AccessList::arbitrary(u)?,
+            blob_versioned_hashes: Vec::<B256>::arbitrary(u)?,
+            max_fee_per_blob_gas: u128::arbitrary(u)?,
+            input: Bytes::arbitrary(u)?,
+        })
+    }
+}
+
+#[cfg(feature = "test-utils")]
+fn serialize_placeholder<S>(value: &Option<()>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    // Required otherwise `serde_json` will serialize it as null and would be `None` when decoding
+    // it again.
+    match value {
+        Some(()) => serializer.serialize_str("placeholder"), // Custom serialization
+        None => serializer.serialize_none(),
+    }
+}
+
+#[cfg(feature = "test-utils")]
+fn deserialize_placeholder<'de, D>(deserializer: D) -> Result<Option<()>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Deserialize;
+    let s: Option<String> = Option::deserialize(deserializer)?;
+    match s.as_deref() {
+        Some("placeholder") => Ok(Some(())),
+        None => Ok(None),
+        _ => Err(serde::de::Error::custom("unexpected value")),
     }
 }
 
