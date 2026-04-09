@@ -177,7 +177,9 @@ where
             Requests::default()
         };
 
-        let mut balance_increments = post_block_balance_increments(&self.chain_spec, block);
+        // Gravity chain uses a deflationary model where rewards come solely from gas fees,
+        // so PoW block rewards (coinbase increments) are disabled to prevent inflation.
+        let mut balance_increments = HashMap::default();
         let state = self.state.as_mut().unwrap();
 
         // Irregular state change at Ethereum DAO hardfork
@@ -315,6 +317,7 @@ where
     }
 }
 
+#[allow(dead_code)]
 #[inline]
 fn post_block_balance_increments<ChainSpec, Block>(
     chain_spec: &ChainSpec,
@@ -363,6 +366,7 @@ where
     balance_increments
 }
 
+#[allow(dead_code)]
 #[inline]
 fn insert_post_block_withdrawals_balance_increments(
     spec: impl EthereumHardforks,
