@@ -16,9 +16,10 @@ use alloy_consensus::{
     Header,
 };
 use alloy_eips::{
-    eip1559::INITIAL_BASE_FEE, eip7685::EMPTY_REQUESTS_HASH, eip7840::BlobParams,
-    eip7892::BlobScheduleBlobParams,
+    eip7685::EMPTY_REQUESTS_HASH, eip7840::BlobParams, eip7892::BlobScheduleBlobParams,
 };
+
+use crate::constants::GRAVITY_MIN_BASE_FEE;
 use alloy_genesis::Genesis;
 use alloy_primitives::{address, b256, Address, BlockNumber, B256, U256};
 use alloy_trie::root::state_root_ref_unhashed;
@@ -40,7 +41,7 @@ pub fn make_genesis_header(genesis: &Genesis, hardforks: &ChainHardforks) -> Hea
     let base_fee_per_gas = hardforks
         .fork(EthereumHardfork::London)
         .active_at_block(0)
-        .then(|| genesis.base_fee_per_gas.map(|fee| fee as u64).unwrap_or(INITIAL_BASE_FEE));
+        .then(|| genesis.base_fee_per_gas.map(|fee| fee as u64).unwrap_or(GRAVITY_MIN_BASE_FEE));
 
     // If shanghai is activated, initialize the header with an empty withdrawals hash, and
     // empty withdrawals list.
@@ -387,7 +388,7 @@ impl ChainSpec {
     pub fn initial_base_fee(&self) -> Option<u64> {
         // If the base fee is set in the genesis block, we use that instead of the default.
         let genesis_base_fee =
-            self.genesis.base_fee_per_gas.map(|fee| fee as u64).unwrap_or(INITIAL_BASE_FEE);
+            self.genesis.base_fee_per_gas.map(|fee| fee as u64).unwrap_or(GRAVITY_MIN_BASE_FEE);
 
         // If London is activated at genesis, we set the initial base fee as per EIP-1559.
         self.hardforks.fork(EthereumHardfork::London).active_at_block(0).then_some(genesis_base_fee)
@@ -1715,11 +1716,13 @@ Post-merge hard forks (timestamp based):
 
     #[test]
     fn dev_fork_ids() {
+        // Gravity's 50 Gwei genesis base_fee fallback (vs upstream's 1 Gwei) changes
+        // the DEV chain genesis hash, which changes this fork ID.
         test_fork_ids(
             &DEV,
             &[(
                 Head { number: 0, ..Default::default() },
-                ForkId { hash: ForkHash([0x0b, 0x1a, 0x4e, 0xf7]), next: 0 },
+                ForkId { hash: ForkHash([0x4f, 0x66, 0xfe, 0xb7]), next: 0 },
             )],
         )
     }
@@ -2431,12 +2434,16 @@ Post-merge hard forks (timestamp based):
 
         // check the genesis hash
         let genesis_hash = header.hash_slow();
+        // Genesis hash differs from upstream Reth because Gravity uses
+        // GRAVITY_MIN_BASE_FEE (50 Gwei) instead of INITIAL_BASE_FEE (1 Gwei)
+        // as the genesis base_fee fallback; the header's baseFeePerGas therefore
+        // changes and so does its hash.
         let expected_hash =
-            b256!("0x16bb7c59613a5bad3f7c04a852fd056545ade2483968d9a25a1abb05af0c4d37");
+            b256!("0x1d0fc10d8f976bc4731b7b40975b1ff8b95712fe43318dea939ae3792f91cbcc");
         assert_eq!(genesis_hash, expected_hash);
 
         // check that the forkhash is correct
-        let expected_forkhash = ForkHash(hex!("8062457a"));
+        let expected_forkhash = ForkHash(hex!("3e3a308f"));
         assert_eq!(ForkHash::from(genesis_hash), expected_forkhash);
     }
 
