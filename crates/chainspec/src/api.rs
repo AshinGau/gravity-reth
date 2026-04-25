@@ -1,4 +1,4 @@
-use crate::{constants::GRAVITY_MIN_BASE_FEE, ChainSpec, DepositContract};
+use crate::{constants::GRAVITY_MIN_BASE_FEE_ACTIVATION_BLOCK, ChainSpec, DepositContract};
 use alloc::{boxed::Box, vec::Vec};
 use alloy_chains::Chain;
 use alloy_consensus::Header;
@@ -74,21 +74,35 @@ pub trait EthChainSpec: Send + Sync + Unpin + Debug {
     /// ```
     fn gravity_hardforks(&self) -> &reth_ethereum_forks::ChainHardforks;
 
+    /// Returns the Gravity protocol minimum base fee (in wei) applicable at the given
+    /// block, or `None` if no floor applies at that height.
+    ///
+    /// The schedule of activation block(s) and any historical floor values is encoded
+    /// in branch-specific code (see this branch's `ChainSpec` impl). Chainspecs that
+    /// are not Gravity (e.g. Ethereum mainnet during reth history sync) return `None`
+    /// for all blocks via the trait default.
+    fn gravity_min_base_fee_at_block(&self, _block: u64) -> Option<u64> {
+        None
+    }
+
     /// See [`calc_next_block_base_fee`].
     ///
-    /// Gravity applies a protocol-wide floor of [`GRAVITY_MIN_BASE_FEE`] (50 Gwei):
-    /// the EIP-1559 recurrence runs normally, and the result is clamped so base fee
-    /// never drops below the floor. If the parent has no base fee (pre-London header),
-    /// the floor is used as the parent base fee.
+    /// When the Gravity floor is active for the next block (see
+    /// [`Self::gravity_min_base_fee_at_block`]), the EIP-1559 recurrence is clamped at
+    /// the floor and the floor is used as the parent fallback for pre-London headers.
+    /// When no floor is active, upstream EIP-1559 behavior applies and pre-London
+    /// parents return `None`.
     fn next_block_base_fee(&self, parent: &Self::Header, target_timestamp: u64) -> Option<u64> {
-        let parent_base_fee = parent.base_fee_per_gas().unwrap_or(GRAVITY_MIN_BASE_FEE);
+        let next_block = parent.number() + 1;
+        let floor = self.gravity_min_base_fee_at_block(next_block);
+        let parent_base_fee = parent.base_fee_per_gas().or(floor)?;
         let next = calc_next_block_base_fee(
             parent.gas_used(),
             parent.gas_limit(),
             parent_base_fee,
             self.base_fee_params_at_timestamp(target_timestamp),
         );
-        Some(next.max(GRAVITY_MIN_BASE_FEE))
+        Some(floor.map_or(next, |f| next.max(f)))
     }
 }
 
@@ -155,5 +169,21 @@ impl EthChainSpec for ChainSpec {
 
     fn gravity_hardforks(&self) -> &reth_ethereum_forks::ChainHardforks {
         &self.gravity_hardforks
+    }
+
+    /// Gravity base fee floor schedule for the **main** branch.
+    ///
+    /// Single segment: `[GRAVITY_MIN_BASE_FEE_ACTIVATION_BLOCK, ∞)` returns the genesis
+    /// `gravityMinBaseFee` value. Earlier blocks (impossible when the activation block
+    /// is `0`) and chainspecs without the genesis field return `None`. Released testnet
+    /// branches override this constant and/or extend this function with additional
+    /// historical segments (e.g. v1.6 would add `[M, N) -> Some(50_000_000_000)` for
+    /// the v1.5-era hardcoded floor).
+    fn gravity_min_base_fee_at_block(&self, block: u64) -> Option<u64> {
+        if block >= GRAVITY_MIN_BASE_FEE_ACTIVATION_BLOCK {
+            self.gravity_min_base_fee
+        } else {
+            None
+        }
     }
 }
