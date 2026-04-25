@@ -179,6 +179,10 @@ impl EthChainSpec for ChainSpec {
     /// branches override this constant and/or extend this function with additional
     /// historical segments (e.g. v1.6 would add `[M, N) -> Some(50_000_000_000)` for
     /// the v1.5-era hardcoded floor).
+    // Lint allow: on main `GRAVITY_MIN_BASE_FEE_ACTIVATION_BLOCK == 0` so the comparison
+    // is trivially true; we keep the `>=` form for branch parity (testnet overrides this
+    // constant to a non-zero block, and future schedule extensions add more segments).
+    #[allow(clippy::absurd_extreme_comparisons)]
     fn gravity_min_base_fee_at_block(&self, block: u64) -> Option<u64> {
         if block >= GRAVITY_MIN_BASE_FEE_ACTIVATION_BLOCK {
             self.gravity_min_base_fee
