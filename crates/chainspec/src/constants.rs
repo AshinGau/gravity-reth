@@ -15,15 +15,6 @@ pub const MIN_TRANSACTION_GAS: u64 = 21_000u64;
 /// Gravity genesis files.
 pub const GRAVITY_MIN_BASE_FEE: u64 = 50_000_000_000;
 
-/// Block number at which the Gravity base fee floor activates on this branch.
-///
-/// `0` for the main branch (floor enforced from genesis). Released testnet branches
-/// (e.g. `gravity-testnet-v1.5`) override this constant with their rolling-upgrade
-/// activation height. When the floor steps to a different value at a future block,
-/// add a new constant for that boundary and extend
-/// [`crate::ChainSpec::gravity_min_base_fee_at_block`] to dispatch on it.
-pub const GRAVITY_MIN_BASE_FEE_ACTIVATION_BLOCK: u64 = 0;
-
 /// Mainnet prune delete limit.
 pub const MAINNET_PRUNE_DELETE_LIMIT: usize = 20000;
 

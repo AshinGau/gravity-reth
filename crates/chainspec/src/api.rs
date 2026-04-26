@@ -1,4 +1,4 @@
-use crate::{constants::GRAVITY_MIN_BASE_FEE_ACTIVATION_BLOCK, ChainSpec, DepositContract};
+use crate::{ChainSpec, DepositContract};
 use alloc::{boxed::Box, vec::Vec};
 use alloy_chains::Chain;
 use alloy_consensus::Header;
@@ -173,18 +173,15 @@ impl EthChainSpec for ChainSpec {
 
     /// Gravity base fee floor schedule for the **main** branch.
     ///
-    /// Single segment: `[GRAVITY_MIN_BASE_FEE_ACTIVATION_BLOCK, ∞)` returns the genesis
-    /// `gravityMinBaseFee` value. Earlier blocks (impossible when the activation block
-    /// is `0`) and chainspecs without the genesis field return `None`. Released testnet
-    /// branches override this constant and/or extend this function with additional
-    /// historical segments (e.g. v1.6 would add `[M, N) -> Some(50_000_000_000)` for
-    /// the v1.5-era hardcoded floor).
-    // Lint allow: on main `GRAVITY_MIN_BASE_FEE_ACTIVATION_BLOCK == 0` so the comparison
-    // is trivially true; we keep the `>=` form for branch parity (testnet overrides this
-    // constant to a non-zero block, and future schedule extensions add more segments).
-    #[allow(clippy::absurd_extreme_comparisons)]
+    /// Single segment: `[gravity_min_base_fee_activation_block, ∞)` returns the genesis
+    /// `gravityMinBaseFee` value; earlier blocks and chainspecs without the genesis
+    /// field return `None`. Released testnet branches read the activation block from
+    /// genesis (so the rolling-upgrade height is configurable per-network) and may
+    /// extend this function with hardcoded historical segments — e.g. a v1.6 upgrade
+    /// stepping the floor at block N would add `[M, N) -> Some(50_000_000_000)` for
+    /// the v1.5-era value.
     fn gravity_min_base_fee_at_block(&self, block: u64) -> Option<u64> {
-        if block >= GRAVITY_MIN_BASE_FEE_ACTIVATION_BLOCK {
+        if block >= self.gravity_min_base_fee_activation_block {
             self.gravity_min_base_fee
         } else {
             None

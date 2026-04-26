@@ -115,6 +115,7 @@ pub static MAINNET: LazyLock<Arc<ChainSpec>> = LazyLock::new(|| {
         ]),
         gravity_hardforks: ChainHardforks::default(),
         gravity_min_base_fee: None,
+        gravity_min_base_fee_activation_block: 0,
     };
     spec.genesis.config.dao_fork_support = true;
     spec.into()
@@ -149,6 +150,7 @@ pub static SEPOLIA: LazyLock<Arc<ChainSpec>> = LazyLock::new(|| {
         ]),
         gravity_hardforks: ChainHardforks::default(),
         gravity_min_base_fee: None,
+        gravity_min_base_fee_activation_block: 0,
     };
     spec.genesis.config.dao_fork_support = true;
     spec.into()
@@ -181,6 +183,7 @@ pub static HOLESKY: LazyLock<Arc<ChainSpec>> = LazyLock::new(|| {
         ]),
         gravity_hardforks: ChainHardforks::default(),
         gravity_min_base_fee: None,
+        gravity_min_base_fee_activation_block: 0,
     };
     spec.genesis.config.dao_fork_support = true;
     spec.into()
@@ -215,6 +218,7 @@ pub static HOODI: LazyLock<Arc<ChainSpec>> = LazyLock::new(|| {
         ]),
         gravity_hardforks: ChainHardforks::default(),
         gravity_min_base_fee: None,
+        gravity_min_base_fee_activation_block: 0,
     };
     spec.genesis.config.dao_fork_support = true;
     spec.into()
@@ -329,12 +333,17 @@ pub struct ChainSpec {
     /// [`EthChainSpec::gravity_min_base_fee_at_block`] applies. When `None`, no floor is
     /// applied (upstream EIP-1559 behavior, used by Ethereum mainnet history sync).
     /// Parsed from genesis JSON `config.gravityMinBaseFee`.
-    ///
-    /// The activation block(s) for this floor — and any historical values from prior
-    /// schedule steps — live in branch-specific code constants, not in genesis. This
-    /// way a node restarted across multiple hardforks always has the full historical
-    /// schedule baked into its binary.
     pub gravity_min_base_fee: Option<u64>,
+
+    /// Block number at which [`Self::gravity_min_base_fee`] activates on this branch.
+    /// On main this is hardcoded to `0` in `From<Genesis>` (floor enforced from
+    /// genesis). Released testnet branches read it from genesis JSON
+    /// `config.extra_fields` (the same mechanism used by Alpha/Beta/Gamma/Delta), so
+    /// the rolling-upgrade activation height can be set per-network without code
+    /// changes. Historical-segment values from prior schedule steps still live in
+    /// branch-specific code, ensuring nodes restarted across multiple hardforks
+    /// validate older blocks correctly from the binary's full schedule.
+    pub gravity_min_base_fee_activation_block: u64,
 }
 
 impl Default for ChainSpec {
@@ -351,6 +360,7 @@ impl Default for ChainSpec {
             blob_params: Default::default(),
             gravity_hardforks: Default::default(),
             gravity_min_base_fee: None,
+            gravity_min_base_fee_activation_block: 0,
         }
     }
 }
@@ -776,11 +786,16 @@ impl From<Genesis> for ChainSpec {
                 .collect(),
         );
 
-        // Gravity protocol minimum base fee floor (wei). Presence of this field marks
-        // the chainspec as Gravity; the activation schedule lives in branch-specific
-        // code (see EthChainSpec::gravity_min_base_fee_at_block).
+        // Gravity protocol minimum base fee floor (wei). Presence marks the chainspec
+        // as Gravity; absence keeps upstream EIP-1559 semantics (e.g. Ethereum mainnet
+        // history sync).
         let gravity_min_base_fee =
             genesis.config.extra_fields.get("gravityMinBaseFee").and_then(|v| v.as_u64());
+        // main: floor activates at genesis (block 0). Released testnet branches override
+        // this to read the rolling-upgrade activation height from genesis (e.g.
+        // `epsilonBlock`), keeping the value configurable per-network without code
+        // changes — same mechanism as Alpha/Beta/Gamma/Delta above.
+        let gravity_min_base_fee_activation_block = 0u64;
 
         Self {
             chain: genesis.config.chain_id.into(),
@@ -792,6 +807,7 @@ impl From<Genesis> for ChainSpec {
             blob_params,
             gravity_hardforks,
             gravity_min_base_fee,
+            gravity_min_base_fee_activation_block,
             ..Default::default()
         }
     }
