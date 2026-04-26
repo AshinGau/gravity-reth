@@ -1,9 +1,8 @@
 use alloy_eips::eip2718::Encodable2718;
 use alloy_genesis::Genesis;
-use alloy_primitives::Address;
+use alloy_primitives::{b256, hex, Address};
 use futures::StreamExt;
 use reth_chainspec::ChainSpec;
-use reth_e2e_test_utils::{transaction::TransactionTestContext, wallet::Wallet};
 use reth_node_api::{BlockBody, FullNodeComponents, FullNodePrimitives, NodeTypes};
 use reth_node_builder::{rpc::RethRpcAddOns, FullNode, NodeBuilder, NodeConfig, NodeHandle};
 use reth_node_core::args::DevArgs;
@@ -12,8 +11,6 @@ use reth_provider::{providers::BlockchainProvider, CanonStateSubscriptions};
 use reth_rpc_eth_api::{helpers::EthTransactions, EthApiServer};
 use reth_tasks::TaskManager;
 use std::sync::Arc;
-
-const DEV_CHAIN_ID: u64 = 2600;
 
 #[tokio::test]
 async fn can_run_dev_node() -> eyre::Result<()> {
@@ -88,14 +85,18 @@ where
 {
     let mut notifications = node.provider.canonical_state_stream();
 
-    // Submit a signed EIP-1559 tx through RPC. The signer is the first address of the shared
-    // test mnemonic (funded in `custom_chain`'s genesis); helper-generated txs carry
-    // 100 Gwei max_fee_per_gas, clearing Gravity's 50 Gwei protocol floor.
-    let wallet = Wallet::new(1).with_chain_id(DEV_CHAIN_ID).wallet_gen().remove(0);
-    let raw_tx = TransactionTestContext::transfer_tx_bytes(DEV_CHAIN_ID, wallet).await;
+    // submit tx through rpc
+    let raw_tx = hex!(
+        "02f876820a28808477359400847735940082520894ab0840c0e43688012c1adb0f5e3fc665188f83d28a029d394a5d630544000080c080a0a044076b7e67b5deecc63f61a8d7913fab86ca365b344b5759d1fe3563b4c39ea019eab979dd000da04dfc72bb0377c092d30fd9e1cab5ae487de49586cc8b0090"
+    );
 
     let eth_api = node.rpc_registry.eth_api();
-    let hash = eth_api.send_raw_transaction(raw_tx).await.unwrap();
+
+    let hash = eth_api.send_raw_transaction(raw_tx.into()).await.unwrap();
+
+    let expected = b256!("0xb1c6512f4fc202c04355fbda66755e0e344b152e633010e8fd75ecec09b63398");
+
+    assert_eq!(hash, expected);
     println!("submitted transaction: {hash}");
 
     let head = notifications.next().await.unwrap();
@@ -117,7 +118,7 @@ fn custom_chain() -> Arc<ChainSpec> {
     "mixHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
     "coinbase": "0x0000000000000000000000000000000000000000",
     "alloc": {
-        "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266": {
+        "0x6Be02d1d3665660d22FF9624b7BE0551ee1Ac91b": {
             "balance": "0x4a47e3c12448f4ad000000"
         }
     },

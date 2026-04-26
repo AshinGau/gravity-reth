@@ -5,11 +5,14 @@ use alloy_primitives::b256;
 /// Gas per transaction not creating a contract.
 pub const MIN_TRANSACTION_GAS: u64 = 21_000u64;
 
-/// Gravity protocol minimum base fee per gas (50 Gwei).
+/// Reference value for the Gravity protocol minimum base fee per gas (50 Gwei).
 ///
-/// Acts as both the floor for EIP-1559 base fee updates and the initial base fee at
-/// genesis. The EIP-1559 recurrence is clamped at this value, so base fee never drops
-/// below 50 Gwei.
+/// The actual floor enforced at runtime is read from the chainspec field
+/// [`crate::ChainSpec::gravity_min_base_fee`] (parsed from genesis JSON
+/// `config.gravityMinBaseFee`), so non-Gravity chainspecs (e.g. Ethereum mainnet during
+/// reth history sync) keep upstream EIP-1559 semantics. This constant is kept for
+/// documentation, tests, and as the canonical reference value when constructing
+/// Gravity genesis files.
 pub const GRAVITY_MIN_BASE_FEE: u64 = 50_000_000_000;
 
 /// Mainnet prune delete limit.
