@@ -2,6 +2,7 @@
 #[macro_use]
 mod channel;
 pub mod bls_precompile;
+mod eip_2935;
 mod metrics;
 pub mod mint_precompile;
 pub mod onchain_config;
@@ -597,6 +598,10 @@ impl<Storage: GravityStorage> Core<Storage> {
         assert_eq!(ordered_block.transactions.len(), ordered_block.senders.len());
         let mut block = Block {
             header: Header {
+                // Transient carrier: feeds parent_id to the upstream EIP-2935 SystemCaller
+                // as the blockhash-contract calldata. Overwritten with the real chain
+                // parent hash by the seal step below before sealing.
+                parent_hash: ordered_block.parent_id,
                 beneficiary: ordered_block.coinbase,
                 timestamp: ordered_block.timestamp_us / 1_000_000, // convert to seconds
                 mix_hash: ordered_block.prev_randao,
@@ -990,6 +995,18 @@ impl<Storage: GravityStorage> Core<Storage> {
         // ParallelState, so there is a single source of truth for both system and user txns.
         let mut executor = self.evm_config.parallel_executor(state);
         executor.apply_custom_precompiles(self.custom_precompiles.clone());
+
+        // EIP-2935 (Prague) boundary state change: deploy `HISTORY_STORAGE_ADDRESS`
+        // on the Prague activation block. Idempotency is gated by
+        // `transitions_at_timestamp(current_ts, parent_ts)` — see `eip_2935` for the
+        // full rationale.
+        eip_2935::apply_state_changes_for_block(
+            &mut *executor,
+            &self.chain_spec,
+            ordered_block.timestamp_us / 1_000_000,
+            parent_header.timestamp,
+            block_number,
+        );
 
         // Execute system transactions (metadata, DKG, JWK) sequentially.
         // State changes are committed directly into executor's ParallelState.
