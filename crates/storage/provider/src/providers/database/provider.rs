@@ -2319,20 +2319,17 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> TrieWriterV2 for DatabaseProvid
                         // self-destruct
                         storage_trie_cursor.delete_by_key(*hashed_address)?;
                         num_updated += 1;
-                    } else {
-                        for path in &storage_trie_update.removed_nodes {
-                            let path = StoredNibblesSubKey(*path);
-                            storage_trie_cursor.delete_by_key_subkey(*hashed_address, path)?;
-                            num_updated += 1;
-                        }
-                        for (path, node) in &storage_trie_update.storage_nodes {
-                            let path = StoredNibblesSubKey(*path);
-                            storage_trie_cursor.upsert(
-                                *hashed_address,
-                                &StorageNodeEntry::new(path, node.clone()),
-                            )?;
-                            num_updated += 1;
-                        }
+                    }
+                    for path in &storage_trie_update.removed_nodes {
+                        let path = StoredNibblesSubKey(*path);
+                        storage_trie_cursor.delete_by_key_subkey(*hashed_address, path)?;
+                        num_updated += 1;
+                    }
+                    for (path, node) in &storage_trie_update.storage_nodes {
+                        let path = StoredNibblesSubKey(*path);
+                        storage_trie_cursor
+                            .upsert(*hashed_address, &StorageNodeEntry::new(path, node.clone()))?;
+                        num_updated += 1;
                     }
                 }
                 Ok(num_updated)

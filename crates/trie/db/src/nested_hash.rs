@@ -24,7 +24,7 @@ use reth_trie::{
     nested_trie::{Node, Trie, TrieReader, MIN_PARALLEL_NODES},
     updates::TrieUpdatesV2,
     AccountProof, HashedPostState, HashedStorage, MultiProofTargets, Nibbles, StorageTrieUpdatesV2,
-    StoredNibbles, StoredNibblesSubKey, EMPTY_ROOT_HASH,
+    StoredNibbles, StoredNibblesSubKey,
 };
 
 /// Storage trie node reader
@@ -48,8 +48,10 @@ where
 {
     fn read(&mut self, path: &Nibbles) -> Result<Option<Node>, DatabaseError> {
         if let Some(cache) = &self.cache {
-            let value = cache.trie_storage(&self.hashed_address, path);
-            if value.is_some() {
+            // A cache hit is authoritative: it is either a live node or a tombstone
+            // (`Some(None)`), both of which shadow the DB so a removed node is never re-read
+            // from a not-yet-pruned DB.
+            if let Some(value) = cache.trie_storage(&self.hashed_address, path) {
                 return Ok(value);
             }
         }
@@ -59,6 +61,32 @@ where
             .get_by_key_subkey(self.hashed_address, path.clone())?
             .filter(|e| e.path == path)
             .map(|e| e.node.into()))
+    }
+}
+
+/// Storage trie node reader that can be forced to behave as an empty trie.
+///
+/// When an account is wiped (self-destructed and possibly recreated in the same block) the
+/// storage trie must be rebuilt from scratch: any on-disk or cached node belongs to the
+/// destroyed incarnation and must be ignored. [`MaybeEmptyStorageReader::Empty`] returns `None`
+/// for every path so the trie starts empty and only the freshly written slots are inserted.
+#[allow(missing_debug_implementations)]
+pub enum MaybeEmptyStorageReader<C> {
+    /// Always reads nothing (used for wiped storage tries).
+    Empty,
+    /// Reads from the backing storage trie (on-disk + cache).
+    Storage(StorageTrieReader<C>),
+}
+
+impl<C> TrieReader for MaybeEmptyStorageReader<C>
+where
+    C: DbCursorRO<tables::StoragesTrieV2> + DbDupCursorRO<tables::StoragesTrieV2> + Send + Sync,
+{
+    fn read(&mut self, path: &Nibbles) -> Result<Option<Node>, DatabaseError> {
+        match self {
+            Self::Empty => Ok(None),
+            Self::Storage(reader) => reader.read(path),
+        }
     }
 }
 
@@ -79,8 +107,8 @@ where
 {
     fn read(&mut self, path: &Nibbles) -> Result<Option<Node>, DatabaseError> {
         if let Some(cache) = &self.1 {
-            let value = cache.trie_account(path);
-            if value.is_some() {
+            // A cache hit is authoritative (live node or tombstone); both shadow the DB.
+            if let Some(value) = cache.trie_account(path) {
                 return Ok(value);
             }
         }
@@ -290,42 +318,23 @@ where
                             };
                             if let Some(account) = account {
                                 let storage = hashed_storages.get(&hashed_address).cloned();
-                                if let Some(storage) = &storage &&
-                                    storage.wiped
-                                {
-                                    let account = account.into_trie_account(EMPTY_ROOT_HASH);
-                                    updated_account_nodes.push((
-                                        path,
-                                        Some(Node::ValueNode(alloy_rlp::encode(account))),
-                                    ));
-                                    deleted_storage();
-                                    continue;
-                                }
+                                // If the account was wiped (self-destructed, and possibly
+                                // recreated in the same block) the storage trie must be rebuilt
+                                // from scratch: the on-disk / cached nodes belong to the
+                                // destroyed incarnation and must not be read. We build the trie
+                                // with an empty reader and flag the update as `is_deleted` so the
+                                // writer drops all previous nodes before applying the rebuilt
+                                // ones. Note: the recreated slots are still applied below, which
+                                // is exactly what was dropped before this fix.
+                                let wiped = storage.as_ref().map(|s| s.wiped).unwrap_or(false);
 
                                 let mut updated_storage_nodes: [Vec<(Nibbles, Option<Node>)>; 16] =
                                     Default::default();
-                                let create_reader = || {
-                                    let cursor =
-                                        self.tx.cursor_dup_read::<tables::StoragesTrieV2>()?;
-                                    Ok(StorageTrieReader::new(
-                                        cursor,
-                                        hashed_address,
-                                        self.cache.clone(),
-                                    ))
-                                };
-
-                                let cursor = self.tx.cursor_dup_read::<tables::StoragesTrieV2>()?;
-                                let trie_reader = StorageTrieReader::new(
-                                    cursor,
-                                    hashed_address,
-                                    self.cache.clone(),
-                                );
                                 // only make the large storage trie parallel
                                 let parallel = storage
                                     .as_ref()
                                     .map(|s| s.storage.len() > MIN_PARALLEL_NODES)
                                     .unwrap_or(false);
-                                let mut storage_trie = Trie::new(trie_reader, parallel)?;
                                 if let Some(storage) = storage {
                                     for (hashed_slot, value) in storage.storage {
                                         let nibbles = Nibbles::unpack(hashed_slot);
@@ -339,6 +348,24 @@ where
                                         updated_storage_nodes[index].push((nibbles, value));
                                     }
                                 }
+
+                                let create_reader = || {
+                                    if wiped {
+                                        Ok(MaybeEmptyStorageReader::Empty)
+                                    } else {
+                                        let cursor =
+                                            self.tx.cursor_dup_read::<tables::StoragesTrieV2>()?;
+                                        Ok(MaybeEmptyStorageReader::Storage(
+                                            StorageTrieReader::new(
+                                                cursor,
+                                                hashed_address,
+                                                self.cache.clone(),
+                                            ),
+                                        ))
+                                    }
+                                };
+                                let trie_reader = create_reader()?;
+                                let mut storage_trie = Trie::new(trie_reader, parallel)?;
                                 storage_trie
                                     .parallel_update(updated_storage_nodes, create_reader)?;
                                 let account = account.into_trie_account(storage_trie.hash());
@@ -349,7 +376,23 @@ where
 
                                 if need_update {
                                     let trie_output = storage_trie.take_output();
-                                    if !trie_output.is_empty() {
+                                    if wiped {
+                                        // Always emit the deletion marker so the previous
+                                        // storage trie is wiped, carrying the rebuilt nodes
+                                        // (which are empty iff the recreated storage is empty).
+                                        assert!(trie_update
+                                            .lock()
+                                            .storage_tries
+                                            .insert(
+                                                hashed_address,
+                                                StorageTrieUpdatesV2 {
+                                                    is_deleted: true,
+                                                    storage_nodes: trie_output.update_nodes,
+                                                    removed_nodes: trie_output.removed_nodes,
+                                                }
+                                            )
+                                            .is_none());
+                                    } else if !trie_output.is_empty() {
                                         assert!(trie_update
                                             .lock()
                                             .storage_tries
@@ -423,7 +466,7 @@ mod tests {
         test_utils::create_test_provider_factory, DatabaseProviderFactory, TrieWriterV2,
     };
     use reth_trie::{
-        nested_trie::{Node, Trie, TrieReader},
+        nested_trie::{Node, NodeFlag, Trie, TrieReader},
         test_utils, HashedPostState, HashedStorage, EMPTY_ROOT_HASH,
     };
 
@@ -471,29 +514,32 @@ mod tests {
             }
 
             for (hashed_address, storage_trie_update) in &input.storage_tries {
-                if storage_trie_update.is_deleted {
-                    if let Some(destruct_account) = storage_trie.remove(hashed_address) {
-                        num_update += destruct_account.len();
-                    }
-                } else {
-                    let mut remove_storage = false;
-                    if let Some(storage) = storage_trie.get_mut(hashed_address) {
-                        for path in &storage_trie_update.removed_nodes {
-                            if storage.remove(path).is_some() {
-                                num_update += 1;
-                            }
-                        }
-                        remove_storage = storage.is_empty();
-                    }
-                    if remove_storage {
-                        storage_trie.remove(hashed_address);
-                    }
-                    if !storage_trie_update.storage_nodes.is_empty() {
-                        let storage = storage_trie.entry(*hashed_address).or_default();
-                        for (path, node) in storage_trie_update.storage_nodes.clone() {
-                            storage.insert(path, node.into());
+                // Mirror the production writers: a deletion wipes the previous storage trie, but
+                // the rebuilt nodes carried in the same update must still be applied afterwards
+                // (the self-destruct + recreate case).
+                if storage_trie_update.is_deleted &&
+                    let Some(destruct_account) = storage_trie.remove(hashed_address)
+                {
+                    num_update += destruct_account.len();
+                }
+                let remove_storage = if let Some(storage) = storage_trie.get_mut(hashed_address) {
+                    for path in &storage_trie_update.removed_nodes {
+                        if storage.remove(path).is_some() {
                             num_update += 1;
                         }
+                    }
+                    storage.is_empty()
+                } else {
+                    false
+                };
+                if remove_storage {
+                    storage_trie.remove(hashed_address);
+                }
+                if !storage_trie_update.storage_nodes.is_empty() {
+                    let storage = storage_trie.entry(*hashed_address).or_default();
+                    for (path, node) in storage_trie_update.storage_nodes.clone() {
+                        storage.insert(path, node.into());
+                        num_update += 1;
                     }
                 }
             }
@@ -671,5 +717,298 @@ mod tests {
         let (parallel_root_hash, ..) =
             NestedStateRoot::new(tx, None).calculate(&hashed_state).unwrap();
         assert_eq!(parallel_root_hash, test_utils::state_root(state))
+    }
+
+    #[test]
+    fn nested_state_root_wipe_and_recreate() {
+        // Regression test for the self-destruct + recreate bug (Galxe/gravity-audit#715):
+        // when an account's storage is wiped and recreated in the same block, the recreated
+        // slots must survive instead of collapsing the storage root to `EMPTY_ROOT_HASH`.
+        let factory = create_test_provider_factory();
+
+        let address = Address::random();
+        let hashed_address = keccak256(address);
+        let account = Account { balance: U256::from(42u64), ..Default::default() };
+
+        // Round 1: account with an initial storage set, persisted into the trie tables.
+        let mut storage1 = HashMap::<B256, U256>::default();
+        storage1.insert(B256::from(U256::from(1u64)), U256::from(111u64));
+        storage1.insert(B256::from(U256::from(2u64)), U256::from(222u64));
+
+        let mut hashed_state1 = HashedPostState::default();
+        hashed_state1.accounts.insert(hashed_address, Some(account));
+        let mut hashed_storage1 = HashedStorage::new(false);
+        for (slot, value) in &storage1 {
+            hashed_storage1.storage.insert(keccak256(slot), *value);
+        }
+        hashed_state1.storages.insert(hashed_address, hashed_storage1);
+
+        let provider_rw = factory.provider_rw().unwrap();
+        let (_root1, updates1) =
+            NestedStateRoot::new(provider_rw.tx_ref(), None).calculate(&hashed_state1).unwrap();
+        provider_rw.write_trie_updatesv2(&updates1).unwrap();
+        provider_rw.commit().unwrap();
+
+        // Round 2: wipe the account and recreate it with a brand new storage set.
+        let mut storage2 = HashMap::<B256, U256>::default();
+        storage2.insert(B256::from(U256::from(3u64)), U256::from(333u64));
+        storage2.insert(B256::from(U256::from(4u64)), U256::from(444u64));
+
+        let mut hashed_state2 = HashedPostState::default();
+        hashed_state2.accounts.insert(hashed_address, Some(account));
+        let mut hashed_storage2 = HashedStorage::new(true); // wiped
+        for (slot, value) in &storage2 {
+            hashed_storage2.storage.insert(keccak256(slot), *value);
+        }
+        hashed_state2.storages.insert(hashed_address, hashed_storage2);
+
+        let provider_rw = factory.provider_rw().unwrap();
+        let (root2, updates2) =
+            NestedStateRoot::new(provider_rw.tx_ref(), None).calculate(&hashed_state2).unwrap();
+
+        // The storage update must wipe the old trie while still carrying the rebuilt nodes.
+        let storage_update = updates2.storage_tries.get(&hashed_address).unwrap();
+        assert!(storage_update.is_deleted);
+        assert!(!storage_update.storage_nodes.is_empty());
+
+        // The recreated storage must be reflected in the root: it has to match an independent
+        // computation of `{account -> storage2}`. Before the fix the root would have collapsed
+        // to the account with empty storage.
+        let mut reference = HashMap::<Address, (Account, HashMap<B256, U256>)>::default();
+        reference.insert(address, (account, storage2.clone()));
+        assert_eq!(root2, test_utils::state_root(reference));
+
+        // Persisting round 2 and reading the storage back from the on-disk trie yields the same
+        // root, proving the wiped nodes were replaced rather than merged with the stale ones.
+        provider_rw.write_trie_updatesv2(&updates2).unwrap();
+        provider_rw.commit().unwrap();
+
+        let provider_ro = factory.database_provider_ro().unwrap();
+        let mut hashed_state3 = HashedPostState::default();
+        hashed_state3.accounts.insert(hashed_address, Some(account));
+        let (root3, _updates3) =
+            NestedStateRoot::new(provider_ro.tx_ref(), None).calculate(&hashed_state3).unwrap();
+        assert_eq!(root3, root2);
+    }
+
+    fn single_account_state(
+        hashed_address: B256,
+        account: Account,
+        wiped: bool,
+        storage: &HashMap<B256, U256>,
+    ) -> HashedPostState {
+        let mut hashed_state = HashedPostState::default();
+        hashed_state.accounts.insert(hashed_address, Some(account));
+        let mut hashed_storage = HashedStorage::new(wiped);
+        for (slot, value) in storage {
+            hashed_storage.storage.insert(keccak256(*slot), *value);
+        }
+        hashed_state.storages.insert(hashed_address, hashed_storage);
+        hashed_state
+    }
+
+    #[test]
+    fn nested_state_root_wipe_and_recreate_multi_account() {
+        // A wipe + recreate of one account must not disturb the other accounts, and the new
+        // storage of the recreated account must be reflected in the root.
+        let factory = create_test_provider_factory();
+
+        let accounts: Vec<(Address, Account, HashMap<B256, U256>)> = (0..3u64)
+            .map(|i| {
+                let address = Address::random();
+                let account = Account { balance: U256::from(100 + i), ..Default::default() };
+                let mut storage = HashMap::<B256, U256>::default();
+                for j in 0..4u64 {
+                    storage.insert(B256::from(U256::from(i * 10 + j + 1)), U256::from((j + 1) * 7));
+                }
+                (address, account, storage)
+            })
+            .collect();
+
+        // Round 1: persist all three accounts.
+        let mut state1 = HashedPostState::default();
+        for (address, account, storage) in &accounts {
+            let hashed_address = keccak256(address);
+            state1.accounts.insert(hashed_address, Some(*account));
+            let mut hs = HashedStorage::new(false);
+            for (slot, value) in storage {
+                hs.storage.insert(keccak256(*slot), *value);
+            }
+            state1.storages.insert(hashed_address, hs);
+        }
+        let provider_rw = factory.provider_rw().unwrap();
+        let (_root1, updates1) =
+            NestedStateRoot::new(provider_rw.tx_ref(), None).calculate(&state1).unwrap();
+        provider_rw.write_trie_updatesv2(&updates1).unwrap();
+        provider_rw.commit().unwrap();
+
+        // Round 2: wipe + recreate accounts[0] with brand new storage; leave the others alone.
+        let (wiped_addr, wiped_acc, _old) = accounts[0].clone();
+        let mut new_storage = HashMap::<B256, U256>::default();
+        new_storage.insert(B256::from(U256::from(999u64)), U256::from(12345u64));
+        new_storage.insert(B256::from(U256::from(1000u64)), U256::from(67890u64));
+        let state2 = single_account_state(keccak256(wiped_addr), wiped_acc, true, &new_storage);
+
+        let provider_rw = factory.provider_rw().unwrap();
+        let (root2, updates2) =
+            NestedStateRoot::new(provider_rw.tx_ref(), None).calculate(&state2).unwrap();
+        provider_rw.write_trie_updatesv2(&updates2).unwrap();
+        provider_rw.commit().unwrap();
+
+        // Reference: accounts[0] now holds only `new_storage`; the others keep their original.
+        let mut reference = HashMap::<Address, (Account, HashMap<B256, U256>)>::default();
+        reference.insert(wiped_addr, (wiped_acc, new_storage));
+        for (address, account, storage) in accounts.iter().skip(1) {
+            reference.insert(*address, (*account, storage.clone()));
+        }
+        assert_eq!(root2, test_utils::state_root(reference));
+    }
+
+    #[test]
+    fn cache_shadows_stale_db_after_wipe() {
+        // End-to-end reproduction of the persistence-lag staleness (Galxe/gravity-audit#715):
+        // after an account is wiped, a later read must observe the wiped (empty) storage through
+        // the cache tombstone instead of resurrecting the destroyed incarnation from a DB that
+        // has not yet pruned it.
+        let factory = create_test_provider_factory();
+        let cache = PersistBlockCache::new();
+
+        let address = Address::random();
+        let hashed_address = keccak256(address);
+        let account = Account { balance: U256::from(7u64), ..Default::default() };
+
+        // Round 1: persist A with storage S1 into BOTH the DB and the cache.
+        let mut s1 = HashMap::<B256, U256>::default();
+        s1.insert(B256::from(U256::from(1u64)), U256::from(111u64));
+        s1.insert(B256::from(U256::from(2u64)), U256::from(222u64));
+        let state1 = single_account_state(hashed_address, account, false, &s1);
+
+        let provider_rw = factory.provider_rw().unwrap();
+        let (_root1, updates1) = NestedStateRoot::new(provider_rw.tx_ref(), Some(cache.clone()))
+            .calculate(&state1)
+            .unwrap();
+        provider_rw.write_trie_updatesv2(&updates1).unwrap();
+        cache.write_trie_updates(&updates1, 1);
+        provider_rw.commit().unwrap();
+
+        // Round 2: wipe A (no recreated storage). Update the CACHE only and deliberately do NOT
+        // commit to the DB, simulating the async-persistence lag the cache exists to bridge.
+        let empty = HashMap::<B256, U256>::default();
+        let state2 = single_account_state(hashed_address, account, true, &empty);
+        let provider_rw = factory.provider_rw().unwrap();
+        let (_root2, updates2) = NestedStateRoot::new(provider_rw.tx_ref(), Some(cache.clone()))
+            .calculate(&state2)
+            .unwrap();
+        cache.write_trie_updates(&updates2, 2);
+        drop(provider_rw); // discard without committing -> the DB still holds S1.
+
+        // Round 3: touch A again (balance-only change) and recompute through cache + stale DB.
+        // The storage root must be `EMPTY_ROOT_HASH`, taken from the cache tombstone, not the
+        // stale S1 root still sitting in the DB.
+        let account3 = Account { balance: U256::from(8u64), ..Default::default() };
+        let mut state3 = HashedPostState::default();
+        state3.accounts.insert(hashed_address, Some(account3));
+
+        let provider_ro = factory.database_provider_ro().unwrap();
+        let (root3, _u3) =
+            NestedStateRoot::new(provider_ro.tx_ref(), Some(cache)).calculate(&state3).unwrap();
+
+        let mut reference = HashMap::<Address, (Account, HashMap<B256, U256>)>::default();
+        reference.insert(address, (account3, HashMap::default()));
+        assert_eq!(root3, test_utils::state_root(reference));
+    }
+
+    #[test]
+    fn nested_state_root_wipe_to_empty() {
+        // An account wiped and recreated with EMPTY storage in the same block: the storage root
+        // must collapse to `EMPTY_ROOT_HASH` and the on-disk storage trie must be cleared, while
+        // the account itself is retained.
+        let factory = create_test_provider_factory();
+        let address = Address::random();
+        let hashed_address = keccak256(address);
+        let account = Account { balance: U256::from(5u64), ..Default::default() };
+
+        // Round 1: account with storage, persisted.
+        let mut s1 = HashMap::<B256, U256>::default();
+        s1.insert(B256::from(U256::from(1u64)), U256::from(11u64));
+        s1.insert(B256::from(U256::from(2u64)), U256::from(22u64));
+        let state1 = single_account_state(hashed_address, account, false, &s1);
+        let provider_rw = factory.provider_rw().unwrap();
+        let (_r1, updates1) =
+            NestedStateRoot::new(provider_rw.tx_ref(), None).calculate(&state1).unwrap();
+        provider_rw.write_trie_updatesv2(&updates1).unwrap();
+        provider_rw.commit().unwrap();
+
+        // Round 2: wipe + recreate with no storage.
+        let empty = HashMap::<B256, U256>::default();
+        let state2 = single_account_state(hashed_address, account, true, &empty);
+        let provider_rw = factory.provider_rw().unwrap();
+        let (root2, updates2) =
+            NestedStateRoot::new(provider_rw.tx_ref(), None).calculate(&state2).unwrap();
+
+        // The storage update wipes the trie and carries no rebuilt nodes.
+        let su = updates2.storage_tries.get(&hashed_address).unwrap();
+        assert!(su.is_deleted);
+        assert!(su.storage_nodes.is_empty());
+
+        // Root matches the account with empty storage.
+        let mut reference = HashMap::<Address, (Account, HashMap<B256, U256>)>::default();
+        reference.insert(address, (account, HashMap::default()));
+        assert_eq!(root2, test_utils::state_root(reference));
+
+        // Persisting and reading back from the on-disk (now-wiped) trie yields the same root.
+        provider_rw.write_trie_updatesv2(&updates2).unwrap();
+        provider_rw.commit().unwrap();
+        let provider_ro = factory.database_provider_ro().unwrap();
+        let mut state3 = HashedPostState::default();
+        state3.accounts.insert(hashed_address, Some(account));
+        let (root3, _u3) =
+            NestedStateRoot::new(provider_ro.tx_ref(), None).calculate(&state3).unwrap();
+        assert_eq!(root3, root2);
+    }
+
+    #[test]
+    fn write_trie_updatesv2_wipe_clears_old_storage_nodes() {
+        // `write_trie_updatesv2` must, on `is_deleted`, drop ALL previous storage-trie nodes from
+        // the DB before writing the rebuilt ones.
+        let factory = create_test_provider_factory();
+        let address = keccak256(Address::random());
+        let root = Nibbles::new();
+        let old_path = Nibbles::from_nibbles_unchecked([0x1]);
+        let leaf = |v: u64| Node::ShortNode {
+            key: Nibbles::from_nibbles_unchecked([0x9]),
+            value: Box::new(Node::ValueNode(v.to_be_bytes().to_vec())),
+            flags: NodeFlag::new(None),
+        };
+        let read_node = |path: &Nibbles| {
+            let provider = factory.database_provider_ro().unwrap();
+            let cursor = provider.tx_ref().cursor_dup_read::<tables::StoragesTrieV2>().unwrap();
+            StorageTrieReader::new(cursor, address, None).read(path).unwrap()
+        };
+
+        // Round 1: write a root + an extra node.
+        let mut u1 = TrieUpdatesV2::default();
+        let mut s1 = StorageTrieUpdatesV2::default();
+        s1.storage_nodes.insert(root, leaf(1));
+        s1.storage_nodes.insert(old_path, leaf(2));
+        u1.storage_tries.insert(address, s1);
+        let provider_rw = factory.provider_rw().unwrap();
+        provider_rw.write_trie_updatesv2(&u1).unwrap();
+        provider_rw.commit().unwrap();
+        assert!(read_node(&root).is_some());
+        assert!(read_node(&old_path).is_some());
+
+        // Round 2: wipe + recreate with only a new root.
+        let mut u2 = TrieUpdatesV2::default();
+        let mut s2 = StorageTrieUpdatesV2 { is_deleted: true, ..Default::default() };
+        s2.storage_nodes.insert(root, leaf(3));
+        u2.storage_tries.insert(address, s2);
+        let provider_rw = factory.provider_rw().unwrap();
+        provider_rw.write_trie_updatesv2(&u2).unwrap();
+        provider_rw.commit().unwrap();
+
+        // The old node is gone; only the rebuilt root remains.
+        assert_eq!(read_node(&root), Some(leaf(3)));
+        assert!(read_node(&old_path).is_none());
     }
 }
