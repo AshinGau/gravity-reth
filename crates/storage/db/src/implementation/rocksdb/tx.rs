@@ -72,6 +72,10 @@ pub struct Tx<K: cursor::TransactionKind> {
     /// Arc<Mutex<_>> enables shared access across threads during parallel commit.
     storage_batch: Arc<Mutex<rocksdb::WriteBatch>>,
 
+    /// When set, `commit_view` writes with `sync=false` (no per-commit WAL fsync). Trades
+    /// power-loss durability for throughput; see `commit_view` and `--db.fast-sync`.
+    fast_sync: bool,
+
     /// Phantom data to carry the transaction kind (RO or RW) at compile time.
     /// Enables type-safe distinction between read-only and read-write transactions.
     _mode: std::marker::PhantomData<K>,
@@ -84,7 +88,12 @@ impl<K: cursor::TransactionKind> std::fmt::Debug for Tx<K> {
 }
 
 impl<K: cursor::TransactionKind> Tx<K> {
-    pub(crate) fn new(state_db: Arc<DB>, account_db: Arc<DB>, storage_db: Arc<DB>) -> Self {
+    pub(crate) fn new(
+        state_db: Arc<DB>,
+        account_db: Arc<DB>,
+        storage_db: Arc<DB>,
+        fast_sync: bool,
+    ) -> Self {
         Self {
             state_db,
             account_db,
@@ -92,6 +101,7 @@ impl<K: cursor::TransactionKind> Tx<K> {
             state_batch: Arc::new(Mutex::new(rocksdb::WriteBatch::default())),
             account_batch: Arc::new(Mutex::new(rocksdb::WriteBatch::default())),
             storage_batch: Arc::new(Mutex::new(rocksdb::WriteBatch::default())),
+            fast_sync,
             _mode: std::marker::PhantomData,
         }
     }
@@ -262,11 +272,20 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
     /// inconsistencies (orphaned trie data), but these are always resolved by the checkpoint
     /// mechanism and idempotent retry logic.
     fn commit_view(&self) -> Result<bool, DatabaseError> {
-        // Use sync writes so every commit() call is durable before returning.
-        // Combined with stage-level idempotency (recovery.rs), this guarantees
-        // that partial block writes are always recoverable even after power loss.
+        // By default use sync writes so every commit() is durable before returning; combined
+        // with stage-level idempotency (recovery.rs) this makes partial block writes recoverable
+        // even after power loss.
+        //
+        // `fast_sync` (opt-in, --db.fast-sync) sets sync=false: writes still land in the memtable
+        // (so reads later in this process observe them — read-your-writes holds) but the WAL is
+        // not fsync'd per commit, which removes the per-commit fsync that bottlenecks from-genesis
+        // catch-up. The trade-off is durability: a process crash still recovers from the
+        // OS-buffered WAL, but a power loss can lose the un-synced tail and, because the three DBs
+        // fsync independently, leave them at slightly different points — recovery then re-executes
+        // from the (idempotent) stage checkpoints, and any blocks lost past that are re-supplied by
+        // consensus. Intended for PFN/fast catch-up where that window is acceptable.
         let mut sync_opts = WriteOptions::default();
-        sync_opts.set_sync(true);
+        sync_opts.set_sync(!self.fast_sync);
 
         // Acquire locks on all batches upfront to prepare for commit
         let mut state_batch = self.state_batch.lock();

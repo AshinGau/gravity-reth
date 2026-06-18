@@ -71,6 +71,11 @@ pub struct DatabaseArgs {
     /// - 3 paths: First dir is state, second is `account_trie`, third is `storage_trie`
     #[arg(long = "db.sharding-directories", value_parser = parse_sharding_directories)]
     pub sharding_directories: Option<ShardingDirectories>,
+    /// Skip the per-commit WAL fsync (`sync=false`) for much higher write throughput, at the cost
+    /// of power-loss durability. Intended for PFN / from-genesis catch-up where lost blocks are
+    /// re-supplied by consensus. Default: off.
+    #[arg(long = "db.fast-sync", default_value_t = false)]
+    pub fast_sync: bool,
 }
 
 impl DatabaseArgs {
@@ -93,6 +98,7 @@ impl DatabaseArgs {
             .with_max_bytes_for_level_base(self.max_bytes_for_level_base)
             .with_bytes_per_sync(self.bytes_per_sync)
             .with_sharding_directories(self.sharding_directories)
+            .with_fast_sync(self.fast_sync)
     }
 }
 

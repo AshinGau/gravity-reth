@@ -76,6 +76,9 @@ pub struct DatabaseArguments {
     /// Semicolon separated `RocksDB` sharding directories.
     /// If set, must contain 2 or 3 paths. See `DatabaseEnv::open` for routing rules.
     pub sharding_directories: Option<ShardingDirectories>,
+    /// Skip the per-commit WAL fsync (`sync=false`), trading power-loss durability for write
+    /// throughput. Opt-in via `--db.fast-sync`; default false. See `Tx::commit_view`.
+    pub fast_sync: bool,
 }
 
 impl DatabaseArguments {
@@ -113,6 +116,7 @@ impl DatabaseArguments {
             max_bytes_for_level_base: None,
             bytes_per_sync: None,
             sharding_directories: None,
+            fast_sync: false,
         }
     }
 
@@ -179,6 +183,12 @@ impl DatabaseArguments {
     /// Set sharding directories for `RocksDB` (semicolon separated paths).
     pub const fn with_sharding_directories(mut self, dirs: Option<ShardingDirectories>) -> Self {
         self.sharding_directories = dirs;
+        self
+    }
+
+    /// Enable fast-sync mode (skip the per-commit WAL fsync). See [`DatabaseArguments::fast_sync`].
+    pub const fn with_fast_sync(mut self, fast_sync: bool) -> Self {
+        self.fast_sync = fast_sync;
         self
     }
 
@@ -256,6 +266,8 @@ pub struct DatabaseEnv {
     pub(crate) storage_db: Arc<DB>,
     /// Database environment kind (read-only or read-write).
     kind: DatabaseEnvKind,
+    /// When set, transactions skip the per-commit WAL fsync. See [`DatabaseArguments::fast_sync`].
+    fast_sync: bool,
 }
 
 impl DatabaseEnv {
@@ -285,7 +297,7 @@ impl DatabaseEnv {
         let account_db = dbs.get(&account_path).cloned().expect("account DB handle missing");
         let storage_db = dbs.get(&storage_path).cloned().expect("storage DB handle missing");
 
-        Ok(Self { state_db, account_db, storage_db, kind })
+        Ok(Self { state_db, account_db, storage_db, kind, fast_sync: args.fast_sync })
     }
 
     /// Resolve shard paths based on configuration.
@@ -659,11 +671,21 @@ impl reth_db_api::database::Database for DatabaseEnv {
     type TXMut = tx::Tx<tx::RW>;
 
     fn tx(&self) -> Result<Self::TX, crate::DatabaseError> {
-        Ok(tx::Tx::new(self.state_db.clone(), self.account_db.clone(), self.storage_db.clone()))
+        Ok(tx::Tx::new(
+            self.state_db.clone(),
+            self.account_db.clone(),
+            self.storage_db.clone(),
+            self.fast_sync,
+        ))
     }
 
     fn tx_mut(&self) -> Result<Self::TXMut, crate::DatabaseError> {
-        Ok(tx::Tx::new(self.state_db.clone(), self.account_db.clone(), self.storage_db.clone()))
+        Ok(tx::Tx::new(
+            self.state_db.clone(),
+            self.account_db.clone(),
+            self.storage_db.clone(),
+            self.fast_sync,
+        ))
     }
 }
 
