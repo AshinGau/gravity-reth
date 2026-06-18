@@ -22,6 +22,24 @@ pub struct GravityArgs {
     #[arg(long = "gravity.cache.max-persist-gap", default_value_t = 64)]
     pub cache_max_persist_gap: u64,
 
+    /// Merge consecutive blocks into a single DB commit during persistence to
+    /// amortize the per-commit fsync cost. Trades a larger crash-replay window
+    /// (re-supplied by consensus) for much higher catch-up throughput. default false.
+    #[arg(long = "gravity.cache.merge-block", default_value = "false")]
+    pub cache_merge_block: bool,
+
+    /// When `merge-block` is on, close a merged group once its accumulated
+    /// `gas_used` reaches this threshold (a cheap O(1) proxy for write size; empty
+    /// blocks have ~0 gas so they coalesce up to merge-block-max-count). default 3e9.
+    #[arg(long = "gravity.cache.merge-block-max-gas", default_value_t = 3_000_000_000)]
+    pub cache_merge_block_max_gas: u64,
+
+    /// When `merge-block` is on, hard cap on the number of blocks coalesced into
+    /// one commit (also bounds the per-call persist drain; keep <= max-persist-gap).
+    /// default 1024.
+    #[arg(long = "gravity.cache.merge-block-max-count", default_value_t = 1024)]
+    pub cache_merge_block_max_count: u64,
+
     /// The max size of cached items
     #[arg(long = "gravity.cache.capacity", default_value_t = 2_000_000, value_parser = clap::value_parser!(u64).range(1_000..=100_000_000))]
     pub cache_capacity: u64,
@@ -46,6 +64,9 @@ impl Default for GravityArgs {
             disable_grevm: false,
             pipe_block_gas_limit: 1_000_000_000,
             cache_max_persist_gap: 64,
+            cache_merge_block: false,
+            cache_merge_block_max_gas: 3_000_000_000,
+            cache_merge_block_max_count: 1024,
             cache_capacity: 2_000_000,
             report_db_metrics: false,
             trie_parallel_levels: 1,
@@ -62,6 +83,9 @@ impl GravityArgs {
             disable_grevm: self.disable_grevm,
             pipe_block_gas_limit: self.pipe_block_gas_limit,
             cache_max_persist_gap: self.cache_max_persist_gap,
+            cache_merge_block: self.cache_merge_block,
+            cache_merge_block_max_gas: self.cache_merge_block_max_gas,
+            cache_merge_block_max_count: self.cache_merge_block_max_count,
             cache_capacity: self.cache_capacity,
             report_db_metrics: self.report_db_metrics,
             trie_parallel_levels: self.trie_parallel_levels,

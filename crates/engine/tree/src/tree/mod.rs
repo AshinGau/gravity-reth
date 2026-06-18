@@ -1791,11 +1791,20 @@ where
             .values()
             .all(|block| block.trie_updates().is_some());
 
+        // When block-merge persistence is on, drain many more blocks per batch so the
+        // merge size threshold is meaningful (the per-commit fsync is then amortized
+        // across the whole group). Otherwise keep the conservative default.
+        let max_blocks_to_persist = if get_gravity_config().cache_merge_block {
+            get_gravity_config().cache_merge_block_max_count.max(1)
+        } else {
+            MAX_BLOCKS_TO_PERSIST
+        };
+
         let target_number = if all_blocks_have_trie_updates {
             // Persist only up to block buffer target if all blocks have trie updates
             canonical_head_number
                 .saturating_sub(self.config.memory_block_buffer_target())
-                .min(last_persisted_number + MAX_BLOCKS_TO_PERSIST)
+                .min(last_persisted_number + max_blocks_to_persist)
         } else {
             // Persist all blocks if any block is missing trie updates
             canonical_head_number

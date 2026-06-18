@@ -13,6 +13,15 @@ pub struct Config {
     pub pipe_block_gas_limit: u64,
     /// The max block height between merged and pesist block height.
     pub cache_max_persist_gap: u64,
+    /// Merge consecutive blocks into a single DB commit during persistence to
+    /// amortize the per-commit fsync cost. default false.
+    pub cache_merge_block: bool,
+    /// When `cache_merge_block` is on, close a merged group once its accumulated
+    /// `gas_used` reaches this threshold (cheap proxy for write size).
+    pub cache_merge_block_max_gas: u64,
+    /// When `cache_merge_block` is on, hard cap on blocks coalesced into one commit
+    /// (also bounds the per-call persist drain).
+    pub cache_merge_block_max_count: u64,
     /// The max size of cached items
     pub cache_capacity: u64,
     /// Report db metrics
@@ -38,6 +47,9 @@ pub fn get_gravity_config() -> &'static Config {
         disable_grevm: std::env::var("GRETH_DISABLE_GREVM").is_ok(),
         pipe_block_gas_limit: 1_000_000_000,
         cache_max_persist_gap: 64,
+        cache_merge_block: false,
+        cache_merge_block_max_gas: 3_000_000_000,
+        cache_merge_block_max_count: 1024,
         cache_capacity: 2_000_000,
         report_db_metrics: false,
         trie_parallel_levels: 1,
