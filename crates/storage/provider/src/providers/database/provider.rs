@@ -2880,6 +2880,90 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider + 'static> BlockWrite
         Ok(StoredBlockBodyIndices { first_tx_num, tx_count })
     }
 
+    fn insert_blocks_batched(
+        &self,
+        blocks: Vec<RecoveredBlock<Self::Block>>,
+        write_to: StorageLocation,
+    ) -> ProviderResult<Vec<StoredBlockBodyIndices>> {
+        if blocks.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Seed the running transaction counter and parent total difficulty ONCE from committed
+        // state, then thread both in memory across the batch. A single (uncommitted) provider
+        // transaction is backed by a RocksDB `WriteBatch`, which does not surface its own pending
+        // writes to subsequent reads. Re-reading `TransactionBlocks` per block (as `insert_block`
+        // does) would therefore return the stale pre-batch value for every block, collapsing the
+        // whole group onto the same starting tx number and colliding with the static-file tx
+        // writer (which does advance in memory). See `commit_block_group` in the engine tree.
+        let mut next_tx_num = self
+            .tx
+            .cursor_read::<tables::TransactionBlocks>()?
+            .last()?
+            .map(|(n, _)| n + 1)
+            .unwrap_or_default();
+
+        let first_block_number = blocks[0].number();
+        let mut parent_ttd = if first_block_number == 0 {
+            U256::ZERO
+        } else {
+            self.header_td_by_number(first_block_number - 1)?.unwrap_or_default()
+        };
+
+        let mut indices = Vec::with_capacity(blocks.len());
+        let mut bodies = Vec::with_capacity(blocks.len());
+
+        for block in blocks {
+            let block_number = block.number();
+            let ttd = parent_ttd + block.header().difficulty();
+
+            if write_to.database() {
+                self.tx.put::<tables::CanonicalHeaders>(block_number, block.hash())?;
+                self.tx
+                    .put::<tables::Headers<HeaderTy<N>>>(block_number, block.header().clone())?;
+                self.tx.put::<tables::HeaderTerminalDifficulties>(block_number, ttd.into())?;
+            }
+
+            if write_to.static_files() {
+                let mut writer = self
+                    .static_file_provider
+                    .get_writer(block_number, StaticFileSegment::Headers)?;
+                writer.append_header(block.header(), ttd, &block.hash())?;
+            }
+
+            self.tx.put::<tables::HeaderNumbers>(block.hash(), block_number)?;
+
+            // Senders and tx-hash lookups are keyed by transaction number; advance the in-memory
+            // counter so each block gets a distinct, contiguous tx range.
+            let first_tx_num = next_tx_num;
+            let tx_count = block.body().transaction_count() as u64;
+            for (transaction, sender) in block.body().transactions_iter().zip(block.senders_iter())
+            {
+                let hash = transaction.tx_hash();
+
+                if self.prune_modes.sender_recovery.as_ref().is_none_or(|m| !m.is_full()) {
+                    self.tx.put::<tables::TransactionSenders>(next_tx_num, *sender)?;
+                }
+
+                if self.prune_modes.transaction_lookup.is_none_or(|m| !m.is_full()) {
+                    self.tx.put::<tables::TransactionHashNumbers>(*hash, next_tx_num)?;
+                }
+                next_tx_num += 1;
+            }
+
+            indices.push(StoredBlockBodyIndices { first_tx_num, tx_count });
+            parent_ttd = ttd;
+            bodies.push((block_number, Some(block.into_body())));
+        }
+
+        // Write all bodies in a single call. `append_block_bodies` derives its own tx counter from
+        // the same committed `TransactionBlocks` value and threads it across the batch in memory,
+        // so it produces tx numbers identical to the senders/lookups written above.
+        self.append_block_bodies(bodies, write_to)?;
+
+        Ok(indices)
+    }
+
     fn append_block_bodies(
         &self,
         bodies: Vec<(BlockNumber, Option<BodyTy<N>>)>,

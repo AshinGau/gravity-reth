@@ -452,11 +452,20 @@ where
                     StageId::Execution,
                     Some(group_first),
                 )?;
+                // Insert the whole group in a single batched call so the transaction-number
+                // counter is threaded in memory across blocks. Looping per-block `insert_block`
+                // here re-reads that counter from the uncommitted DB each time; on RocksDB's
+                // WriteBatch (no read-your-writes) every block would restart at the same tx number
+                // and collide with the static-file tx writer.
+                let mut se_blocks = Vec::with_capacity(se_items.len());
+                let mut se_outputs = Vec::with_capacity(se_items.len());
                 for (recovered_block, execution_output) in se_items {
-                    let body_indices = provider_rw.insert_block(
-                        Arc::unwrap_or_clone(recovered_block),
-                        StorageLocation::Both,
-                    )?;
+                    se_blocks.push(Arc::unwrap_or_clone(recovered_block));
+                    se_outputs.push(execution_output);
+                }
+                let group_indices =
+                    provider_rw.insert_blocks_batched(se_blocks, StorageLocation::Both)?;
+                for (execution_output, body_indices) in se_outputs.into_iter().zip(group_indices) {
                     provider_rw.write_state_with_indices(
                         &execution_output,
                         OriginalValuesKnown::No,
