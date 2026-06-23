@@ -1,17 +1,22 @@
 //! Common types and traits for Gravity hardfork state changes.
 //!
-//! Each hardfork module (alpha, beta, gamma, ...) defines a set of
-//! system contract bytecode upgrades. This module provides a trait
-//! that standardizes how upgrade tables are exposed, enabling generic
-//! verification logic in tests and a single `apply_hardfork_upgrades`
-//! entry point for the executor.
+//! Each hardfork module (alpha, beta, gamma, ...) defines a set of system
+//! contract bytecode upgrades. This module provides the [`HardforkUpgrades`]
+//! trait that standardizes how upgrade tables are exposed, plus a single,
+//! executor-agnostic entry point ([`apply_gravity_hardfork_upgrades`]) that
+//! both the parallel (grevm) and the reth-native serial (`disable-grevm`)
+//! execution paths share, so the two backends can never diverge on hardfork
+//! application (gravity-audit#711, F-A2-3).
 
+use alloc::format;
 use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
-use reth_evm::{execute::BlockExecutionError, ParallelDatabase};
+use reth_chainspec::{ChainSpec, EthChainSpec, GravityHardfork};
+use reth_ethereum_primitives::EthPrimitives;
+use reth_evm::{execute::BlockExecutionError, parallel_execute::ParallelExecutor};
 use revm::{
     bytecode::Bytecode,
     state::{Account, AccountStatus, EvmState, EvmStorageSlot},
-    DatabaseCommit, DatabaseRef,
+    DatabaseRef,
 };
 
 /// A single bytecode replacement: target address → new runtime bytecode.
@@ -56,110 +61,166 @@ pub trait HardforkUpgrades {
     }
 }
 
-/// Apply a hardfork's upgrades to the parallel state.
+/// Build the [`EvmState`] diff for a single hardfork's upgrades.
 ///
-/// This is the single entry point used by `GrevmExecutor::apply_post_execution_changes`.
-/// It replaces bytecodes, writes storage patches, and commits all changes atomically.
-pub fn apply_hardfork_upgrades<H: HardforkUpgrades, DB: ParallelDatabase>(
-    hardfork: &H,
-    state: &mut grevm::ParallelState<DB>,
-) -> Result<(), BlockExecutionError> {
-    use reth_evm::execute::BlockValidationError;
+/// Reads the *current* account info and storage values through `db` (any
+/// [`DatabaseRef`]) so existing balances/nonces are preserved and only the
+/// bytecode and patched slots change. This is pure — it commits nothing — so
+/// the same diff can be applied through any executor's `apply_state_change`.
+pub fn hardfork_upgrade_diff<H, DB>(hardfork: &H, db: &DB) -> Result<EvmState, BlockExecutionError>
+where
+    H: HardforkUpgrades,
+    DB: DatabaseRef,
+{
+    let mut changes = EvmState::default();
 
-    let mut hardfork_changes: EvmState = EvmState::default();
+    // 1. Bytecode upgrades (system + extra): only patch accounts that already exist, preserving
+    //    their balance and nonce.
+    for (addr, bytecode_bytes) in
+        hardfork.system_upgrades().iter().chain(hardfork.extra_upgrades().iter())
+    {
+        let Some(info) = db.basic_ref(*addr).map_err(|e| {
+            BlockExecutionError::msg(format!("hardfork upgrade read {addr}: {e:?}"))
+        })?
+        else {
+            continue;
+        };
 
-    // 1. Apply all bytecode upgrades (system + extra)
-    let all_upgrades = hardfork.system_upgrades().iter().chain(hardfork.extra_upgrades().iter());
-
-    for (addr, bytecode_bytes) in all_upgrades {
-        let new_bytecode = Bytecode::new_raw(Bytes::from_static(bytecode_bytes));
-        let code_hash = keccak256(bytecode_bytes);
-
-        let account = state
-            .load_mut_cache_account(*addr)
-            .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
-
-        if let Some(ref info) = account.account {
-            let mut new_info = info.clone();
-            new_info.code_hash = code_hash;
-            new_info.code = Some(new_bytecode.clone());
-            hardfork_changes.insert(
-                *addr,
-                Account {
-                    info: new_info,
-                    storage: Default::default(),
-                    status: AccountStatus::Touched,
-                    transaction_id: 0,
-                },
-            );
-        }
-
-        state.cache.contracts.insert(code_hash, new_bytecode);
+        let mut new_info = info;
+        new_info.code_hash = keccak256(bytecode_bytes);
+        new_info.code = Some(Bytecode::new_raw(Bytes::from_static(bytecode_bytes)));
+        changes.insert(
+            *addr,
+            Account {
+                info: new_info,
+                storage: Default::default(),
+                status: AccountStatus::Touched,
+                transaction_id: 0,
+            },
+        );
     }
 
-    // 2. Apply storage patches
+    // 2. Storage patches.
     for (addr, slot, value) in hardfork.storage_patches() {
-        // Ensure account is loaded
-        state
-            .load_mut_cache_account(*addr)
-            .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
+        patch_storage(&mut changes, db, *addr, U256::from_be_bytes(slot.0), *value)?;
+    }
 
+    // 3. Batch storage patches (same slot+value across many addresses).
+    for (addresses, slot, value) in hardfork.batch_storage_patches() {
         let slot_key = U256::from_be_bytes(slot.0);
-        let original_value = state
-            .storage_ref(*addr, slot_key)
-            .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
+        for addr in *addresses {
+            patch_storage(&mut changes, db, *addr, slot_key, *value)?;
+        }
+    }
 
-        let entry = hardfork_changes.entry(*addr).or_insert_with(|| {
-            // Account already loaded above; create a minimal touched entry
-            let info = state
-                .cache
-                .accounts
-                .get(addr)
-                .and_then(|a| a.value().account.clone())
-                .unwrap_or_default();
+    Ok(changes)
+}
+
+/// Insert a `(slot → value)` storage patch into `changes` for `addr`, reading
+/// the original slot value (and the account info, if not already staged) from
+/// `db` so the resulting transition carries a correct changeset.
+fn patch_storage<DB: DatabaseRef>(
+    changes: &mut EvmState,
+    db: &DB,
+    addr: Address,
+    slot_key: U256,
+    value: U256,
+) -> Result<(), BlockExecutionError> {
+    let original = db
+        .storage_ref(addr, slot_key)
+        .map_err(|e| BlockExecutionError::msg(format!("hardfork patch read {addr}: {e:?}")))?;
+
+    if !changes.contains_key(&addr) {
+        let info = db
+            .basic_ref(addr)
+            .map_err(|e| BlockExecutionError::msg(format!("hardfork patch read {addr}: {e:?}")))?
+            .unwrap_or_default();
+        changes.insert(
+            addr,
             Account {
                 info,
                 storage: Default::default(),
                 status: AccountStatus::Touched,
                 transaction_id: 0,
-            }
-        });
+            },
+        );
+    }
+    if let Some(account) = changes.get_mut(&addr) {
+        account.storage.insert(slot_key, EvmStorageSlot::new_changed(original, value, 0));
+    }
+    Ok(())
+}
 
-        entry.storage.insert(slot_key, EvmStorageSlot::new_changed(original_value, *value, 0));
+/// Build the merged [`EvmState`] diff for every Gravity hardfork that activates
+/// at the given block, using the exact same activation gating as the executor:
+/// Alpha is active for every block past its timestamp; Beta/Gamma/Delta fire
+/// only on their transition block.
+pub fn gravity_hardfork_state_for_block<DB>(
+    chain_spec: &ChainSpec,
+    block_number: u64,
+    timestamp: u64,
+    db: &DB,
+) -> Result<EvmState, BlockExecutionError>
+where
+    DB: DatabaseRef,
+{
+    use super::{
+        alpha::AlphaHardfork, beta::BetaHardfork, delta::DeltaHardfork, gamma::GammaHardfork,
+    };
+
+    let hf = chain_spec.gravity_hardforks();
+    let mut changes = EvmState::default();
+
+    if hf.fork(GravityHardfork::Alpha).active_at_timestamp(timestamp) {
+        merge_state(&mut changes, hardfork_upgrade_diff(&AlphaHardfork, db)?);
+    }
+    if hf.fork(GravityHardfork::Beta).transitions_at_block(block_number) {
+        merge_state(&mut changes, hardfork_upgrade_diff(&BetaHardfork, db)?);
+    }
+    if hf.fork(GravityHardfork::Gamma).transitions_at_block(block_number) {
+        merge_state(&mut changes, hardfork_upgrade_diff(&GammaHardfork, db)?);
+    }
+    if hf.fork(GravityHardfork::Delta).transitions_at_block(block_number) {
+        merge_state(&mut changes, hardfork_upgrade_diff(&DeltaHardfork, db)?);
     }
 
-    // 3. Apply batch storage patches (same slot+value to multiple addresses)
-    for (addresses, slot, value) in hardfork.batch_storage_patches() {
-        let slot_key = U256::from_be_bytes(slot.0);
-        for addr in *addresses {
-            state
-                .load_mut_cache_account(*addr)
-                .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
+    Ok(changes)
+}
 
-            let original_value = state
-                .storage_ref(*addr, slot_key)
-                .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
-
-            let entry = hardfork_changes.entry(*addr).or_insert_with(|| {
-                let info = state
-                    .cache
-                    .accounts
-                    .get(addr)
-                    .and_then(|a| a.value().account.clone())
-                    .unwrap_or_default();
-                Account {
-                    info,
-                    storage: Default::default(),
-                    status: AccountStatus::Touched,
-                    transaction_id: 0,
-                }
-            });
-
-            entry.storage.insert(slot_key, EvmStorageSlot::new_changed(original_value, *value, 0));
+/// Merge `from` into `into`: later forks override account info and union their
+/// storage slots (different forks patch disjoint system contracts in practice).
+fn merge_state(into: &mut EvmState, from: EvmState) {
+    for (addr, account) in from {
+        if let Some(existing) = into.get_mut(&addr) {
+            existing.info = account.info;
+            existing.status |= account.status;
+            existing.storage.extend(account.storage);
+        } else {
+            into.insert(addr, account);
         }
     }
+}
 
-    // 4. Commit all changes atomically
-    state.commit(hardfork_changes);
+/// Apply every Gravity hardfork upgrade active at `block_number` to `executor`
+/// through the shared [`ParallelExecutor::apply_state_change`] channel.
+///
+/// This is the **single source of truth** for hardfork application: both the
+/// parallel (grevm) and the reth-native serial (`disable-grevm`) executors are
+/// driven through here from the pipe layer, so they apply byte-identical
+/// changes (gravity-audit#711, F-A2-3). A no-op when no fork activates.
+pub fn apply_gravity_hardfork_upgrades<DB>(
+    executor: &mut dyn ParallelExecutor<Primitives = EthPrimitives, Error = BlockExecutionError>,
+    chain_spec: &ChainSpec,
+    block_number: u64,
+    timestamp: u64,
+    db: &DB,
+) -> Result<(), BlockExecutionError>
+where
+    DB: DatabaseRef,
+{
+    let changes = gravity_hardfork_state_for_block(chain_spec, block_number, timestamp, db)?;
+    if !changes.is_empty() {
+        executor.apply_state_change(changes)?;
+    }
     Ok(())
 }

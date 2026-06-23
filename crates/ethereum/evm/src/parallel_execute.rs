@@ -200,39 +200,16 @@ where
             *balance_increments.entry(dao_fork::DAO_HARDFORK_BENEFICIARY).or_default() +=
                 drained_balance;
         }
-        // Gravity hardforks: apply bytecode upgrades and storage patches
-        {
-            use crate::hardfork::{
-                alpha::AlphaHardfork, beta::BetaHardfork, common::apply_hardfork_upgrades,
-            };
-
-            let hf = self.chain_spec.gravity_hardforks();
-            if hf.fork(GravityHardfork::Alpha).active_at_timestamp(block.timestamp) {
-                apply_hardfork_upgrades(&AlphaHardfork, state)?;
-            }
-            if hf.fork(GravityHardfork::Beta).transitions_at_block(block.number()) {
-                apply_hardfork_upgrades(&BetaHardfork, state)?;
-            }
-        }
+        // Gravity hardfork upgrades (Alpha/Beta/Gamma/Delta) are applied uniformly to
+        // whichever executor is active — parallel grevm or the reth-native serial
+        // `disable-grevm` path — from the pipe layer via the shared
+        // `hardfork::common::apply_gravity_hardfork_upgrades`, so the two backends can
+        // never diverge on them (gravity-audit#711, F-A2-3).
 
         // increment balances
         state
             .increment_balances(balance_increments.clone())
             .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
-
-        {
-            use crate::hardfork::{
-                common::apply_hardfork_upgrades, delta::DeltaHardfork, gamma::GammaHardfork,
-            };
-
-            let hf = self.chain_spec.gravity_hardforks();
-            if hf.fork(GravityHardfork::Gamma).transitions_at_block(block.number()) {
-                apply_hardfork_upgrades(&GammaHardfork, state)?;
-            }
-            if hf.fork(GravityHardfork::Delta).transitions_at_block(block.number()) {
-                apply_hardfork_upgrades(&DeltaHardfork, state)?;
-            }
-        }
 
         // call state hook with changes due to balance increments.
         self.system_caller.try_on_state_with(|| {
@@ -688,5 +665,79 @@ mod tests {
             info.code_hash, code_hash,
             "code_hash must still match HISTORY_STORAGE bytecode after second commit"
         );
+    }
+
+    // --- U-6: hardfork upgrade diff is identical across both executors ------
+    //
+    // F-A2-3 (gravity-audit#711): `hardfork::common` is the single source of truth
+    // for Gravity hardfork upgrades, applied to both the grevm and the reth-native
+    // serial (`disable-grevm`) executor through the shared `apply_state_change`
+    // channel. This pins that a non-empty bytecode upgrade produces a byte-identical
+    // bundle on both backends — code replaced, balance and nonce preserved.
+
+    use crate::hardfork::common::{hardfork_upgrade_diff, BytecodeUpgrade, HardforkUpgrades};
+    use alloy_primitives::{address, Bytes};
+
+    const TEST_SYSTEM_CONTRACT: Address = address!("00000000000000000000000000000000000000aa");
+    static TEST_NEW_CODE: &[u8] = &[0x60, 0x2a, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3];
+    static TEST_SYSTEM_UPGRADES: &[BytecodeUpgrade] = &[(TEST_SYSTEM_CONTRACT, TEST_NEW_CODE)];
+
+    struct TestHardfork;
+    impl HardforkUpgrades for TestHardfork {
+        fn name(&self) -> &'static str {
+            "Test"
+        }
+        fn system_upgrades(&self) -> &'static [BytecodeUpgrade] {
+            TEST_SYSTEM_UPGRADES
+        }
+    }
+
+    #[test]
+    fn u6_hardfork_upgrade_diff_identical_across_executors() {
+        let chain_spec = prague_chainspec();
+        let evm_config = EthEvmConfig::new(chain_spec.clone());
+
+        // A pre-existing system contract whose balance + nonce must survive the upgrade.
+        let mut seed = CacheDB::new(EmptyDB::default());
+        seed.insert_account_info(
+            TEST_SYSTEM_CONTRACT,
+            AccountInfo {
+                nonce: 7,
+                balance: U256::from(1234u64),
+                code_hash: keccak256([0x00]),
+                code: Some(Bytecode::new_raw(Bytes::from_static(&[0x00]))),
+            },
+        );
+
+        let code_hash = keccak256(TEST_NEW_CODE);
+
+        // Diff built once from the seeded pre-state: code replaced, balance/nonce kept.
+        let diff = hardfork_upgrade_diff(&TestHardfork, &seed).expect("diff builds");
+        let staged = diff.get(&TEST_SYSTEM_CONTRACT).expect("contract staged in diff");
+        assert_eq!(staged.info.code_hash, code_hash);
+        assert_eq!(staged.info.balance, U256::from(1234u64));
+        assert_eq!(staged.info.nonce, 7);
+
+        // Apply the same diff through both executors via the shared apply_state_change.
+        let mut serial =
+            WrapExecutor::new(BasicBlockExecutor::new(evm_config.clone(), seed.clone()));
+        serial.apply_state_change(diff.clone()).expect("serial apply");
+        let serial_bundle = serial.take_bundle();
+
+        let mut grevm = GrevmExecutor::new(chain_spec, &evm_config, seed.clone());
+        grevm.apply_state_change(diff).expect("grevm apply");
+        let grevm_bundle = grevm.take_bundle();
+
+        for (label, bundle) in [("serial", &serial_bundle), ("grevm", &grevm_bundle)] {
+            let acc = bundle.state.get(&TEST_SYSTEM_CONTRACT).expect("contract in bundle");
+            let info = acc.info.as_ref().expect("account info present");
+            assert_eq!(info.code_hash, code_hash, "{label}: code upgraded");
+            assert_eq!(info.balance, U256::from(1234u64), "{label}: balance preserved");
+            assert_eq!(info.nonce, 7, "{label}: nonce preserved");
+            assert!(
+                bundle.contracts.contains_key(&code_hash),
+                "{label}: new bytecode recorded in bundle.contracts"
+            );
+        }
     }
 }

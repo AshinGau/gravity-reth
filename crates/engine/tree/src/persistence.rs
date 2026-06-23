@@ -316,29 +316,27 @@ where
                     metrics::histogram!("save_blocks_time", &[("process", "write_hashed_state")])
                         .record(start.elapsed());
 
-                    if !get_gravity_config().validator_node_only {
-                        let start = Instant::now();
-                        let provider_rw = inner_provider.database_provider_rw()?;
-                        let ck = Self::get_checkpoint(
-                            provider_rw.tx_ref(),
-                            StageId::IndexAccountHistory,
-                            Some(block_number),
-                        )?;
-                        provider_rw.update_history_indices(block_number..=block_number)?;
-                        set_fail_point!("persistence::after_history_indices");
-                        Self::update_checkpoint(
-                            provider_rw.tx_ref(),
-                            StageId::IndexAccountHistory,
-                            StageCheckpoint { block_number, ..ck },
-                        )?;
-                        provider_rw.commit()?;
-                        set_fail_point!("persistence::after_history_commit");
-                        metrics::histogram!(
-                            "save_blocks_time",
-                            &[("process", "update_history_indices")]
-                        )
-                        .record(start.elapsed());
-                    }
+                    let start = Instant::now();
+                    let provider_rw = inner_provider.database_provider_rw()?;
+                    let ck = Self::get_checkpoint(
+                        provider_rw.tx_ref(),
+                        StageId::IndexAccountHistory,
+                        Some(block_number),
+                    )?;
+                    provider_rw.update_history_indices(block_number..=block_number)?;
+                    set_fail_point!("persistence::after_history_indices");
+                    Self::update_checkpoint(
+                        provider_rw.tx_ref(),
+                        StageId::IndexAccountHistory,
+                        StageCheckpoint { block_number, ..ck },
+                    )?;
+                    provider_rw.commit()?;
+                    set_fail_point!("persistence::after_history_commit");
+                    metrics::histogram!(
+                        "save_blocks_time",
+                        &[("process", "update_history_indices")]
+                    )
+                    .record(start.elapsed());
                     Ok(())
                 });
                 let trie_handle = scope.spawn(|| -> Result<(), PersistenceError> {
@@ -474,9 +472,7 @@ where
         }
 
         // History indices for the whole range, once.
-        if !get_gravity_config().validator_node_only {
-            provider_rw.update_history_indices(group_first..=group_last)?;
-        }
+        provider_rw.update_history_indices(group_first..=group_last)?;
 
         // Advance every written stage's checkpoint to the group tip, then commit the group once.
         // `MerkleExecute` passes `None` (trie writes are idempotent and may resume mid-range); the
@@ -484,14 +480,7 @@ where
         let tx = provider_rw.tx_ref();
         Self::advance_checkpoint(tx, StageId::Execution, Some(group_first), group_last)?;
         Self::advance_checkpoint(tx, StageId::AccountHashing, Some(group_first), group_last)?;
-        if !get_gravity_config().validator_node_only {
-            Self::advance_checkpoint(
-                tx,
-                StageId::IndexAccountHistory,
-                Some(group_first),
-                group_last,
-            )?;
-        }
+        Self::advance_checkpoint(tx, StageId::IndexAccountHistory, Some(group_first), group_last)?;
         Self::advance_checkpoint(tx, StageId::MerkleExecute, None, group_last)?;
 
         provider_rw.static_file_provider().commit()?;

@@ -1059,6 +1059,25 @@ impl<Storage: GravityStorage> Core<Storage> {
             block_number,
         );
 
+        // Gravity hardfork upgrades (Alpha/Beta/Gamma/Delta). Applied here so the same
+        // single source of truth drives whichever executor is active — parallel grevm
+        // or the reth-native serial `disable-grevm` backend — and the two can never
+        // diverge on hardfork application (gravity-audit#711, F-A2-3). No-op unless a
+        // Gravity fork activates at this block.
+        {
+            let hardfork_view = self.storage.get_state_view().unwrap();
+            reth_evm_ethereum::hardfork::common::apply_gravity_hardfork_upgrades(
+                &mut *executor,
+                &self.chain_spec,
+                block_number,
+                ordered_block.timestamp_us / 1_000_000,
+                &hardfork_view,
+            )
+            .unwrap_or_else(|e| {
+                panic!("gravity hardfork upgrade failed at block {block_number:?}: {e:?}")
+            });
+        }
+
         // Execute system transactions (metadata, DKG, JWK) sequentially.
         // State changes are committed directly into executor's ParallelState.
         let (metadata_txn_result, validator_txn_results) = match Self::execute_system_transactions(
