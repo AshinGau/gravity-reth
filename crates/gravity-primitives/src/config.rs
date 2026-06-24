@@ -18,6 +18,9 @@ pub struct Config {
     pub disable_grevm: bool,
     /// The max block height between merged and pesist block height.
     pub cache_max_persist_gap: u64,
+    /// Persist consecutive blocks as one merged commit per group (amortizes the per-commit
+    /// fsync, much faster catch-up) instead of committing every block. default false.
+    pub persist_merge_blocks: bool,
     /// The max size of cached items
     pub cache_capacity: u64,
     /// Report db metrics
@@ -42,6 +45,7 @@ pub fn get_gravity_config() -> &'static Config {
         disable_pipe_execution: std::env::var("GRETH_DISABLE_PIPE_EXECUTION").is_ok(),
         disable_grevm: std::env::var("GRETH_DISABLE_GREVM").is_ok(),
         cache_max_persist_gap: 64,
+        persist_merge_blocks: false,
         cache_capacity: 2_000_000,
         report_db_metrics: false,
         trie_parallel_levels: 1,

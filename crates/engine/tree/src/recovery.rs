@@ -277,6 +277,7 @@ mod tests {
                 disable_pipe_execution: false,
                 disable_grevm: false,
                 cache_max_persist_gap: 64,
+                persist_merge_blocks: false,
                 cache_capacity: 2_000_000,
                 report_db_metrics: false,
                 trie_parallel_levels: 1,
