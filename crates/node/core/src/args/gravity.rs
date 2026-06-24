@@ -15,7 +15,7 @@ pub struct GravityArgs {
     pub disable_grevm: bool,
 
     /// The max block height between merged and pesist block height.
-    #[arg(long = "gravity.cache.max-persist-gap", default_value_t = 64)]
+    #[arg(long = "gravity.cache.max-persist-gap", default_value_t = 128)]
     pub cache_max_persist_gap: u64,
 
     /// Persist consecutive blocks as one merged commit per group to amortize the per-commit
@@ -41,7 +41,7 @@ impl Default for GravityArgs {
         Self {
             disable_pipe_execution: false,
             disable_grevm: false,
-            cache_max_persist_gap: 64,
+            cache_max_persist_gap: 128,
             persist_merge_blocks: false,
             cache_capacity: 2_000_000,
             report_db_metrics: false,

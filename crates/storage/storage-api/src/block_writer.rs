@@ -83,7 +83,7 @@ pub trait BlockWriter: Send + Sync {
     /// transaction number through the batch in memory rather than re-reading it from the database
     /// between blocks. The numbering therefore stays correct even when the whole batch is committed
     /// only once and the backend does not observe its own uncommitted writes within a transaction
-    /// (e.g. a RocksDB `WriteBatch`).
+    /// (e.g. a `RocksDB` `WriteBatch`).
     ///
     /// The default implementation inserts each block in turn.
     fn insert_blocks(

@@ -38,7 +38,7 @@ const MERGE_GROUP_MAX_GAS: u64 = 1_000_000_000;
 /// threshold. This bounds the in-memory write batch and the trie/state write volume by actual
 /// state churn rather than a raw block count (mostly-empty catch-up blocks coalesce freely; a
 /// burst of state-heavy blocks closes the group sooner).
-const MERGE_GROUP_MAX_STATE: usize = 1_000_000;
+const MERGE_GROUP_MAX_STATE: usize = 10_000;
 
 /// Writes parts of reth's in memory tree state to the database and static files.
 ///

@@ -42,7 +42,7 @@ pub fn get_gravity_config() -> &'static Config {
     GLOBAL_CONFIG.get_or_init(|| Config {
         disable_pipe_execution: std::env::var("GRETH_DISABLE_PIPE_EXECUTION").is_ok(),
         disable_grevm: std::env::var("GRETH_DISABLE_GREVM").is_ok(),
-        cache_max_persist_gap: 64,
+        cache_max_persist_gap: 128,
         persist_merge_blocks: false,
         cache_capacity: 2_000_000,
         report_db_metrics: false,

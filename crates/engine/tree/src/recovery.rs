@@ -273,7 +273,7 @@ mod tests {
             init_gravity_config(GravityConfig {
                 disable_pipe_execution: false,
                 disable_grevm: false,
-                cache_max_persist_gap: 64,
+                cache_max_persist_gap: 128,
                 persist_merge_blocks: false,
                 cache_capacity: 2_000_000,
                 report_db_metrics: false,
