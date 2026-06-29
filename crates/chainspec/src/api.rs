@@ -61,6 +61,15 @@ pub trait EthChainSpec: Send + Sync + Unpin + Debug {
         self.chain().is_ethereum()
     }
 
+    /// Returns `true` if this chainspec configures a Gravity network (mainnet or testnet).
+    ///
+    /// Gravity networks use a deflationary model: block rewards come solely from gas fees,
+    /// so PoW block rewards are disabled. Non-Gravity chains (e.g. Ethereum mainnet during
+    /// reth history sync) return `false`.
+    fn is_gravity(&self) -> bool {
+        crate::is_gravity_chain_id(self.chain_id())
+    }
+
     /// Returns the final total difficulty if the Paris hardfork is known.
     fn final_paris_total_difficulty(&self) -> Option<U256>;
 

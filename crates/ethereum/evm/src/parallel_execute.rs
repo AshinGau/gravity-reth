@@ -13,9 +13,7 @@ use alloy_evm::{
 use alloy_primitives::{map::HashMap, Address};
 use gravity_primitives::get_gravity_config;
 use grevm::{ParallelBundleState, ParallelState, Scheduler};
-use reth_chainspec::{
-    EthChainSpec, EthereumHardfork, EthereumHardforks, GravityHardfork, Hardforks,
-};
+use reth_chainspec::{EthChainSpec, EthereumHardfork, EthereumHardforks, Hardforks};
 use reth_ethereum_primitives::{Block, EthPrimitives, Receipt};
 use reth_evm::{
     execute::{
@@ -182,9 +180,19 @@ where
             Requests::default()
         };
 
-        // Gravity chain uses a deflationary model where rewards come solely from gas fees,
-        // so PoW block rewards (coinbase increments) are disabled to prevent inflation.
-        let mut balance_increments = HashMap::default();
+        // Gravity networks use a deflationary model: block rewards come solely from gas
+        // fees, so PoW block rewards (coinbase increments) must be suppressed. This gate is
+        // load-bearing — Gravity chainspecs do NOT activate Paris (their genesis has no
+        // `terminalTotalDifficulty`), so `calc::base_block_reward` returns `Some(2 ETH)` for
+        // them; without this short-circuit `post_block_balance_increments` would inflate the
+        // coinbase every block. Non-Gravity chains (e.g. Ethereum mainnet history sync) fall
+        // through to the standard reward schedule, otherwise early miners are never funded
+        // and later transactions fail validation with "lack of funds".
+        let mut balance_increments = if self.chain_spec.is_gravity() {
+            HashMap::default()
+        } else {
+            post_block_balance_increments(&self.chain_spec, block)
+        };
         let state = self.state.as_mut().unwrap();
 
         // Irregular state change at Ethereum DAO hardfork
@@ -310,7 +318,6 @@ where
     }
 }
 
-#[allow(dead_code)]
 #[inline]
 fn post_block_balance_increments<ChainSpec, Block>(
     chain_spec: &ChainSpec,
@@ -320,15 +327,6 @@ where
     ChainSpec: EthereumHardforks + EthChainSpec,
     Block: reth_primitives_traits::Block,
 {
-    // After Alpha hardfork, skip all post-block balance increments
-    // (disables PoW block rewards and DAO fork irregularities)
-    if chain_spec
-        .gravity_hardforks()
-        .is_fork_active_at_timestamp(GravityHardfork::Alpha, block.header().timestamp())
-    {
-        return HashMap::default();
-    }
-
     let mut balance_increments = HashMap::default();
 
     // Add block rewards if they are enabled.
@@ -359,7 +357,6 @@ where
     balance_increments
 }
 
-#[allow(dead_code)]
 #[inline]
 fn insert_post_block_withdrawals_balance_increments(
     spec: impl EthereumHardforks,
