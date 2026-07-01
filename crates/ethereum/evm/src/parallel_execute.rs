@@ -315,7 +315,7 @@ where
     }
 }
 
-/// Standard Ethereum post-block balance increments: PoW block + ommer rewards (only pre-Paris,
+/// Standard Ethereum post-block balance increments: `PoW` block + ommer rewards (only pre-Paris,
 /// i.e. when `base_block_reward` is `Some`) plus Shanghai withdrawals. Intentionally carries **no**
 /// Gravity-specific gating: Gravity zeroes block rewards by having Paris active from genesis (see
 /// the call site in `apply_post_execution_changes`), so this naturally returns an empty map for it.
