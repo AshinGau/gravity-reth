@@ -9956,6 +9956,7 @@ version = "1.8.3"
 dependencies = [
  "alloy-primitives",
  "reth-chain-state",
+ "reth-errors",
  "reth-ethereum-primitives",
  "reth-primitives",
  "tokio",
@@ -10024,6 +10025,7 @@ dependencies = [
  "revm-primitives",
  "serde",
  "serde_json",
+ "thiserror 2.0.17",
  "tiny-keccak",
  "tokio",
  "tracing",

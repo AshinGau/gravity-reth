@@ -57,7 +57,7 @@
 
 use alloy_consensus::{constants::KECCAK_EMPTY, Transaction};
 use alloy_primitives::{
-    map::{HashMap, HashSet},
+    map::{Entry, HashMap, HashSet},
     Address, U256,
 };
 use reth_chainspec::{ChainSpec, EthChainSpec};
@@ -89,7 +89,7 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
     chain_spec: &ChainSpec,
     block_timestamp: u64,
     block_number: u64,
-) -> HashSet<usize> {
+) -> Result<HashSet<usize>, DB::Error> {
     let spec_id =
         revm_spec_by_timestamp_and_block_number(chain_spec, block_timestamp, block_number);
     let mut gas_limit_exceeded_tx_idx = txs.len();
@@ -293,13 +293,15 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
     // `true` if the account's code is empty or a valid EIP-7702 delegation designator —
     // i.e. it may originate a tx (EIP-3607, closes audit#710 gap 6) and, as an
     // authorization authority, revm will apply its delegation.
-    let code_permits = |acct: &AccountInfo| -> bool {
-        acct.code_hash == KECCAK_EMPTY ||
-            acct.code
-                .clone()
-                .or_else(|| db.code_by_hash_ref(acct.code_hash).ok())
-                .map(|b| b.is_eip7702())
-                .unwrap_or(false)
+    let code_permits = |acct: &AccountInfo| -> Result<bool, DB::Error> {
+        if acct.code_hash == KECCAK_EMPTY {
+            return Ok(true)
+        }
+        let code = match acct.code.clone() {
+            Some(code) => code,
+            None => db.code_by_hash_ref(acct.code_hash)?,
+        };
+        Ok(code.is_eip7702())
     };
 
     // Block-order sequential simulation. `sim[addr]` is the address's account evolved
@@ -324,21 +326,24 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
         // bump + balance deduction. Scoped so the `sim[sender]` borrow is released before
         // the authorization loop re-borrows `sim` (an authority may be any account).
         let valid = {
-            let sender_acct = sim.entry(sender).or_insert_with(|| db.basic_ref(sender).unwrap());
+            let sender_acct = match sim.entry(sender) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => entry.insert(db.basic_ref(sender)?),
+            };
             match sender_acct.as_mut() {
                 // Sender absent from state -> cannot pay for / originate the tx.
                 None => false,
                 Some(account) => {
-                    if !code_permits(account) {
+                    if code_permits(account)? {
+                        // Mutates `account` (caller nonce bump + balance deduct) on success.
+                        is_tx_valid(tx, &sender, account)
+                    } else {
                         info!(target: "filter_invalid_txs",
                             sender=?sender,
                             code_hash=?account.code_hash,
                             "EIP-3607: sender has non-delegation code"
                         );
                         false
-                    } else {
-                        // Mutates `account` (caller nonce bump + balance deduct) on success.
-                        is_tx_valid(tx, &sender, account)
                     }
                 }
             }
@@ -353,39 +358,39 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
         // caller bump above already advanced the sender, so a self-authorization matching
         // `sender_nonce + 1` bumps it a second time; chained authorizations advance off the
         // evolving simulated nonce exactly as revm applies them in order.
-        if tx.is_eip7702() {
-            if let Some(auth_list) = tx.authorization_list() {
-                for auth in auth_list {
-                    if !auth.chain_id().is_zero() && *auth.chain_id() != U256::from(cfg_chain_id) {
-                        continue;
-                    }
-                    if auth.nonce() == u64::MAX {
-                        continue;
-                    }
-                    let Ok(authority) = auth.recover_authority() else { continue };
-                    let auth_acct =
-                        sim.entry(authority).or_insert_with(|| db.basic_ref(authority).unwrap());
-                    // revm applies the delegation iff the authority's (block-start) code is
-                    // empty/7702 and its *current* nonce equals the authorization nonce; a
-                    // nonexistent authority has nonce 0 and is created on delegation.
-                    let (authority_nonce, code_ok) = match auth_acct.as_ref() {
-                        Some(a) => (a.nonce, code_permits(a)),
-                        None => (0, true),
-                    };
-                    if code_ok && auth.nonce() == authority_nonce {
-                        match auth_acct {
-                            Some(a) => a.nonce = a.nonce.saturating_add(1),
-                            None => {
-                                *auth_acct = Some(AccountInfo { nonce: 1, ..Default::default() })
-                            }
-                        }
+        if tx.is_eip7702() &&
+            let Some(auth_list) = tx.authorization_list()
+        {
+            for auth in auth_list {
+                if !auth.chain_id().is_zero() && *auth.chain_id() != U256::from(cfg_chain_id) {
+                    continue;
+                }
+                if auth.nonce() == u64::MAX {
+                    continue;
+                }
+                let Ok(authority) = auth.recover_authority() else { continue };
+                let auth_acct = match sim.entry(authority) {
+                    Entry::Occupied(entry) => entry.into_mut(),
+                    Entry::Vacant(entry) => entry.insert(db.basic_ref(authority)?),
+                };
+                // revm applies the delegation iff the authority's (block-start) code is
+                // empty/7702 and its *current* nonce equals the authorization nonce; a
+                // nonexistent authority has nonce 0 and is created on delegation.
+                let (authority_nonce, code_ok) = match auth_acct.as_ref() {
+                    Some(a) => (a.nonce, code_permits(a)?),
+                    None => (0, true),
+                };
+                if code_ok && auth.nonce() == authority_nonce {
+                    match auth_acct {
+                        Some(a) => a.nonce = a.nonce.saturating_add(1),
+                        None => *auth_acct = Some(AccountInfo { nonce: 1, ..Default::default() }),
                     }
                 }
             }
         }
     }
     invalid_tx_idxs.extend(gas_limit_exceeded_tx_idx..txs.len());
-    invalid_tx_idxs
+    Ok(invalid_tx_idxs)
 }
 
 #[cfg(test)]
@@ -407,6 +412,32 @@ mod tests {
     /// built from `MAINNET`, and the filter's chain-id gate rejects any typed tx whose
     /// `chain_id` doesn't match the chainspec.
     const MAINNET_CHAIN_ID: u64 = 1;
+
+    fn filter_invalid_txs<DB: ParallelDatabase>(
+        db: DB,
+        txs: &[TransactionSigned],
+        senders: &[Address],
+        base_fee_per_gas: u64,
+        gas_limit: u64,
+        chain_spec: &ChainSpec,
+        block_timestamp: u64,
+        block_number: u64,
+    ) -> HashSet<usize>
+    where
+        DB::Error: std::fmt::Debug,
+    {
+        super::filter_invalid_txs(
+            db,
+            txs,
+            senders,
+            base_fee_per_gas,
+            gas_limit,
+            chain_spec,
+            block_timestamp,
+            block_number,
+        )
+        .unwrap()
+    }
 
     /// Chainspec with Prague active from genesis — the canonical test fixture for
     /// every case that wants the filter to apply 7702 intrinsic-gas rules.
@@ -459,6 +490,39 @@ mod tests {
 
         fn block_hash_ref(&self, _number: u64) -> Result<B256, Self::Error> {
             unreachable!()
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+    #[error("database unavailable")]
+    struct TestDbError;
+
+    impl revm::database_interface::DBErrorMarker for TestDbError {}
+
+    #[derive(Debug)]
+    struct FailingDatabase;
+
+    impl DatabaseRef for FailingDatabase {
+        type Error = TestDbError;
+
+        fn basic_ref(&self, _address: Address) -> Result<Option<AccountInfo>, Self::Error> {
+            Err(TestDbError)
+        }
+
+        fn code_by_hash_ref(&self, _code_hash: B256) -> Result<Bytecode, Self::Error> {
+            Err(TestDbError)
+        }
+
+        fn storage_ref(
+            &self,
+            _address: Address,
+            _index: StorageKey,
+        ) -> Result<StorageValue, Self::Error> {
+            Err(TestDbError)
+        }
+
+        fn block_hash_ref(&self, _number: u64) -> Result<B256, Self::Error> {
+            Err(TestDbError)
         }
     }
 
@@ -548,6 +612,25 @@ mod tests {
             0,
         );
         assert!(invalid_idxs.is_empty());
+    }
+
+    #[test]
+    fn database_error_is_not_treated_as_invalid_transaction() {
+        let txs = vec![create_test_transaction(0, 21_000, 0)];
+        let senders = vec![Address::ZERO];
+
+        let result = super::filter_invalid_txs(
+            &FailingDatabase,
+            &txs,
+            &senders,
+            0,
+            30_000_000,
+            &prague_chain_spec(),
+            0,
+            0,
+        );
+
+        assert_eq!(result.unwrap_err(), TestDbError);
     }
 
     #[test]

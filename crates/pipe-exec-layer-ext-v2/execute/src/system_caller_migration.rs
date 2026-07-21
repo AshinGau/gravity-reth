@@ -48,31 +48,25 @@ type Executor<'a> =
 /// `ParallelExecutor::basic` accessor, so callers stay decoupled from the
 /// hook's data needs and non-activation blocks pay nothing beyond the gating
 /// check.
-///
-/// Panics on `apply_state_change` failure: in the gravity-sdk integration the
-/// panic handler aborts the process, preventing partial-state corruption.
 pub(crate) fn apply_state_changes_for_block(
     executor: Executor<'_>,
     chain_spec: &ChainSpec,
     current_ts: u64,
     parent_ts: u64,
     block_number: u64,
-) {
+) -> Result<(), BlockExecutionError> {
     if !chain_spec
         .gravity_hardforks()
         .fork(GravityHardfork::Alpha)
         .transitions_at_timestamp(current_ts, parent_ts)
     {
-        return;
+        return Ok(())
     }
 
     // `unwrap_or_default` covers degenerate test fixtures where the genesis alloc
     // omits SYSTEM_CALLER — we still wind up writing balance=0 with nonce=0 and
     // no code, which is the natural "empty" terminal state.
-    let prev = executor
-        .basic(SYSTEM_CALLER)
-        .expect("Alpha migration: failed to read SYSTEM_CALLER account")
-        .unwrap_or_default();
+    let prev = executor.basic(SYSTEM_CALLER)?.unwrap_or_default();
     let prev_balance = prev.balance;
     let prev_nonce = prev.nonce;
 
@@ -94,9 +88,7 @@ pub(crate) fn apply_state_changes_for_block(
         },
     );
 
-    executor
-        .apply_state_change(state_diff)
-        .unwrap_or_else(|e| panic!("Alpha migration: SYSTEM_CALLER balance zeroing failed: {e:?}"));
+    executor.apply_state_change(state_diff)?;
 
     info!(target: "execute_ordered_block",
         number = block_number,
@@ -104,6 +96,7 @@ pub(crate) fn apply_state_changes_for_block(
         prev_nonce,
         "Gravity Alpha: zeroed SYSTEM_CALLER balance (nonce/code preserved)"
     );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -213,7 +206,8 @@ mod tests {
             current_ts,
             parent_ts,
             block_number,
-        );
+        )
+        .unwrap();
         executor.take_bundle()
     }
 
@@ -272,7 +266,8 @@ mod tests {
             ALPHA_TS,
             ALPHA_TS - 1,
             42,
-        );
+        )
+        .unwrap();
         // Second application — gate still fires at the activation block, but
         // the previously zeroed balance means the resulting diff is a no-op
         // in observable state (balance was 0; setting to 0 again is the
@@ -288,7 +283,8 @@ mod tests {
             ALPHA_TS,
             ALPHA_TS - 1,
             42,
-        );
+        )
+        .unwrap();
 
         let bundle = executor.take_bundle();
         let acc = bundle
@@ -500,7 +496,8 @@ mod tests {
             ALPHA_TS,
             ALPHA_TS - 1,
             42,
-        );
+        )
+        .unwrap();
         let bundle_serial = serial.take_bundle();
 
         // Grevm: GrevmExecutor over CacheDB<EmptyDB>, seeded identically.
@@ -515,7 +512,8 @@ mod tests {
             ALPHA_TS,
             ALPHA_TS - 1,
             42,
-        );
+        )
+        .unwrap();
         let bundle_grevm = grevm.take_bundle();
 
         // Load-bearing byte-equivalence. Same field selection as U-6 —
@@ -679,7 +677,8 @@ mod tests {
                 ts,
                 prev_ts,
                 block_num,
-            );
+            )
+            .unwrap();
             apply_state_changes_for_block(
                 &mut grevm
                     as &mut dyn ParallelExecutor<
@@ -690,7 +689,8 @@ mod tests {
                 ts,
                 prev_ts,
                 block_num,
-            );
+            )
+            .unwrap();
 
             // 2) two system txs per block. Seed nonce = 1, so tx nonces
             // start at 1 and grow monotonically: block 1 uses (1, 2),
@@ -832,7 +832,8 @@ mod tests {
             1000,
             999,
             1,
-        );
+        )
+        .unwrap();
         apply_state_changes_for_block(
             &mut grevm
                 as &mut dyn ParallelExecutor<
@@ -843,7 +844,8 @@ mod tests {
             1000,
             999,
             1,
-        );
+        )
+        .unwrap();
 
         // 2) same-block metadata-shaped system tx (nonce 0, gas-exempt self-call) — the per-block
         //    tx that bumps SYSTEM_CALLER's nonce and re-converges both backends.

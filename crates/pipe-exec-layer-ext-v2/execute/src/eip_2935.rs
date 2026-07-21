@@ -27,33 +27,28 @@ type Executor<'a> =
 /// Idempotency comes from `transitions_at_timestamp` — `parent_ts < pragueTime`
 /// is history-immutable, so the deployment branch fires exactly on the
 /// activation block and is naturally reorg-safe.
-///
-/// Panics on deployment failure: in the gravity-sdk integration the panic
-/// handler aborts the process, preventing partial-state corruption.
 pub(crate) fn apply_state_changes_for_block(
     executor: Executor<'_>,
     chain_spec: &ChainSpec,
     current_ts: u64,
     parent_ts: u64,
     block_number: u64,
-) {
+) -> Result<(), BlockExecutionError> {
     if chain_spec.fork(EthereumHardfork::Prague).transitions_at_timestamp(current_ts, parent_ts) {
-        deploy_contract(executor, HISTORY_STORAGE_ADDRESS, HISTORY_STORAGE_CODE.clone())
-            .unwrap_or_else(|e| {
-                panic!("HISTORY_STORAGE deployment failed at Prague activation: {e:?}")
-            });
+        deploy_contract(executor, HISTORY_STORAGE_ADDRESS, HISTORY_STORAGE_CODE.clone())?;
         info!(target: "execute_ordered_block",
             number=?block_number,
             "deployed EIP-2935 HISTORY_STORAGE contract on Prague activation block"
         );
     }
+    Ok(())
 }
 
 /// Deploy a contract at `address` with `code` via the executor's
 /// [`ParallelExecutor::apply_state_change`] irregular-state-change channel.
 ///
 /// Mainnet-aligned alloc shape: nonce=1, balance=0, given code, no storage prefill.
-/// The `Created | Touched` status routes the diff through ParallelState's
+/// The `Created | Touched` status routes the diff through `ParallelState`'s
 /// `newly_created` path so the contract code is recorded and a proper transition
 /// lands in the bundle.
 fn deploy_contract(

@@ -46,6 +46,7 @@ revm.workspace = true
 
 # misc
 tracing.workspace = true
+thiserror.workspace = true
 parking_lot.workspace = true
 reth-metrics.workspace = true
 metrics.workspace = true

@@ -2,6 +2,7 @@
 
 use alloy_primitives::TxHash;
 use reth_chain_state::ExecutedBlockWithTrieUpdates;
+use reth_errors::ProviderResult;
 use reth_ethereum_primitives::EthPrimitives;
 use reth_primitives::NodePrimitives;
 use std::{sync::OnceLock, thread::sleep, time::Duration};
@@ -42,7 +43,7 @@ pub struct MakeCanonicalEvent<N: NodePrimitives> {
     /// The executed block with trie updates
     pub executed_block: ExecutedBlockWithTrieUpdates<N>,
     /// A sender to notify when event processing is complete
-    pub tx: oneshot::Sender<()>,
+    pub tx: oneshot::Sender<ProviderResult<()>>,
 }
 
 /// Event to wait for persistence of the block

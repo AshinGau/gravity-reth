@@ -5,13 +5,13 @@ pub mod block_view_storage;
 
 use alloy_primitives::B256;
 use reth_evm::ParallelDatabase;
-use reth_provider::ProviderResult;
+use reth_provider::{ProviderError, ProviderResult};
 use reth_trie::{updates::TrieUpdatesV2, HashedPostState};
 
 /// Gravity storage for pipeline execution
 pub trait GravityStorage: Send + Sync + 'static {
     /// parallel database to support concurrent read
-    type StateView: ParallelDatabase;
+    type StateView: ParallelDatabase<Error = ProviderError>;
 
     /// get state view for execute
     fn get_state_view(&self) -> ProviderResult<Self::StateView>;

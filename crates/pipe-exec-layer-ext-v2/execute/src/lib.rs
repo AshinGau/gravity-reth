@@ -2,6 +2,7 @@
 #[macro_use]
 mod channel;
 mod eip_2935;
+mod error;
 mod metrics;
 pub mod mint_precompile;
 pub mod onchain_config;
@@ -11,6 +12,10 @@ mod tx_filter;
 use alloy_sol_types::SolEvent;
 
 use channel::Channel;
+use error::{
+    ExecutionOutputError, PipeBlockContext, PipeBlockError, PipeChannel, PipeErrorKind,
+    PipeOrderError, PipeResult, PipeResultExt, PipeStage,
+};
 use gravity_api_types::{
     config_storage::{BlockNumber, ConfigStorage, OnChainConfig, OnChainConfigResType},
     events::contract_event::GravityEvent,
@@ -52,6 +57,7 @@ use reth_rpc_eth_api::RpcTypes;
 use revm::DatabaseRef;
 use std::{
     collections::BTreeMap,
+    path::Path,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -64,9 +70,12 @@ use onchain_config::OnchainConfigFetcher;
 use reth_evm::parallel_execute::ParallelExecutor;
 use reth_rpc_eth_api::helpers::EthCall;
 use reth_trie::{HashedPostState, KeccakKeyHasher};
-use tokio::sync::{
-    mpsc::{UnboundedReceiver, UnboundedSender},
-    oneshot, Mutex,
+use tokio::{
+    sync::{
+        mpsc::{UnboundedReceiver, UnboundedSender},
+        oneshot, Mutex,
+    },
+    task::JoinSet,
 };
 use tracing::*;
 
@@ -433,37 +442,119 @@ struct Core<Storage: GravityStorage> {
 
 impl<Storage: GravityStorage> PipeExecService<Storage> {
     async fn run(mut self) {
-        self.core.init_storage(self.execution_args_rx.await.unwrap());
-        loop {
-            let start_time = Instant::now();
-            let block = match self.ordered_block_rx.recv().await {
-                Some(block) => block,
-                None => {
-                    self.core.execute_block_barrier.close();
-                    self.core.merklize_barrier.close();
-                    self.core.make_canonical_barrier.close();
-                    return;
-                }
-            };
-            let elapsed = start_time.elapsed();
-            self.core.metrics.recv_block_time_diff.record(elapsed);
-            info!(target: "PipeExecService.run",
-                id=?block.id(),
-                parent_id=?block.parent_id(),
-                number=?block.number(),
-                epoch=?block.epoch(),
-                elapsed=?elapsed,
-                "new ordered block"
-            );
+        let execution_args = match (&mut self.execution_args_rx).await {
+            Ok(args) => args,
+            Err(err) => {
+                error!(target: "PipeExecService.run", %err, "execution init channel closed");
+                self.close_channels();
+                return
+            }
+        };
+        self.core.init_storage(execution_args);
 
-            let core = self.core.clone();
-            tokio::spawn(async move {
-                let start_time = Instant::now();
-                core.process(block).await;
-                core.metrics.process_block_duration.record(start_time.elapsed());
-            });
+        let mut tasks: JoinSet<PipeResult<()>> = JoinSet::new();
+        loop {
+            let recv_start = Instant::now();
+            tokio::select! {
+                biased;
+
+                result = tasks.join_next(), if !tasks.is_empty() => {
+                    match result {
+                        Some(Ok(Ok(()))) | None => {}
+                        Some(Ok(Err(err))) => {
+                            if err.is_cancellation() {
+                                info!(target: "PipeExecService.run", kind=?err.kind(), %err, "pipe block cancelled");
+                            } else {
+                                error!(target: "PipeExecService.run", kind=?err.kind(), %err, "pipe block failed");
+                            }
+                            self.shutdown(&mut tasks).await;
+                            return
+                        }
+                        Some(Err(err)) => {
+                            error!(target: "PipeExecService.run", %err, is_panic=err.is_panic(), "pipe block task failed");
+                            self.shutdown(&mut tasks).await;
+                            return
+                        }
+                    }
+                }
+                block = self.ordered_block_rx.recv() => {
+                    let Some(block) = block else {
+                        break
+                    };
+                    self.core.metrics.recv_block_time_diff.record(recv_start.elapsed());
+                    self.spawn_block(&mut tasks, block);
+                }
+            }
         }
+
+        while let Some(result) = tasks.join_next().await {
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    if err.is_cancellation() {
+                        info!(target: "PipeExecService.run", kind=?err.kind(), %err, "pipe block cancelled while draining");
+                    } else {
+                        error!(target: "PipeExecService.run", kind=?err.kind(), %err, "pipe block failed while draining");
+                    }
+                    self.shutdown(&mut tasks).await;
+                    return
+                }
+                Err(err) => {
+                    error!(target: "PipeExecService.run", %err, is_panic=err.is_panic(), "pipe block task failed while draining");
+                    self.shutdown(&mut tasks).await;
+                    return
+                }
+            }
+        }
+        self.close_channels();
     }
+
+    fn spawn_block(&self, tasks: &mut JoinSet<PipeResult<()>>, block: ReceivedBlock) {
+        info!(target: "PipeExecService.run",
+            id=?block.id(),
+            parent_id=?block.parent_id(),
+            number=?block.number(),
+            epoch=?block.epoch(),
+            "new ordered block"
+        );
+
+        let core = self.core.clone();
+        tasks.spawn(async move {
+            let start_time = Instant::now();
+            let result = core.process(block).await;
+            core.metrics.process_block_duration.record(start_time.elapsed());
+            result
+        });
+    }
+
+    async fn shutdown(&mut self, tasks: &mut JoinSet<PipeResult<()>>) {
+        self.close_channels();
+        tasks.abort_all();
+        while tasks.join_next().await.is_some() {}
+    }
+
+    fn close_channels(&mut self) {
+        self.ordered_block_rx.close();
+        self.core.verified_block_hash_rx.close();
+        self.core.execute_block_barrier.close();
+        self.core.merklize_barrier.close();
+        self.core.seal_barrier.close();
+        self.core.make_canonical_barrier.close();
+    }
+}
+
+fn dump_failed_block(path: &Path, block: &RecoveredBlock<Block>) -> Result<(), DumpBlockError> {
+    let file = std::fs::File::create(path)?;
+    serde_json::to_writer_pretty(std::io::BufWriter::new(file), block)?;
+    Ok(())
+}
+
+#[derive(Debug, thiserror::Error)]
+enum DumpBlockError {
+    #[error("failed to create block dump: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("failed to serialize block dump: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
 #[derive(Debug)]
@@ -476,6 +567,10 @@ struct ExecuteOrderedBlockResult {
     gravity_events: Vec<GravityEvent>,
     epoch: u64,
 }
+
+type StateViewError<Storage> = <<Storage as GravityStorage>::StateView as DatabaseRef>::Error;
+type PreparedBlock = (RecoveredBlock<Block>, Vec<TxInfo>);
+type FilteredTransactions = (Vec<TransactionSigned>, Vec<Address>, Vec<TxInfo>);
 
 /// Result of system transaction execution
 ///
@@ -496,32 +591,36 @@ enum SystemTxnExecutionOutcome {
 fn validate_execution_output(
     block: &Block,
     execution_output: &BlockExecutionOutput<Receipt>,
-) -> Result<(), String> {
+) -> Result<(), ExecutionOutputError> {
     if block.gas_limit() < block.gas_used() {
-        return Err(format!("gas_limit({}) < gas_used({})", block.gas_limit(), block.gas_used()));
+        return Err(ExecutionOutputError::GasLimitExceeded {
+            gas_limit: block.gas_limit(),
+            gas_used: block.gas_used(),
+        })
     }
     let expected_gas_used =
         execution_output.receipts.last().map(|r| r.cumulative_gas_used).unwrap_or(0);
     if block.gas_used() != expected_gas_used {
-        return Err(format!(
-            "block gas_used({}) != last receipt cumulative_gas_used({})",
-            block.gas_used(),
-            expected_gas_used
-        ));
+        return Err(ExecutionOutputError::ReceiptGasMismatch {
+            block_gas_used: block.gas_used(),
+            receipt_gas_used: expected_gas_used,
+        })
     }
     if execution_output.gas_used != block.gas_used {
-        return Err(format!(
-            "execution_output.gas_used({}) != block.gas_used({})",
-            execution_output.gas_used, block.gas_used
-        ));
+        return Err(ExecutionOutputError::OutputGasMismatch {
+            output_gas_used: execution_output.gas_used,
+            block_gas_used: block.gas_used(),
+        })
     }
-    let now_secs =
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(ExecutionOutputError::Clock)?
+        .as_secs();
     if block.timestamp() > now_secs * 2 {
-        return Err(format!(
-            "block timestamp({}) is not in seconds, likely in milliseconds or microseconds",
-            block.timestamp()
-        ));
+        return Err(ExecutionOutputError::InvalidTimestamp {
+            timestamp: block.timestamp(),
+            now: now_secs,
+        })
     }
     Ok(())
 }
@@ -571,13 +670,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         ])
     }
 
-    /// DESIGN: All `.unwrap()` calls on barrier wait/notify, state root, and
-    /// `verify_executed_block_hash` in this function are intentional. In the gravity-sdk
-    /// integration the panic handler is configured to abort the process (via
-    /// `std::process::exit`), so a panic terminates the entire node rather than
-    /// silently killing a single tokio task. Downstream barrier deadlocks therefore
-    /// cannot occur, and a full process restart is the correct recovery strategy.
-    async fn process(&self, block: ReceivedBlock) {
+    async fn process(&self, block: ReceivedBlock) -> PipeResult<()> {
         // Wait until there's no large gap between cache and db
         let block_number = block.number();
         let block_id = block.id();
@@ -586,6 +679,10 @@ impl<Storage: GravityStorage> Core<Storage> {
         } else {
             (U256::ZERO, self.epoch())
         };
+        let mut context = PipeBlockContext { block_id, block_number, epoch: block_epoch };
+        let parent_number = block_number.checked_sub(1).ok_or_else(|| {
+            PipeBlockError::new(context, PipeStage::Execute, PipeOrderError::ZeroBlockNumber)
+        })?;
         self.metrics.start_process_block_number.set(block_number as f64);
 
         // Retrieve the parent block header to generate the necessary configs for
@@ -593,14 +690,13 @@ impl<Storage: GravityStorage> Core<Storage> {
         let ExecuteBlockContext { parent_header, prev_start_execute_time, epoch } = loop {
             info!(
                 "Wait execute_block_barrier {} => ({}, {})",
-                block_number,
-                block_epoch,
-                block_number - 1
+                block_number, block_epoch, parent_number
             );
             match self
                 .execute_block_barrier
-                .wait_timeout((block_epoch, block_number - 1), Duration::from_secs(2))
+                .wait_timeout((block_epoch, parent_number), Duration::from_secs(2))
                 .await
+                .pipe_context(context, PipeStage::Execute)?
             {
                 Some(parent) => break parent,
                 // Make sure the ordered blocks are idempotent.
@@ -618,20 +714,25 @@ impl<Storage: GravityStorage> Core<Storage> {
                             execute_height=?self.execute_height(),
                             "epoch or execute height mismatch"
                         );
-                        return;
-                    } else {
-                        warn!(target: "PipeExecService.process",
-                            block_number=?block_number,
-                            block_id=?block_id,
-                            block_epoch=?block_epoch,
-                            "timeout(2s) wait for execute_block_barrier"
-                        );
+                        return Ok(())
                     }
+                    warn!(target: "PipeExecService.process",
+                        block_number=?block_number,
+                        block_id=?block_id,
+                        block_epoch=?block_epoch,
+                        "timeout(2s) wait for execute_block_barrier"
+                    );
                 }
             }
         };
-        if let ReceivedBlock::OrderedBlock(ordered_block) = &block {
-            assert!(ordered_block.epoch == epoch);
+        if let ReceivedBlock::OrderedBlock(ordered_block) = &block &&
+            ordered_block.epoch != epoch
+        {
+            return Err(PipeBlockError::new(
+                context,
+                PipeStage::Execute,
+                PipeOrderError::EpochMismatch { ordered: ordered_block.epoch, barrier: epoch },
+            ))
         }
         self.storage.insert_block_id(block_number, block_id);
 
@@ -647,17 +748,17 @@ impl<Storage: GravityStorage> Core<Storage> {
             epoch,
         } = match block {
             ReceivedBlock::OrderedBlock(ordered_block) => {
-                self.execute_ordered_block(ordered_block, &parent_header)
+                self.execute_ordered_block(ordered_block, &parent_header)?
             }
             ReceivedBlock::HistoryBlock(recovered_block) => {
-                self.execute_history_block(*recovered_block)
+                self.execute_history_block(*recovered_block, context)?
             }
         };
+        context.epoch = epoch;
 
         #[cfg(debug_assertions)]
-        validate_execution_output(&block, &execution_output).unwrap_or_else(|e| {
-            panic!("validate_execution_output failed. error: {e:?}\n{:?}", block.header());
-        });
+        validate_execution_output(&block, &execution_output)
+            .pipe_context(context, PipeStage::Execute)?;
 
         let write_start = Instant::now();
         self.cache.write_state_changes(
@@ -691,11 +792,31 @@ impl<Storage: GravityStorage> Core<Storage> {
             );
             // SAFETY: Release ordering is sufficient here — see comment on field
             // declarations.
-            assert_eq!(self.epoch.fetch_max(epoch, Ordering::Release), block_epoch);
+            let previous_epoch = self.epoch.fetch_max(epoch, Ordering::Release);
+            if previous_epoch != block_epoch {
+                return Err(PipeBlockError::new(
+                    context,
+                    PipeStage::Execute,
+                    PipeOrderError::EpochStateMismatch {
+                        actual: previous_epoch,
+                        expected: block_epoch,
+                    },
+                ))
+            }
         }
         // SAFETY: Release ordering is sufficient — the execute_block_barrier
         // serializes writers; only the timeout branch reads these concurrently (harmlessly).
-        assert_eq!(self.execute_height.fetch_add(1, Ordering::Release), block_number - 1);
+        let previous_height = self.execute_height.fetch_add(1, Ordering::Release);
+        if previous_height != parent_number {
+            return Err(PipeBlockError::new(
+                context,
+                PipeStage::Execute,
+                PipeOrderError::ExecuteHeightMismatch {
+                    actual: previous_height,
+                    expected: parent_number,
+                },
+            ))
+        }
         self.execute_block_barrier
             .notify(
                 (epoch, block_number),
@@ -705,20 +826,26 @@ impl<Storage: GravityStorage> Core<Storage> {
                     epoch,
                 },
             )
-            .unwrap();
+            .pipe_context(context, PipeStage::Execute)?;
 
         let execution_outcome = self.calculate_roots(&mut block, execution_output);
 
         // Merkling the state trie
-        self.merklize_barrier.wait(block_number - 1).await.unwrap();
+        self.merklize_barrier
+            .wait(parent_number)
+            .await
+            .pipe_context(context, PipeStage::Merklize)?;
         let start_time = Instant::now();
-        let (state_root, trie_updates) = self.storage.state_root(&hashed_state).unwrap();
+        let (state_root, trie_updates) =
+            self.storage.state_root(&hashed_state).pipe_context(context, PipeStage::Merklize)?;
         let write_start = Instant::now();
         self.cache.write_trie_updates(&trie_updates, block_number);
         self.metrics.cache_trie_state.record(write_start.elapsed());
         let elapsed = start_time.elapsed();
         self.metrics.merklize_duration.record(elapsed);
-        self.merklize_barrier.notify(block_number, ()).unwrap();
+        self.merklize_barrier
+            .notify(block_number, ())
+            .pipe_context(context, PipeStage::Merklize)?;
         info!(target: "PipeExecService.process",
             block_number=?block_number,
             block_id=?block_id,
@@ -736,13 +863,16 @@ impl<Storage: GravityStorage> Core<Storage> {
         }
 
         // Seal the block
-        let parent_hash = self.seal_barrier.wait(block_number - 1).await.unwrap();
+        let parent_hash =
+            self.seal_barrier.wait(parent_number).await.pipe_context(context, PipeStage::Seal)?;
         let start_time = Instant::now();
         block.header.parent_hash = parent_hash;
         let sealed_block = block.seal_slow();
         let block_hash = sealed_block.hash();
         self.metrics.seal_duration.record(start_time.elapsed());
-        self.seal_barrier.notify(block_number, block_hash).unwrap();
+        self.seal_barrier
+            .notify(block_number, block_hash)
+            .pipe_context(context, PipeStage::Seal)?;
         debug!(target: "PipeExecService.process",
             block_number=?block_number,
             block_id=?block_id,
@@ -762,24 +892,44 @@ impl<Storage: GravityStorage> Core<Storage> {
         let execution_result =
             ExecutionResult { block_id, block_number, epoch, block_hash, txs_info, gravity_events };
 
-        self.verify_executed_block_hash(execution_result).await.unwrap();
-        self.make_canonical(&block_id, executed_block).await;
+        self.verify_executed_block_hash(execution_result).await?;
+        self.make_canonical(context, executed_block).await?;
         self.metrics.total_gas_used.increment(gas_used);
         self.metrics.end_process_block_number.set(block_number as f64);
+        Ok(())
     }
 
     /// Push executed block hash to Coordinator and wait for verification result from Coordinator.
-    /// Returns `None` if the channel has been closed.
-    async fn verify_executed_block_hash(&self, execution_result: ExecutionResult) -> Option<()> {
+    async fn verify_executed_block_hash(
+        &self,
+        execution_result: ExecutionResult,
+    ) -> PipeResult<()> {
         let start_time = Instant::now();
         let block_id = execution_result.block_id;
         let block_number = execution_result.block_number;
+        let context = PipeBlockContext { block_id, block_number, epoch: execution_result.epoch };
         let executed_block_hash = execution_result.block_hash;
-        self.execution_result_tx.send(execution_result).ok()?;
-        let block_hash = self.verified_block_hash_rx.wait(block_id).await?;
+        self.execution_result_tx
+            .send(execution_result)
+            .map_err(|_| PipeErrorKind::ChannelClosed(PipeChannel::ExecutionResult))
+            .pipe_context(context, PipeStage::Verify)?;
+        let block_hash = self
+            .verified_block_hash_rx
+            .wait(block_id)
+            .await
+            .pipe_context(context, PipeStage::Verify)?;
         match block_hash {
             Some(verified_hash) => {
-                assert_eq!(executed_block_hash, verified_hash, "Block hash mismatch");
+                if executed_block_hash != verified_hash {
+                    return Err(PipeBlockError::new(
+                        context,
+                        PipeStage::Verify,
+                        PipeErrorKind::HashMismatch {
+                            expected: executed_block_hash,
+                            actual: verified_hash,
+                        },
+                    ))
+                }
             }
             None => {
                 // EXPECTED: commit_ledger() batches multiple blocks but LedgerInfo
@@ -804,7 +954,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             elapsed=?elapsed,
             "block verified"
         );
-        Some(())
+        Ok(())
     }
 
     fn create_block_for_executor(
@@ -817,8 +967,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         // filter budget so `header.gas_used` stays `≤ header.gas_limit` after metadata +
         // validator receipts are appended. Closes gravity-audit#621.
         sum_system_gas: u64,
-    ) -> (RecoveredBlock<Block>, Vec<TxInfo>) {
-        assert_eq!(ordered_block.transactions.len(), ordered_block.senders.len());
+    ) -> Result<PreparedBlock, StateViewError<Storage>> {
         let mut block = Block {
             header: Header {
                 // Transient carrier: feeds parent_id to the upstream EIP-2935 SystemCaller
@@ -878,7 +1027,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             user_gas_budget,
             block.timestamp,
             block.number,
-        );
+        )?;
         self.metrics.filter_transaction_duration.record(start_time.elapsed());
         let (txs, senders) = if !validator_txns.is_empty() {
             let mut address = vec![SYSTEM_CALLER; validator_txns.len()];
@@ -890,7 +1039,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         };
 
         block.body.transactions = txs;
-        (RecoveredBlock::new_unhashed(block, senders), txs_info)
+        Ok((RecoveredBlock::new_unhashed(block, senders), txs_info))
     }
 
     /// Execute all system transactions (metadata, DKG, JWK) sequentially
@@ -901,10 +1050,8 @@ impl<Storage: GravityStorage> Core<Storage> {
     /// Returns `SystemTxnExecutionOutcome::EpochChanged` if a new epoch was triggered,
     /// otherwise returns `SystemTxnExecutionOutcome::Continue` with the results.
     ///
-    /// DESIGN: system transaction failures must not prevent user transaction execution.
     /// EVM-level revert/halt results are kept as failed receipts in the block. Rust-level
-    /// execution errors do not produce a valid receipt, so they are logged and the offending
-    /// system transaction is skipped.
+    /// execution errors do not produce a valid receipt and are returned to the pipe supervisor.
     fn execute_system_transactions(
         executor: &mut dyn ParallelExecutor<
             Primitives = EthPrimitives,
@@ -920,7 +1067,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         block_number: u64,
         initial_nonce: u64,
         is_alpha_active: bool,
-    ) -> SystemTxnExecutionOutcome {
+    ) -> Result<SystemTxnExecutionOutcome, PipeErrorKind> {
         let mint_precompile = create_mint_token_precompile();
         let bls_precompile = create_bls_pop_verify_precompile();
         let system_precompiles: Vec<(Address, DynPrecompile)> = vec![
@@ -957,33 +1104,27 @@ impl<Storage: GravityStorage> Core<Storage> {
 
         let metadata_tx_env =
             Recovered::new_unchecked(metadata_txn.clone(), SYSTEM_CALLER).into_tx_env();
-        let metadata_txn_result = match executor.transact_system_txn(
+        let metadata_execution_result = executor.transact_system_txn(
             evm_env.clone(),
             system_precompiles.clone(),
             metadata_tx_env,
-        ) {
-            Ok(metadata_execution_result) => {
-                current_nonce = metadata_txn.nonce() + 1;
-                Some(SystemTxnResult { result: metadata_execution_result, txn: metadata_txn })
-            }
-            Err(error) => {
-                if !is_alpha_active {
-                    panic!("metadata txn execution failed: {error:?}");
-                }
-                error!(target: "execute_ordered_block",
-                    block_number=?block_number,
-                    error=?error,
-                    "metadata system transaction execution failed, skipping"
-                );
-                None
-            }
-        };
+        )?;
+        current_nonce = metadata_txn.nonce() + 1;
+        let metadata_txn_result =
+            SystemTxnResult { result: metadata_execution_result, txn: metadata_txn };
+
+        let expected_epoch =
+            epoch.checked_add(1).ok_or(PipeOrderError::EpochOverflow { current: epoch })?;
 
         // Check for epoch change from metadata txn
-        if let Some((new_epoch, validators)) =
-            metadata_txn_result.as_ref().and_then(SystemTxnResult::emit_new_epoch)
-        {
-            assert_eq!(new_epoch, epoch + 1);
+        if let Some((new_epoch, validators)) = metadata_txn_result.emit_new_epoch() {
+            if new_epoch != expected_epoch {
+                return Err(PipeOrderError::EpochTransitionMismatch {
+                    emitted: new_epoch,
+                    expected: expected_epoch,
+                }
+                .into())
+            }
             info!(target: "execute_ordered_block",
                 id=?block_id,
                 parent_id=?parent_id,
@@ -994,35 +1135,31 @@ impl<Storage: GravityStorage> Core<Storage> {
             // merge_transitions was already called inside transact_system_txn,
             // so take_bundle() returns the complete bundle with all system-txn changes.
             let bundle = executor.take_bundle();
-            return SystemTxnExecutionOutcome::EpochChanged(
+            return Ok(SystemTxnExecutionOutcome::EpochChanged(
                 system_txns_into_executed_ordered_block_result(
-                    vec![
-                        metadata_txn_result.expect("metadata result exists when it emits NewEpoch")
-                    ],
+                    vec![metadata_txn_result],
                     chain_spec,
                     ordered_block,
                     base_fee,
                     bundle,
                     validators,
                 ),
+            ))
+        }
+
+        if !metadata_txn_result.result.is_success() {
+            error!(target: "execute_ordered_block",
+                block_number=?block_number,
+                gas_used=?metadata_txn_result.result.gas_used(),
+                output=?metadata_txn_result.result.output(),
+                "metadata system transaction reverted"
             );
         }
 
-        if let Some(metadata_txn_result) = metadata_txn_result.as_ref() {
-            if !metadata_txn_result.result.is_success() {
-                error!(target: "execute_ordered_block",
-                    block_number=?block_number,
-                    gas_used=?metadata_txn_result.result.gas_used(),
-                    output=?metadata_txn_result.result.output(),
-                    "metadata system transaction reverted"
-                );
-            }
-
-            debug!(target: "execute_ordered_block",
-                metadata_txn_result=?metadata_txn_result,
-                "metadata transaction result"
-            );
-        }
+        debug!(target: "execute_ordered_block",
+            metadata_txn_result=?metadata_txn_result,
+            "metadata transaction result"
+        );
 
         // -----------------------------------------------------------------------
         // Validator transactions (DKG and JWK) — sorted: DKG first, JWK second
@@ -1044,15 +1181,15 @@ impl<Storage: GravityStorage> Core<Storage> {
                 is_alpha_active,
             ) {
                 Ok(txn) => txn,
-                Err(e) => {
-                    error!(target: "execute_ordered_block",
-                        index=?index,
-                        is_dkg=?is_dkg,
-                        block_number=?block_number,
-                        error=?e,
-                        "Failed to construct validator transaction, skipping"
+                Err(err) => {
+                    warn!(target: "execute_ordered_block",
+                        index,
+                        is_dkg,
+                        block_number,
+                        %err,
+                        "skipping invalid validator transaction"
                     );
-                    continue;
+                    continue
                 }
             };
 
@@ -1065,26 +1202,11 @@ impl<Storage: GravityStorage> Core<Storage> {
             );
 
             let tx_env = Recovered::new_unchecked(txn.clone(), SYSTEM_CALLER).into_tx_env();
-            let execution_result = match executor.transact_system_txn(
+            let execution_result = executor.transact_system_txn(
                 evm_env.clone(),
                 system_precompiles.clone(),
                 tx_env,
-            ) {
-                Ok(execution_result) => execution_result,
-                Err(error) => {
-                    if !is_alpha_active {
-                        panic!("validator txn execution failed: {error:?}");
-                    }
-                    error!(target: "execute_ordered_block",
-                        index=?index,
-                        is_dkg=?is_dkg,
-                        block_number=?block_number,
-                        error=?error,
-                        "validator system transaction execution failed, skipping"
-                    );
-                    continue;
-                }
-            };
+            )?;
 
             current_nonce += 1;
             let validator_result = SystemTxnResult { result: execution_result, txn };
@@ -1102,7 +1224,13 @@ impl<Storage: GravityStorage> Core<Storage> {
                 // DKG transactions may trigger epoch change
                 if is_dkg {
                     if let Some((new_epoch, validators)) = validator_result.emit_new_epoch() {
-                        assert_eq!(new_epoch, epoch + 1);
+                        if new_epoch != expected_epoch {
+                            return Err(PipeOrderError::EpochTransitionMismatch {
+                                emitted: new_epoch,
+                                expected: expected_epoch,
+                            }
+                            .into())
+                        }
                         info!(target: "execute_ordered_block",
                             id=?block_id,
                             parent_id=?parent_id,
@@ -1112,7 +1240,7 @@ impl<Storage: GravityStorage> Core<Storage> {
                         );
                         let bundle = executor.take_bundle();
                         if !is_alpha_active {
-                            return SystemTxnExecutionOutcome::EpochChanged(
+                            return Ok(SystemTxnExecutionOutcome::EpochChanged(
                                 system_txns_into_executed_ordered_block_result(
                                     vec![validator_result],
                                     chain_spec,
@@ -1121,19 +1249,14 @@ impl<Storage: GravityStorage> Core<Storage> {
                                     bundle,
                                     validators,
                                 ),
-                            );
+                            ))
                         }
-                        let mut epoch_change_results = Vec::with_capacity(
-                            usize::from(metadata_txn_result.is_some()) +
-                                validator_txn_results.len() +
-                                1,
-                        );
-                        if let Some(metadata_txn_result) = metadata_txn_result {
-                            epoch_change_results.push(metadata_txn_result);
-                        }
+                        let mut epoch_change_results =
+                            Vec::with_capacity(validator_txn_results.len() + 2);
+                        epoch_change_results.push(metadata_txn_result);
                         epoch_change_results.extend(validator_txn_results);
                         epoch_change_results.push(validator_result);
-                        return SystemTxnExecutionOutcome::EpochChanged(
+                        return Ok(SystemTxnExecutionOutcome::EpochChanged(
                             system_txns_into_executed_ordered_block_result(
                                 epoch_change_results,
                                 chain_spec,
@@ -1142,7 +1265,7 @@ impl<Storage: GravityStorage> Core<Storage> {
                                 bundle,
                                 validators,
                             ),
-                        );
+                        ))
                     }
                 }
 
@@ -1158,10 +1281,10 @@ impl<Storage: GravityStorage> Core<Storage> {
             validator_txn_results.push(validator_result);
         }
 
-        SystemTxnExecutionOutcome::Continue {
-            metadata_result: metadata_txn_result,
+        Ok(SystemTxnExecutionOutcome::Continue {
+            metadata_result: Some(metadata_txn_result),
             validator_results: validator_txn_results,
-        }
+        })
     }
 
     /// Extract gravity events from execution receipts
@@ -1181,14 +1304,35 @@ impl<Storage: GravityStorage> Core<Storage> {
         &self,
         ordered_block: OrderedBlock,
         parent_header: &Header,
-    ) -> ExecuteOrderedBlockResult {
+    ) -> PipeResult<ExecuteOrderedBlockResult> {
         let block_id = ordered_block.id;
         let parent_id = ordered_block.parent_id;
         let block_number = ordered_block.number;
-        assert_eq!(block_number, parent_header.number + 1);
         let epoch = ordered_block.epoch;
+        let context = PipeBlockContext { block_id, block_number, epoch };
 
-        let state = self.storage.get_state_view().unwrap();
+        if block_number != parent_header.number + 1 {
+            return Err(PipeBlockError::new(
+                context,
+                PipeStage::Execute,
+                PipeOrderError::ParentNumberMismatch {
+                    block: block_number,
+                    parent: parent_header.number,
+                },
+            ))
+        }
+        if ordered_block.transactions.len() != ordered_block.senders.len() {
+            return Err(PipeBlockError::new(
+                context,
+                PipeStage::Execute,
+                PipeOrderError::TransactionSenderCountMismatch {
+                    transactions: ordered_block.transactions.len(),
+                    senders: ordered_block.senders.len(),
+                },
+            ))
+        }
+
+        let state = self.storage.get_state_view().pipe_context(context, PipeStage::Execute)?;
 
         let evm_env = self
             .evm_config
@@ -1203,7 +1347,7 @@ impl<Storage: GravityStorage> Core<Storage> {
                     withdrawals: Some(ordered_block.withdrawals.clone()),
                 },
             )
-            .unwrap();
+            .pipe_context(context, PipeStage::Execute)?;
         debug!(target: "execute_ordered_block",
             evm_env=?evm_env,
             block_number=?block_number,
@@ -1217,7 +1361,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         // only serves `execute_system_transactions` nonce sequencing.
         let initial_nonce = state
             .basic_ref(SYSTEM_CALLER)
-            .expect("failed to read SYSTEM_CALLER account from state")
+            .pipe_context(context, PipeStage::Execute)?
             .map(|a| a.nonce)
             .unwrap_or(0);
 
@@ -1238,7 +1382,8 @@ impl<Storage: GravityStorage> Core<Storage> {
             ordered_block.timestamp_us / 1_000_000,
             parent_header.timestamp,
             block_number,
-        );
+        )
+        .pipe_context(context, PipeStage::Execute)?;
 
         let is_alpha_active = self.chain_spec.gravity_hardforks().is_fork_active_at_timestamp(
             GravityHardfork::Alpha,
@@ -1256,7 +1401,8 @@ impl<Storage: GravityStorage> Core<Storage> {
             ordered_block.timestamp_us / 1_000_000,
             parent_header.timestamp,
             block_number,
-        );
+        )
+        .pipe_context(context, PipeStage::Execute)?;
 
         // Execute system transactions (metadata, DKG, JWK) sequentially.
         // State changes are committed directly into executor's ParallelState.
@@ -1272,8 +1418,10 @@ impl<Storage: GravityStorage> Core<Storage> {
             block_number,
             initial_nonce,
             is_alpha_active,
-        ) {
-            SystemTxnExecutionOutcome::EpochChanged(result) => return result,
+        )
+        .pipe_context(context, PipeStage::Execute)?
+        {
+            SystemTxnExecutionOutcome::EpochChanged(result) => return Ok(result),
             SystemTxnExecutionOutcome::Continue { metadata_result, validator_results } => {
                 (metadata_result, validator_results)
             }
@@ -1302,14 +1450,17 @@ impl<Storage: GravityStorage> Core<Storage> {
         // receipts get appended below. Closes gravity-audit#621.
         let sum_system_gas = metadata_txn_result.as_ref().map_or(0, |r| r.result.gas_used()) +
             validator_txn_results.iter().map(|r| r.result.gas_used()).sum::<u64>();
-        let state_for_block = self.storage.get_state_view().unwrap();
-        let (block, txs_info) = self.create_block_for_executor(
-            ordered_block,
-            base_fee,
-            &state_for_block,
-            vec![],
-            sum_system_gas,
-        );
+        let state_for_block =
+            self.storage.get_state_view().pipe_context(context, PipeStage::Execute)?;
+        let (block, txs_info) = self
+            .create_block_for_executor(
+                ordered_block,
+                base_fee,
+                &state_for_block,
+                vec![],
+                sum_system_gas,
+            )
+            .pipe_context(context, PipeStage::Execute)?;
 
         info!(target: "execute_ordered_block",
             id=?block_id,
@@ -1320,14 +1471,16 @@ impl<Storage: GravityStorage> Core<Storage> {
             "ready to execute block"
         );
 
-        let outcome = executor.execute(&block).unwrap_or_else(|err| {
-            serde_json::to_writer_pretty(
-                std::io::BufWriter::new(std::fs::File::create(format!("{block_id}.json")).unwrap()),
-                &block,
-            )
-            .unwrap();
-            panic!("failed to execute block {block_id:?}: {err:?}")
-        });
+        let outcome = match executor.execute(&block) {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                let path = format!("{block_id}.json");
+                if let Err(dump_err) = dump_failed_block(Path::new(&path), &block) {
+                    warn!(target: "execute_ordered_block", %dump_err, %path, "failed to dump block");
+                }
+                return Err(PipeBlockError::new(context, PipeStage::Execute, err))
+            }
+        };
         info!(target: "execute_ordered_block",
             id=?block_id,
             parent_id=?parent_id,
@@ -1363,39 +1516,51 @@ impl<Storage: GravityStorage> Core<Storage> {
             "insert metadata and validator transaction results to executed ordered block result"
         );
         // Only extract gravity events from system transaction receipts.
-        let gravity_events = self.extract_gravity_events_from_receipts(
-            &result.execution_output.receipts[..n_system_receipts],
-            result.block.number,
-            epoch,
-        );
+        let system_receipts =
+            result.execution_output.receipts.get(..n_system_receipts).ok_or_else(|| {
+                PipeBlockError::new(
+                    context,
+                    PipeStage::Execute,
+                    ExecutionOutputError::MissingSystemReceipts {
+                        expected: n_system_receipts,
+                        actual: result.execution_output.receipts.len(),
+                    },
+                )
+            })?;
+        let gravity_events =
+            self.extract_gravity_events_from_receipts(system_receipts, result.block.number, epoch);
 
         result.gravity_events.extend(gravity_events);
-        result
+        Ok(result)
     }
 
     /// Only used for testing.
-    fn execute_history_block(&self, block: RecoveredBlock<Block>) -> ExecuteOrderedBlockResult {
-        let state = self.storage.get_state_view().unwrap();
+    fn execute_history_block(
+        &self,
+        block: RecoveredBlock<Block>,
+        context: PipeBlockContext,
+    ) -> PipeResult<ExecuteOrderedBlockResult> {
+        let state = self.storage.get_state_view().pipe_context(context, PipeStage::Execute)?;
         let mut executor = self.evm_config.parallel_executor(state);
-        let outcome = executor.execute(&block).unwrap_or_else(|err| {
-            serde_json::to_writer(
-                std::io::BufWriter::new(
-                    std::fs::File::create(format!("{}.json", block.number)).unwrap(),
-                ),
-                &block,
-            )
-            .unwrap();
-            panic!("failed to execute block {:?}: {:?}", block.number, err)
-        });
+        let outcome = match executor.execute(&block) {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                let path = format!("{}.json", block.number);
+                if let Err(dump_err) = dump_failed_block(Path::new(&path), &block) {
+                    warn!(target: "execute_history_block", %dump_err, %path, "failed to dump block");
+                }
+                return Err(PipeBlockError::new(context, PipeStage::Execute, err))
+            }
+        };
         let (block, senders) = block.split();
-        ExecuteOrderedBlockResult {
+        Ok(ExecuteOrderedBlockResult {
             block,
             senders,
             execution_output: outcome,
             txs_info: vec![],
             gravity_events: vec![],
             epoch: 0,
-        }
+        })
     }
 
     /// Calculate the receipts root, logs bloom, and transactions root, etc. and fill them into the
@@ -1437,22 +1602,33 @@ impl<Storage: GravityStorage> Core<Storage> {
     /// crash and restart the reth DB is the sole source of truth. There is no
     /// "split-brain" risk between `GravityStorage` and the reth DB because
     /// `GravityStorage` state does not survive a restart.
-    async fn make_canonical(&self, block_id: &B256, executed_block: ExecutedBlockWithTrieUpdates) {
+    async fn make_canonical(
+        &self,
+        context: PipeBlockContext,
+        executed_block: ExecutedBlockWithTrieUpdates,
+    ) -> PipeResult<()> {
         let block_number = executed_block.recovered_block.number();
         let block_hash = executed_block.recovered_block.hash();
-        let prev_finish_commit_time =
-            self.make_canonical_barrier.wait(block_number - 1).await.unwrap();
+        let prev_finish_commit_time = self
+            .make_canonical_barrier
+            .wait(block_number - 1)
+            .await
+            .pipe_context(context, PipeStage::Canonicalize)?;
         let start_time = Instant::now();
         let (tx, rx) = oneshot::channel();
         self.event_tx
             .send(PipeExecLayerEvent::MakeCanonical(MakeCanonicalEvent { executed_block, tx }))
-            .unwrap();
-        rx.await.unwrap();
+            .map_err(|_| PipeErrorKind::ChannelClosed(PipeChannel::CanonicalEvent))
+            .pipe_context(context, PipeStage::Canonicalize)?;
+        rx.await
+            .map_err(|_| PipeErrorKind::ChannelClosed(PipeChannel::CanonicalAcknowledgement))
+            .pipe_context(context, PipeStage::Canonicalize)?
+            .pipe_context(context, PipeStage::Canonicalize)?;
         self.storage.update_canonical(block_number, block_hash);
         let elapsed = start_time.elapsed();
         info!(target: "PipeExecService.process",
             block_number=?block_number,
-            block_id=?block_id,
+            block_id=?context.block_id,
             block_hash=?block_hash,
             elapsed=?elapsed,
             "block made canonical"
@@ -1460,7 +1636,10 @@ impl<Storage: GravityStorage> Core<Storage> {
         let finish_commit_time = Instant::now();
         self.metrics.make_canonical_duration.record(elapsed);
         self.metrics.finish_commit_time_diff.record(finish_commit_time - prev_finish_commit_time);
-        self.make_canonical_barrier.notify(block_number, finish_commit_time).unwrap();
+        self.make_canonical_barrier
+            .notify(block_number, finish_commit_time)
+            .pipe_context(context, PipeStage::Canonicalize)?;
+        Ok(())
     }
 
     fn init_storage(&self, execution_args: ExecutionArgs) {
@@ -1480,7 +1659,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         gas_limit: u64,
         block_timestamp: u64,
         block_number: u64,
-    ) -> (Vec<TransactionSigned>, Vec<Address>, Vec<TxInfo>) {
+    ) -> Result<FilteredTransactions, StateViewError<Storage>> {
         let invalid_idxs = tx_filter::filter_invalid_txs(
             db,
             &txs,
@@ -1490,7 +1669,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             &self.chain_spec,
             block_timestamp,
             block_number,
-        );
+        )?;
         if invalid_idxs.is_empty() {
             let mut txs_info = Vec::with_capacity(txs.len());
             for (tx, sender) in txs.iter().zip(senders.iter()) {
@@ -1501,7 +1680,7 @@ impl<Storage: GravityStorage> Core<Storage> {
                     is_discarded: false,
                 });
             }
-            (txs, senders, txs_info)
+            Ok((txs, senders, txs_info))
         } else {
             let _ = self
                 .discard_txs_tx
@@ -1530,7 +1709,7 @@ impl<Storage: GravityStorage> Core<Storage> {
                 filtered_txs.push(tx);
                 filtered_senders.push(sender);
             }
-            (filtered_txs, filtered_senders, txs_info)
+            Ok((filtered_txs, filtered_senders, txs_info))
         }
     }
 }
@@ -1594,7 +1773,7 @@ impl<Storage: GravityStorage, EthApi> PipeExecLayerApi<Storage, EthApi> {
         block_id: B256,
         block_hash: Option<B256>,
     ) -> Option<()> {
-        self.verified_block_hash_tx.notify(block_id, block_hash)
+        self.verified_block_hash_tx.notify(block_id, block_hash).ok()
     }
 
     /// Wait for the block with the given block number to be persisted in the storage.
