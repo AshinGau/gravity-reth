@@ -162,6 +162,19 @@ pub trait DatabaseProviderFactory: Send + Sync {
         self.database_provider_ro()
     }
 
+    /// Returns a provider configured for RPC reads of complete persisted blocks.
+    ///
+    /// Backends without a separate RPC read view keep their existing read behavior. Reference and
+    /// `Arc` wrappers retain the configuration of the wrapped provider; configure the owned
+    /// provider before wrapping it.
+    #[auto_impl(keep_default_for(&, Arc))]
+    fn rpc_provider(&self) -> Self
+    where
+        Self: Sized + Clone,
+    {
+        self.clone()
+    }
+
     /// Create new read-write database provider.
     fn database_provider_rw(&self) -> ProviderResult<Self::ProviderRW>;
 }

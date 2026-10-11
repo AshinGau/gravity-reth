@@ -34,7 +34,7 @@ use crate::{
     hooks::OnComponentInitializedHook,
     BuilderContext, ExExLauncher, NodeAdapter, PrimitivesTy,
 };
-use alloy_eips::eip2124::Head;
+use alloy_eips::{eip2124::Head, BlockNumHash};
 use alloy_primitives::{BlockNumber, B256};
 use eyre::Context;
 use gravity_primitives::get_gravity_config;
@@ -42,7 +42,9 @@ use rayon::ThreadPoolBuilder;
 use reth_chainspec::{Chain, EthChainSpec, EthereumHardforks};
 use reth_config::{config::EtlConfig, PruneConfig};
 use reth_consensus::noop::NoopConsensus;
-use reth_db_api::{database::Database, database_metrics::DatabaseMetrics};
+use reth_db_api::{
+    database::Database, database_metrics::DatabaseMetrics, models::GravityStorageSettings,
+};
 use reth_db_common::init::{init_genesis_with_settings, InitStorageError};
 use reth_downloaders::{bodies::noop::NoopBodiesDownloader, headers::noop::NoopHeaderDownloader};
 use reth_engine_local::MiningMode;
@@ -661,7 +663,7 @@ where
     /// existing database keeps the settings persisted in its metadata (the flag never
     /// overrides them).
     pub fn init_genesis(&self) -> Result<B256, InitStorageError> {
-        init_genesis_with_settings(self.provider_factory(), self.node_config().storage_settings())
+        init_genesis_rpc_read_view(self.provider_factory(), self.node_config().storage_settings())
     }
 
     /// Creates a new `WithMeteredProvider` container and attaches it to the
@@ -1200,6 +1202,39 @@ impl<L, R> Attached<L, R> {
     }
 }
 
+/// Fresh genesis is a complete write boundary. Checking an existing genesis alone does not prove
+/// that later state/trie writes completed, so existing datadirs keep their recovery admission.
+fn init_genesis_rpc_read_view<N: ProviderNodeTypes>(
+    factory: &ProviderFactory<N>,
+    settings: GravityStorageSettings,
+) -> Result<B256, InitStorageError> {
+    let fresh = match factory.block_hash(0) {
+        Ok(None) |
+        Err(ProviderError::MissingStaticFileBlock(
+            reth_provider::StaticFileSegment::Headers,
+            0,
+        )) => true,
+        Ok(Some(_)) => false,
+        Err(err) => return Err(err.into()),
+    };
+    if !fresh {
+        return init_genesis_with_settings(factory, settings)
+    }
+
+    let mut rpc_maintenance = factory
+        .db_ref()
+        .rpc_maintenance(true)
+        .expect("blocking RPC maintenance always acquires a guard");
+    // Genesis checks open ordinary read transactions, so acquire the original snapshot barrier
+    // only after initialization returns. The node's execution services have not started yet.
+    let hash = init_genesis_with_settings(factory, settings)?;
+    let mut write_guard = factory.db_ref().consistent_write();
+    factory.publish_rpc_read_view(BlockNumHash { number: 0, hash })?;
+    write_guard.complete();
+    rpc_maintenance.complete();
+    Ok(hash)
+}
+
 /// Helper container type to bundle the initial [`NodeConfig`] and the loaded settings from the
 /// reth.toml config
 #[derive(Debug)]
@@ -1269,11 +1304,69 @@ pub fn metrics_hooks<N: NodeTypesWithDB>(provider_factory: &ProviderFactory<N>) 
 
 #[cfg(test)]
 mod tests {
-    use super::{LaunchContext, NodeConfig};
+    use super::{init_genesis_rpc_read_view, LaunchContext, NodeConfig};
+    use alloy_eips::BlockNumHash;
+    use reth_chainspec::SEPOLIA;
     use reth_config::Config;
+    use reth_db::{test_utils::TempDatabase, DatabaseArguments, DatabaseEnv, DatabaseEnvKind};
+    use reth_db_api::{
+        models::{ClientVersion, GravityStorageSettings},
+        transaction::DbTx,
+        Database,
+    };
     use reth_node_core::args::PruningArgs;
+    use reth_provider::{
+        test_utils::{create_test_provider_factory_with_chain_spec, MockNodeTypesWithDB},
+        DatabaseProviderFactory, ProviderFactory, StaticFileProviderFactory,
+    };
+    use std::sync::Arc;
 
     const EXTENSION: &str = "toml";
+
+    #[test]
+    fn fresh_genesis_opens_rpc_after_complete_initialization() {
+        let factory = create_test_provider_factory_with_chain_spec(SEPOLIA.clone());
+        // Startup recovery may have closed admission before discovering the empty datadir.
+        drop(factory.db_ref().rpc_maintenance(true).unwrap());
+        assert!(factory.rpc_provider().provider().is_err());
+
+        let hash = init_genesis_rpc_read_view(&factory, GravityStorageSettings::current()).unwrap();
+        let provider = factory.rpc_provider().provider().unwrap();
+        let bounds = provider.tx_ref().rpc_read_view_bounds().unwrap();
+        assert_eq!(bounds.block_number, 0);
+        assert_eq!(bounds.block_hash, hash);
+        assert_eq!(bounds.next_tx_num, 0);
+    }
+
+    #[test]
+    fn existing_genesis_keeps_rpc_closed_until_interrupted_replay_is_safe() {
+        let factory = create_test_provider_factory_with_chain_spec(SEPOLIA.clone());
+        let hash = init_genesis_rpc_read_view(&factory, GravityStorageSettings::current()).unwrap();
+        let static_files = factory.static_file_provider();
+        let db = Arc::try_unwrap(factory.into_db()).unwrap();
+        let path = db.path().to_path_buf();
+        drop(db.into_inner_db());
+
+        let db = DatabaseEnv::open(
+            &path,
+            DatabaseEnvKind::RW,
+            DatabaseArguments::new(ClientVersion::default()),
+        )
+        .unwrap();
+        let factory = ProviderFactory::<MockNodeTypesWithDB>::new(
+            Arc::new(TempDatabase::new(db, path)),
+            SEPOLIA.clone(),
+            static_files,
+        );
+        init_genesis_rpc_read_view(&factory, GravityStorageSettings::current()).unwrap();
+        assert!(factory.rpc_provider().provider().is_err());
+
+        // Equal genesis checkpoints still cannot rule out an uncheckpointed block-1 trie commit.
+        let mut write_guard = factory.db_ref().consistent_write();
+        factory.publish_rpc_read_view(BlockNumHash { number: 0, hash }).unwrap();
+        write_guard.complete();
+        assert!(factory.rpc_provider().provider().is_err());
+    }
 
     fn with_tempdir(filename: &str, proc: fn(&std::path::Path)) {
         let temp_dir = tempfile::tempdir().unwrap();

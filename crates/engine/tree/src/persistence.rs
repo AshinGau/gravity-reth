@@ -152,6 +152,11 @@ where
         &self,
         new_tip_num: u64,
     ) -> Result<Option<BlockNumHash>, PersistenceError> {
+        let mut rpc_maintenance = self
+            .provider
+            .db_ref()
+            .rpc_maintenance(true)
+            .expect("blocking RPC maintenance always acquires a guard");
         let mut write_guard = self.provider.db_ref().consistent_write();
         debug!(target: "engine::persistence", ?new_tip_num, "Removing blocks");
         let start_time = Instant::now();
@@ -161,6 +166,10 @@ where
         let new_tip_hash = provider_rw.block_hash(new_tip_num)?;
         UnifiedStorageWriter::from(&provider_rw, &sf_provider).remove_blocks_above(new_tip_num)?;
         UnifiedStorageWriter::commit_unwind(provider_rw)?;
+        if let Some(hash) = new_tip_hash {
+            self.provider.publish_rpc_read_view(BlockNumHash { number: new_tip_num, hash })?;
+            rpc_maintenance.complete();
+        }
         write_guard.complete();
 
         debug!(target: "engine::persistence", ?new_tip_num, ?new_tip_hash, "Removed blocks from disk");
@@ -243,6 +252,7 @@ where
                 }
             }
             provider_rw.commit()?;
+            self.provider.publish_rpc_read_view(last)?;
             write_guard.complete();
             debug!(target: "engine::persistence", first=?first_block, last=?last_block, "Saved range of blocks");
         }
@@ -258,12 +268,22 @@ where
         // The durable save is already committed at this point, so pruning can happen after we
         // acknowledge the save without extending the synchronous persistence wait.
         if self.pruner.is_pruning_needed(block_number) {
+            // A long RPC must not extend the append persistence wait. Retry pruning on a later
+            // save when no request still depends on the old static-file range.
+            let Some(mut rpc_maintenance) = self.provider.db_ref().rpc_maintenance(false) else {
+                return Ok(())
+            };
             let mut write_guard = self.provider.db_ref().consistent_write();
             debug!(target: "engine::persistence", block_num=?block_number, "Running pruner");
             let prune_start = Instant::now();
             let provider_rw = self.provider.database_provider_rw()?;
+            let block_hash = provider_rw.block_hash(block_number)?;
             let _ = self.pruner.run_with_provider(&provider_rw, block_number)?;
             provider_rw.commit()?;
+            if let Some(hash) = block_hash {
+                self.provider.publish_rpc_read_view(BlockNumHash { number: block_number, hash })?;
+                rpc_maintenance.complete();
+            }
             write_guard.complete();
             debug!(target: "engine::persistence", tip=?block_number, "Finished pruning after saving blocks");
             self.metrics.prune_before_duration_seconds.record(prune_start.elapsed());
@@ -409,6 +429,8 @@ where
                 trie_handle.join().unwrap()
             })?;
             PERSIST_BLOCK_CACHE.persist_tip(block_number);
+            self.provider
+                .publish_rpc_read_view(BlockNumHash { number: block_number, hash: block_hash })?;
             write_guard.complete();
         }
         Ok(())
@@ -461,6 +483,7 @@ where
         let mut write_guard = self.provider.db_ref().consistent_write();
         let group_first = first.recovered_block().number();
         let group_last = group.last().unwrap().recovered_block().number();
+        let group_last_hash = group.last().unwrap().recovered_block().hash();
         let block_count = group.len() as u32;
         info!(target: "persistence::save_block", group_first, group_last, count = block_count, "Write merged block group into DB");
         let start = Instant::now();
@@ -514,18 +537,18 @@ where
             provider_rw.write_hashed_state(&Arc::unwrap_or_clone(hashed_state).into_sorted())?;
         }
 
-        // Trie updates, per block.
+        // Publish the group's body tail and changesets before any trie shard can commit. A crash
+        // must leave a durable upper bound for replay even when a trie commit succeeds alone.
+        // History indexing needs this flush because RocksDB batches have no read-your-writes.
+        provider_rw.commit_view()?;
+
+        // Trie updates, per block. The final commit flushes these before history/checkpoints.
         for (trie, triev2, block_hash) in &trie_updates {
             provider_rw.write_trie_updates(
                 trie.as_ref().ok_or(ProviderError::MissingTrieUpdates(*block_hash))?,
             )?;
             provider_rw.write_trie_updatesv2(triev2.as_ref()).map_err(ProviderError::Database)?;
         }
-
-        // History indexing reads the changesets back through RocksDB cursors, which cannot see
-        // pending WriteBatch entries. Storage V2 is rejected before this path because its
-        // changesets live in static files and `commit_view` cannot make them visible.
-        provider_rw.commit_view()?;
 
         // History indices for the whole range, once.
         provider_rw.update_history_indices(group_first..=group_last)?;
@@ -542,6 +565,8 @@ where
         provider_rw.static_file_provider().commit()?;
         provider_rw.commit()?;
         PERSIST_BLOCK_CACHE.persist_tip(group_last);
+        self.provider
+            .publish_rpc_read_view(BlockNumHash { number: group_last, hash: group_last_hash })?;
         write_guard.complete();
 
         metrics::histogram!("save_blocks_time", &[("process", "merge_block")])
@@ -799,6 +824,44 @@ mod tests {
             service.save_merged_blocks(Vec::new()),
             Err(PersistenceError::MergeBlocksWithStorageV2)
         ));
+    }
+
+    #[test]
+    fn complete_blocks_publish_rpc_views_without_waiting_for_old_readers() {
+        let provider = create_test_provider_factory();
+        let (_finished_exex_height_tx, finished_exex_height_rx) =
+            tokio::sync::watch::channel(FinishedExExHeight::NoExExs);
+        let pruner =
+            Pruner::new_with_factory(provider.clone(), vec![], 5, 0, None, finished_exex_height_rx);
+        let (sync_metrics_tx, _sync_metrics_rx) = unbounded_channel();
+        let service = PersistenceService::new(
+            provider.clone(),
+            std::sync::mpsc::channel().1,
+            pruner,
+            sync_metrics_tx,
+        );
+        let rpc_provider = provider.rpc_provider();
+        assert!(rpc_provider.provider().is_err());
+
+        let mut blocks = TestBlockBuilder::eth().get_executed_blocks(0..2).collect::<Vec<_>>();
+        let next_block = blocks.pop().unwrap();
+        let first_hash = blocks[0].recovered_block().hash();
+        let next_hash = next_block.recovered_block().hash();
+        service.save_blocks_per_block(blocks).unwrap();
+        let first_view = rpc_provider.provider().unwrap();
+        let first_bounds = first_view.tx_ref().rpc_read_view_bounds().unwrap();
+        assert_eq!(first_bounds.block_number, 0);
+        assert_eq!(first_bounds.block_hash, first_hash);
+
+        // Holding the old complete view must not prevent the original staged append commits.
+        service.save_blocks_per_block(vec![next_block]).unwrap();
+        let next_view = rpc_provider.provider().unwrap();
+        let next_bounds = next_view.tx_ref().rpc_read_view_bounds().unwrap();
+        assert_eq!(next_bounds.block_number, 1);
+        assert_eq!(next_bounds.block_hash, next_hash);
+        assert_eq!(first_view.block_hash(1).unwrap(), None);
+        assert_eq!(next_view.block_hash(1).unwrap(), Some(next_hash));
+        assert_eq!(first_view.tx_ref().rpc_read_view_bounds(), Some(first_bounds));
     }
 
     #[test]

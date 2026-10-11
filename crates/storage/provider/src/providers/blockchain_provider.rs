@@ -165,6 +165,13 @@ impl<N: ProviderNodeTypes> DatabaseProviderFactory for BlockchainProvider<N> {
     type Provider = <ProviderFactory<N> as DatabaseProviderFactory>::Provider;
     type ProviderRW = <ProviderFactory<N> as DatabaseProviderFactory>::ProviderRW;
 
+    fn rpc_provider(&self) -> Self {
+        Self {
+            database: self.database.rpc_provider(),
+            canonical_in_memory_state: self.canonical_in_memory_state.clone(),
+        }
+    }
+
     fn database_provider_ro(&self) -> ProviderResult<Self::Provider> {
         self.database.database_provider_ro()
     }
@@ -288,6 +295,9 @@ impl<N: ProviderNodeTypes> BlockNumReader for BlockchainProvider<N> {
 
 impl<N: ProviderNodeTypes> BlockIdReader for BlockchainProvider<N> {
     fn pending_block_num_hash(&self) -> ProviderResult<Option<BlockNumHash>> {
+        if self.database.uses_rpc_reads() {
+            return self.consistent_provider()?.pending_block_num_hash();
+        }
         Ok(self.canonical_in_memory_state.pending_block_num_hash())
     }
 
@@ -316,12 +326,18 @@ impl<N: ProviderNodeTypes> BlockReader for BlockchainProvider<N> {
     }
 
     fn pending_block(&self) -> ProviderResult<Option<RecoveredBlock<Self::Block>>> {
+        if self.database.uses_rpc_reads() {
+            return self.consistent_provider()?.pending_block();
+        }
         Ok(self.canonical_in_memory_state.pending_recovered_block())
     }
 
     fn pending_block_and_receipts(
         &self,
     ) -> ProviderResult<Option<(RecoveredBlock<Self::Block>, Vec<Self::Receipt>)>> {
+        if self.database.uses_rpc_reads() {
+            return self.consistent_provider()?.pending_block_and_receipts();
+        }
         Ok(self.canonical_in_memory_state.pending_block_and_receipts())
     }
 
@@ -529,6 +545,16 @@ impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider<N> {
             BlockId::Hash(hash) => {
                 let block_hash = hash.block_hash;
                 let provider = self.consistent_provider()?;
+                if self.database.uses_rpc_reads() &&
+                    hash.require_canonical != Some(true) &&
+                    provider
+                        .pending_block_num_hash()?
+                        .is_some_and(|pending| pending.hash == block_hash)
+                {
+                    return provider
+                        .into_rpc_pending_state_provider(Some(block_hash))?
+                        .ok_or(ProviderError::BlockHashNotFound(block_hash));
+                }
                 let number = provider
                     .block_number(block_hash)?
                     .ok_or(ProviderError::BlockHashNotFound(block_hash))?;
@@ -542,6 +568,9 @@ impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider<N> {
 
     /// Storage provider for latest block
     fn latest(&self) -> ProviderResult<StateProviderBox> {
+        if self.database.uses_rpc_reads() {
+            return self.consistent_provider()?.into_latest_state_provider();
+        }
         trace!(target: "providers::blockchain", "Getting latest block state provider");
         // use latest state provider if the head state exists
         if let Some(state) = self.canonical_in_memory_state.head_state() {
@@ -606,6 +635,9 @@ impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider<N> {
 
     fn state_by_block_hash(&self, hash: BlockHash) -> ProviderResult<StateProviderBox> {
         trace!(target: "providers::blockchain", ?hash, "Getting state by block hash");
+        if self.database.uses_rpc_reads() {
+            return self.state_by_block_id(BlockId::hash(hash));
+        }
         if let Ok(state) = self.history_by_block_hash(hash) {
             // This could be tracked by a historical block
             Ok(state)
@@ -625,6 +657,12 @@ impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider<N> {
     fn pending(&self) -> ProviderResult<StateProviderBox> {
         trace!(target: "providers::blockchain", "Getting provider for pending state");
 
+        if self.database.uses_rpc_reads() {
+            return self
+                .consistent_provider()?
+                .into_rpc_pending_state_provider(None)
+                .and_then(|state| state.ok_or(ProviderError::StateForHashNotFound(B256::ZERO)));
+        }
         if let Some(pending) = self.canonical_in_memory_state.pending_state() {
             // we have a pending block
             return Ok(Box::new(self.block_state_provider(&pending)?));
@@ -635,6 +673,9 @@ impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider<N> {
     }
 
     fn pending_state_by_hash(&self, block_hash: B256) -> ProviderResult<Option<StateProviderBox>> {
+        if self.database.uses_rpc_reads() {
+            return self.consistent_provider()?.into_rpc_pending_state_provider(Some(block_hash));
+        }
         if let Some(pending) = self.canonical_in_memory_state.pending_state() &&
             pending.hash() == block_hash
         {
@@ -644,6 +685,13 @@ impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider<N> {
     }
 
     fn maybe_pending(&self) -> ProviderResult<Option<StateProviderBox>> {
+        if self.database.uses_rpc_reads() {
+            let provider = self.consistent_provider()?;
+            if provider.has_rpc_pending_state() {
+                return provider.into_rpc_pending_state_provider(None);
+            }
+            return Ok(None);
+        }
         if let Some(pending) = self.canonical_in_memory_state.pending_state() {
             return Ok(Some(Box::new(self.block_state_provider(&pending)?)))
         }

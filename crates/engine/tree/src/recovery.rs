@@ -6,6 +6,7 @@
 //! checkpoints and rebuilding the missing data.
 
 use alloy_consensus::BlockHeader;
+use alloy_eips::BlockNumHash;
 use alloy_primitives::BlockNumber;
 use reth_db::{
     tables,
@@ -115,6 +116,11 @@ impl<'a, N: ProviderNodeTypes> StorageRecoveryHelper<'a, N> {
     /// - History indices correctly track all state changes
     /// - All checkpoints are synchronized at `recover_block_number`
     pub fn check_and_recover(&self) -> ProviderResult<()> {
+        let mut rpc_maintenance = self
+            .factory
+            .db_ref()
+            .rpc_maintenance(true)
+            .expect("blocking RPC maintenance always acquires a guard");
         let mut write_guard = self.factory.db_ref().consistent_write();
         let provider_rw = self.factory.database_provider_rw()?;
         let recover_block_number = provider_rw.recover_block_number()?;
@@ -136,7 +142,13 @@ impl<'a, N: ProviderNodeTypes> StorageRecoveryHelper<'a, N> {
 
         let provider_rw = self.factory.database_provider_rw()?;
         provider_rw.update_pipeline_stages(recover_block_number, false)?;
+        let recovered_hash = provider_rw.block_hash(recover_block_number)?;
         provider_rw.commit()?;
+        if let Some(hash) = recovered_hash {
+            self.factory
+                .publish_rpc_read_view(BlockNumHash { number: recover_block_number, hash })?;
+            rpc_maintenance.complete();
+        }
         write_guard.recovered();
         info!(target: "engine::recovery", recover_block_number = ?recover_block_number, "Recovery completed successfully");
         Ok(())

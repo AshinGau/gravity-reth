@@ -6,6 +6,7 @@ use parking_lot::Mutex;
 use reth_db_api::{
     common::{IterPairResult, PairResult, ValueOnlyResult},
     cursor::{DbCursorRO, DbCursorRW, DbDupCursorRO, DbDupCursorRW, Walker},
+    database::RpcReadLease,
     table::{Compress, Decode, Decompress, DupSort, Encode, Table},
 };
 use reth_storage_errors::db::DatabaseErrorInfo;
@@ -60,6 +61,8 @@ pub struct Cursor<K: TransactionKind, T: Table> {
     iterator: rocksdb::DBRawIterator<'static>,
     /// Retains the read view until after the iterator has been dropped.
     snapshot: Option<Arc<DbSnapshot>>,
+    /// Retains protection for static files even if the originating transaction is dropped.
+    _rpc_lease: Option<Arc<dyn RpcReadLease>>,
     /// db should drop after iterator
     db: Arc<DB>,
     /// Cache buffer that receives compressed values.
@@ -86,6 +89,7 @@ impl<K: TransactionKind, T: Table> Cursor<K, T> {
         db: Arc<DB>,
         batch: Arc<Mutex<rocksdb::WriteBatch>>,
         snapshot: Option<Arc<DbSnapshot>>,
+        rpc_lease: Option<Arc<dyn RpcReadLease>>,
     ) -> Result<Self, DatabaseError> {
         let cf_handle = get_cf_handle::<T>(&db)?;
 
@@ -100,7 +104,15 @@ impl<K: TransactionKind, T: Table> Cursor<K, T> {
             )
         };
 
-        Ok(Self { iterator, snapshot, db, batch, buf: Vec::new(), _phantom: PhantomData })
+        Ok(Self {
+            iterator,
+            snapshot,
+            _rpc_lease: rpc_lease,
+            db,
+            batch,
+            buf: Vec::new(),
+            _phantom: PhantomData,
+        })
     }
 
     /// Encode `DupSort` composite key: key + subkey

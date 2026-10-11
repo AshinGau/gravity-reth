@@ -191,6 +191,45 @@ pub mod test_utils {
         fn consistent_write(&self) -> Box<dyn ConsistentWriteGuard + '_> {
             self.db().consistent_write()
         }
+
+        fn rpc_read_lease(
+            &self,
+        ) -> Result<Option<Arc<dyn reth_db_api::database::RpcReadLease>>, DatabaseError> {
+            self.db().rpc_read_lease()
+        }
+
+        fn tx_rpc(
+            &self,
+            lease: Option<Arc<dyn reth_db_api::database::RpcReadLease>>,
+        ) -> Result<Self::TX, DatabaseError> {
+            self.pre_tx_hook.read()();
+            let tx = self.db().tx_rpc(lease)?;
+            self.post_tx_hook.read()();
+            Ok(tx)
+        }
+
+        fn publish_rpc_view(
+            &self,
+            bounds: reth_db_api::database::RpcReadViewBounds,
+            verified: bool,
+        ) -> Result<(), DatabaseError> {
+            self.db().publish_rpc_view(bounds, verified)
+        }
+
+        fn rpc_read_view_requires_validation(&self, block_number: u64) -> bool {
+            self.db().rpc_read_view_requires_validation(block_number)
+        }
+
+        fn rpc_publication_failed(&self) {
+            self.db().rpc_publication_failed();
+        }
+
+        fn rpc_maintenance(
+            &self,
+            wait: bool,
+        ) -> Option<Box<dyn reth_db_api::database::RpcMaintenanceGuard + '_>> {
+            self.db().rpc_maintenance(wait)
+        }
     }
 
     impl<DB: DatabaseMetrics> DatabaseMetrics for TempDatabase<DB> {

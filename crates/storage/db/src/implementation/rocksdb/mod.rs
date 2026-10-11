@@ -4,14 +4,16 @@ use crate::{DatabaseError, TableSet};
 use metrics::Label;
 use parking_lot::{RwLock, RwLockWriteGuard};
 use reth_db_api::{
-    database::{ConsistentWriteGuard, Database},
+    database::{
+        ConsistentWriteGuard, Database, RpcMaintenanceGuard, RpcReadLease, RpcReadViewBounds,
+    },
     database_metrics::DatabaseMetrics,
     models::ClientVersion,
     table::Table,
     tables, Tables,
 };
 use reth_storage_errors::db::{DatabaseErrorInfo, LogLevel};
-use reth_tracing::tracing::info;
+use reth_tracing::tracing::{info, warn};
 use rocksdb::{BlockBasedOptions, Cache, ColumnFamilyDescriptor, Options, DB};
 use std::{
     collections::HashMap,
@@ -23,6 +25,7 @@ use std::{
 };
 
 pub(crate) mod cursor;
+mod rpc_read_view;
 pub(crate) mod tx;
 
 /// Database environment kind.
@@ -268,11 +271,13 @@ pub struct DatabaseEnv {
     snapshot_barrier: RwLock<()>,
     /// A failed partial write requires recovery before a read view can be trusted again.
     incomplete_write: AtomicBool,
+    /// Published complete snapshots for RPC, independent of the execution read barrier.
+    rpc_views: Arc<rpc_read_view::RpcViewManager>,
 }
 
 struct RocksWriteGuard<'a> {
     _guard: RwLockWriteGuard<'a, ()>,
-    incomplete_write: &'a AtomicBool,
+    env: &'a DatabaseEnv,
     complete: bool,
 }
 
@@ -283,14 +288,17 @@ impl ConsistentWriteGuard for RocksWriteGuard<'_> {
 
     fn recovered(&mut self) {
         self.complete = true;
-        self.incomplete_write.store(false, Ordering::Release);
+        self.env.incomplete_write.store(false, Ordering::Release);
     }
 }
 
 impl Drop for RocksWriteGuard<'_> {
     fn drop(&mut self) {
         if !self.complete {
-            self.incomplete_write.store(true, Ordering::Release);
+            self.env.incomplete_write.store(true, Ordering::Release);
+            // Capture before recovery truncates checkpoints. Read failure must keep RPC closed.
+            let floor = self.env.rpc_replay_floor().unwrap_or(u64::MAX);
+            self.env.rpc_views.interrupt(floor);
         }
     }
 }
@@ -319,14 +327,49 @@ impl DatabaseEnv {
         let account_db = dbs.get(&account_path).cloned().expect("account DB handle missing");
         let storage_db = dbs.get(&storage_path).cloned().expect("storage DB handle missing");
 
-        Ok(Self {
+        // Recovery can truncate checkpoints before replaying an interrupted write. Capture the
+        // original tail first, so an earlier complete replay block cannot expose residual trie
+        // updates from a later block. Existing clean databases conservatively wait one block.
+        let mut env = Self {
             state_db,
             account_db,
             storage_db,
             kind,
             snapshot_barrier: RwLock::new(()),
             incomplete_write: AtomicBool::new(false),
-        })
+            rpc_views: Arc::default(),
+        };
+        let replay_floor = env.rpc_replay_floor().unwrap_or_else(|error| {
+            warn!(target: "db::rpc", %error,
+                "RPC replay boundary is unavailable; RPC storage admission remains closed");
+            u64::MAX
+        });
+        env.rpc_views = Arc::new(rpc_read_view::RpcViewManager::new(replay_floor));
+        Ok(env)
+    }
+
+    fn rpc_replay_floor(&self) -> Result<u64, DatabaseError> {
+        use reth_db_api::{cursor::DbCursorRO, transaction::DbTx};
+        let tx = tx::Tx::<tx::RO>::new(
+            self.state_db.clone(),
+            self.account_db.clone(),
+            self.storage_db.clone(),
+        );
+        let body_tip =
+            tx.cursor_read::<tables::BlockBodyIndices>()?.last()?.map(|(number, _)| number);
+        let stage_tip = ["Execution", "AccountHashing", "IndexAccountHistory", "MerkleExecute"]
+            .into_iter()
+            .map(|stage| tx.get::<tables::StageCheckpoints>(stage.to_string()))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .map(|checkpoint| checkpoint.block_number)
+            .max();
+        let minimum = u64::from(body_tip.is_some() || stage_tip.is_some());
+        Ok(body_tip
+            .unwrap_or_default()
+            .max(stage_tip.map_or(0, |tip| tip.saturating_add(1)))
+            .max(minimum))
     }
 
     /// Resolve shard paths based on configuration.
@@ -764,9 +807,55 @@ impl Database for DatabaseEnv {
     fn consistent_write(&self) -> Box<dyn ConsistentWriteGuard + '_> {
         Box::new(RocksWriteGuard {
             _guard: self.snapshot_barrier.write(),
-            incomplete_write: &self.incomplete_write,
+            env: self,
             complete: false,
         })
+    }
+
+    fn rpc_read_lease(&self) -> Result<Option<Arc<dyn RpcReadLease>>, DatabaseError> {
+        self.rpc_views.lease().map(Some)
+    }
+
+    fn tx_rpc(&self, lease: Option<Arc<dyn RpcReadLease>>) -> Result<Self::TX, DatabaseError> {
+        let lease =
+            lease.ok_or_else(|| DatabaseError::Other("RPC read lease is required".into()))?;
+        let view = self.rpc_views.view(&lease)?;
+        Ok(tx::Tx::new_rpc_snapshot(
+            self.state_db.clone(),
+            self.account_db.clone(),
+            self.storage_db.clone(),
+            &view,
+            lease,
+        ))
+    }
+
+    fn publish_rpc_view(
+        &self,
+        bounds: RpcReadViewBounds,
+        verified: bool,
+    ) -> Result<(), DatabaseError> {
+        self.rpc_views.publish(
+            rpc_read_view::PublishedRpcView::new(
+                bounds,
+                self.state_db.clone(),
+                self.account_db.clone(),
+                self.storage_db.clone(),
+            ),
+            verified,
+        );
+        Ok(())
+    }
+
+    fn rpc_read_view_requires_validation(&self, block_number: u64) -> bool {
+        self.rpc_views.requires_validation(block_number)
+    }
+
+    fn rpc_publication_failed(&self) {
+        self.rpc_views.publication_failed();
+    }
+
+    fn rpc_maintenance(&self, wait: bool) -> Option<Box<dyn RpcMaintenanceGuard + '_>> {
+        self.rpc_views.maintenance(wait)
     }
 }
 

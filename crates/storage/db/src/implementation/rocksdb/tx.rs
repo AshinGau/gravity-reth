@@ -6,6 +6,7 @@ use crate::{
 };
 use parking_lot::Mutex;
 use reth_db_api::{
+    database::{RpcReadLease, RpcReadViewBounds},
     table::{Compress, Decompress, DupSort, Encode, Table, TableImporter},
     tables,
     transaction::{DbTx, DbTxMut},
@@ -31,7 +32,7 @@ pub(crate) struct DbSnapshot {
 }
 
 impl DbSnapshot {
-    fn new(db: Arc<DB>) -> Self {
+    pub(super) fn new(db: Arc<DB>) -> Self {
         let snapshot = unsafe {
             // SAFETY: `_db` owns the referenced DB for the entire snapshot lifetime. Field drop
             // order releases `snapshot` before `_db`, and cursors retain this owner in an Arc.
@@ -101,6 +102,8 @@ pub struct Tx<K: cursor::TransactionKind> {
     state_snapshot: Option<Arc<DbSnapshot>>,
     account_snapshot: Option<Arc<DbSnapshot>>,
     storage_snapshot: Option<Arc<DbSnapshot>>,
+    rpc_lease: Option<Arc<dyn RpcReadLease>>,
+    rpc_bounds: Option<RpcReadViewBounds>,
     committed_writes: AtomicBool,
 
     /// Write batch for state database.
@@ -135,6 +138,8 @@ impl<K: cursor::TransactionKind> Tx<K> {
             state_snapshot: None,
             account_snapshot: None,
             storage_snapshot: None,
+            rpc_lease: None,
+            rpc_bounds: None,
             committed_writes: AtomicBool::new(false),
             state_batch: Arc::new(Mutex::new(rocksdb::WriteBatch::default())),
             account_batch: Arc::new(Mutex::new(rocksdb::WriteBatch::default())),
@@ -218,6 +223,23 @@ impl<K: cursor::TransactionKind> Tx<K> {
 }
 
 impl Tx<RO> {
+    pub(super) fn new_rpc_snapshot(
+        state_db: Arc<DB>,
+        account_db: Arc<DB>,
+        storage_db: Arc<DB>,
+        view: &super::rpc_read_view::PublishedRpcView,
+        lease: Arc<dyn RpcReadLease>,
+    ) -> Self {
+        Self {
+            state_snapshot: Some(view.state.clone()),
+            account_snapshot: Some(view.accounts.clone()),
+            storage_snapshot: Some(view.storages.clone()),
+            rpc_lease: Some(lease),
+            rpc_bounds: Some(view.bounds),
+            ..Self::new(state_db, account_db, storage_db)
+        }
+    }
+
     pub(crate) fn new_snapshot(
         state_db: Arc<DB>,
         account_db: Arc<DB>,
@@ -240,6 +262,9 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
     type DupCursor<T: DupSort> = cursor::Cursor<K, T>;
 
     fn snapshot_block_number(&self) -> Result<Option<u64>, DatabaseError> {
+        if let Some(bounds) = self.rpc_bounds {
+            return Ok(Some(bounds.block_number));
+        }
         if self.state_snapshot.is_none() {
             return Ok(None);
         }
@@ -258,6 +283,10 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
             ));
         }
         Ok(Some(height))
+    }
+
+    fn rpc_read_view_bounds(&self) -> Option<RpcReadViewBounds> {
+        self.rpc_bounds
     }
 
     fn has_committed_writes(&self) -> bool {
@@ -455,6 +484,7 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
             self.db_for_table::<T>().clone(),
             self.batch_for_table::<T>().clone(),
             self.snapshot_for_table::<T>().cloned(),
+            self.rpc_lease.clone(),
         )
     }
 
@@ -463,6 +493,7 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
             self.db_for_table::<T>().clone(),
             self.batch_for_table::<T>().clone(),
             self.snapshot_for_table::<T>().cloned(),
+            self.rpc_lease.clone(),
         )
     }
 
@@ -598,6 +629,7 @@ impl DbTxMut for Tx<cursor::RW> {
             self.db_for_table::<T>().clone(),
             self.batch_for_table::<T>().clone(),
             None,
+            None,
         )
     }
 
@@ -605,6 +637,7 @@ impl DbTxMut for Tx<cursor::RW> {
         cursor::Cursor::new(
             self.db_for_table::<T>().clone(),
             self.batch_for_table::<T>().clone(),
+            None,
             None,
         )
     }

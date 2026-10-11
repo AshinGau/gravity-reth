@@ -70,6 +70,8 @@ pub struct EthApi<N: RpcNodeCore, Rpc: RpcConvert> {
     /// All nested fields bundled together.
     #[deref]
     pub(super) inner: Arc<EthApiInner<N, Rpc>>,
+    /// Internal execution reads must not depend on external RPC snapshot admission.
+    pub(super) use_node_provider: bool,
 }
 
 impl<N, Rpc> Clone for EthApi<N, Rpc>
@@ -78,7 +80,18 @@ where
     Rpc: RpcConvert,
 {
     fn clone(&self) -> Self {
-        Self { inner: self.inner.clone() }
+        Self { inner: self.inner.clone(), use_node_provider: self.use_node_provider }
+    }
+}
+
+impl<N: RpcNodeCore, Rpc: RpcConvert> EthApi<N, Rpc> {
+    /// Returns the provider selected for this handler.
+    pub fn provider(&self) -> &N::Provider {
+        if self.use_node_provider {
+            self.inner.components.provider()
+        } else {
+            self.inner.provider()
+        }
     }
 }
 
@@ -170,7 +183,7 @@ where
     }
 
     fn provider(&self) -> &Self::Provider {
-        self.inner.provider()
+        self.provider()
     }
 }
 
@@ -226,6 +239,8 @@ where
 pub struct EthApiInner<N: RpcNodeCore, Rpc: RpcConvert> {
     /// The components of the node.
     components: N,
+    /// Provider used by RPC reads, independently of execution's node provider.
+    provider: N::Provider,
     /// All configured Signers
     signers: SignersForRpc<N::Provider, Rpc::Network>,
     /// The async cache frontend for eth related data
@@ -319,10 +334,10 @@ where
         force_blob_sidecar_upcasting: bool,
     ) -> Self {
         let signers = parking_lot::RwLock::new(Default::default());
+        let provider = components.provider().clone();
         // get the block number of the latest block
         let starting_block = U256::from(
-            components
-                .provider()
+            provider
                 .header_by_number_or_tag(BlockNumberOrTag::Latest)
                 .ok()
                 .flatten()
@@ -339,6 +354,7 @@ where
 
         Self {
             components,
+            provider,
             signers,
             eth_cache,
             gas_oracle,
@@ -365,6 +381,12 @@ where
             force_blob_sidecar_upcasting,
         }
     }
+
+    /// Overrides the provider without replacing the node's execution components.
+    pub(crate) fn with_provider(mut self, provider: N::Provider) -> Self {
+        self.provider = provider;
+        self
+    }
 }
 
 impl<N, Rpc> EthApiInner<N, Rpc>
@@ -374,8 +396,8 @@ where
 {
     /// Returns a handle to data on disk.
     #[inline]
-    pub fn provider(&self) -> &N::Provider {
-        self.components.provider()
+    pub const fn provider(&self) -> &N::Provider {
+        &self.provider
     }
 
     /// Returns a handle to the transaction response builder.
@@ -573,23 +595,43 @@ where
 mod tests {
     use crate::{eth::helpers::types::EthRpcConverter, EthApi, EthApiBuilder};
     use alloy_consensus::{Block, BlockBody, Header};
-    use alloy_eips::BlockNumberOrTag;
-    use alloy_primitives::{Signature, B256, U64};
+    use alloy_eips::{BlockId, BlockNumberOrTag, RpcBlockHash};
+    use alloy_primitives::{keccak256, Address, Bytes, Signature, TxKind, B256, U256, U64};
     use alloy_rpc_types::FeeHistory;
-    use alloy_rpc_types_eth::{Bundle, TransactionRequest};
+    use alloy_rpc_types_eth::{
+        simulate::{SimBlock, SimulatePayload},
+        state::EvmOverrides,
+        Bundle, StateContext, TransactionRequest,
+    };
     use jsonrpsee_types::error::INVALID_PARAMS_CODE;
     use rand::Rng;
     use reth_chain_state::CanonStateSubscriptions;
     use reth_chainspec::{ChainSpec, ChainSpecProvider, EthChainSpec};
+    use reth_db_api::{
+        database::Database,
+        models::{ShardedKey, StoredBlockBodyIndices},
+        tables,
+        transaction::DbTxMut,
+        BlockNumberList,
+    };
     use reth_ethereum_primitives::TransactionSigned;
     use reth_evm_ethereum::EthEvmConfig;
     use reth_network_api::noop::NoopNetwork;
+    use reth_primitives_traits::{Account, Bytecode, SealedHeader};
     use reth_provider::{
-        test_utils::{MockEthProvider, NoopProvider},
-        PruneCheckpointReader, StageCheckpointReader,
+        providers::BlockchainProvider,
+        test_utils::{
+            create_test_provider_factory, ExtendedAccount, MockEthProvider, NoopProvider,
+        },
+        DatabaseProviderFactory, PruneCheckpointReader, StageCheckpointReader,
     };
-    use reth_rpc_eth_api::{node::RpcNodeCoreAdapter, EthApiServer};
-    use reth_storage_api::{BlockReader, BlockReaderIdExt, StateProviderFactory};
+    use reth_rpc_eth_api::{
+        helpers::{EthCall, LoadState},
+        node::RpcNodeCoreAdapter,
+        EthApiServer, RpcNodeCore,
+    };
+    use reth_rpc_eth_types::EthApiError;
+    use reth_storage_api::{AccountReader, BlockReader, BlockReaderIdExt, StateProviderFactory};
     use reth_testing_utils::generators;
     use reth_transaction_pool::test_utils::{testing_pool, TestPool};
 
@@ -623,6 +665,245 @@ mod tests {
             EthEvmConfig::new(provider.chain_spec()),
         )
         .build()
+    }
+
+    #[tokio::test]
+    async fn rpc_provider_override_leaves_node_provider_unchanged() {
+        let address = Address::ZERO;
+        let node_provider = MockEthProvider::default();
+        node_provider.add_account(address, ExtendedAccount::new(0, U256::from(1)));
+        let rpc_provider = MockEthProvider::default();
+        rpc_provider.add_account(address, ExtendedAccount::new(0, U256::from(2)));
+
+        let eth_api: FakeEthApi = EthApiBuilder::new(
+            node_provider.clone(),
+            testing_pool(),
+            NoopNetwork::default(),
+            EthEvmConfig::new(node_provider.chain_spec()),
+        )
+        .provider(rpc_provider)
+        .map_converter(core::convert::identity)
+        .with_pending_env_builder(())
+        .build();
+
+        let balance =
+            <EthApi<_, _> as EthApiServer<_, _, _, _, _, _>>::balance(&eth_api, address, None)
+                .await
+                .unwrap();
+        assert_eq!(balance, U256::from(2));
+        assert_eq!(node_provider.basic_account(&address).unwrap().unwrap().balance, U256::from(1));
+        assert_eq!(
+            eth_api.inner.components.provider().basic_account(&address).unwrap().unwrap().balance,
+            U256::from(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn rpc_evm_state_helpers_preserve_require_canonical() {
+        let factory = create_test_provider_factory();
+        let genesis =
+            SealedHeader::seal_slow(Header { gas_limit: 30_000_000, ..Default::default() });
+        let unconfirmed_hash = B256::repeat_byte(0xee);
+        {
+            let mut write = factory.db_ref().consistent_write();
+            let provider = factory.provider_rw().unwrap();
+            let tx = provider.tx_ref();
+            tx.put::<tables::Headers>(0, genesis.header().clone()).unwrap();
+            tx.put::<tables::HeaderNumbers>(genesis.hash(), 0).unwrap();
+            // A known number mapping alone must never establish canonicality for this hash.
+            tx.put::<tables::HeaderNumbers>(unconfirmed_hash, 0).unwrap();
+            tx.put::<tables::CanonicalHeaders>(0, genesis.hash()).unwrap();
+            tx.put::<tables::BlockBodyIndices>(0, StoredBlockBodyIndices::default()).unwrap();
+            tx.put::<tables::PlainAccountState>(
+                Address::ZERO,
+                Account { balance: U256::from(1), ..Default::default() },
+            )
+            .unwrap();
+            tx.put::<tables::AccountsHistory>(
+                ShardedKey::new(Address::ZERO, u64::MAX),
+                BlockNumberList::new([0]).unwrap(),
+            )
+            .unwrap();
+            for stage in
+                ["Execution", "AccountHashing", "IndexAccountHistory", "MerkleExecute", "Finish"]
+            {
+                tx.put::<tables::StageCheckpoints>(stage.to_string(), Default::default()).unwrap();
+            }
+            provider.commit().unwrap();
+            factory.publish_rpc_read_view(genesis.num_hash()).unwrap();
+            write.complete();
+        }
+        let node_provider =
+            BlockchainProvider::with_latest(factory.clone(), genesis.clone()).unwrap();
+        let eth_api: FakeEthApi<_> = EthApiBuilder::new(
+            node_provider.clone(),
+            testing_pool(),
+            NoopNetwork::default(),
+            EthEvmConfig::new(node_provider.chain_spec()),
+        )
+        .provider(node_provider.rpc_provider())
+        .build();
+
+        for require_canonical in [None, Some(false), Some(true)] {
+            let requested =
+                BlockId::Hash(RpcBlockHash { block_hash: genesis.hash(), require_canonical });
+            let (_, state_id) = eth_api.evm_env_at(requested).await.unwrap();
+            assert_eq!(state_id, requested);
+            assert_eq!(
+                eth_api
+                    .state_at_block_id(state_id)
+                    .await
+                    .unwrap()
+                    .account_balance(&Address::ZERO)
+                    .unwrap(),
+                Some(U256::from(1))
+            );
+            let (block, _, state_id) =
+                eth_api.evm_env_and_recovered_block_at(requested).await.unwrap();
+            assert_eq!(block.hash(), genesis.hash());
+            assert_eq!(state_id, requested);
+        }
+        let (_, state_id) = eth_api.evm_env_at(BlockId::number(0)).await.unwrap();
+        assert_eq!(state_id, BlockId::hash_canonical(genesis.hash()));
+        let (_, _, state_id) =
+            eth_api.evm_env_and_recovered_block_at(BlockId::number(0)).await.unwrap();
+        assert_eq!(state_id, BlockId::hash_canonical(genesis.hash()));
+
+        let requested = BlockId::hash_canonical(unconfirmed_hash);
+        let (_, state_id) = eth_api.evm_env_at(requested).await.unwrap();
+        assert_eq!(state_id, requested);
+        assert!(matches!(eth_api.state_at_block_id(state_id).await,
+            Err(EthApiError::HeaderNotFound(id)) if id.as_block_hash() == Some(unconfirmed_hash)
+        ));
+        let (_, _, state_id) = eth_api.evm_env_and_recovered_block_at(requested).await.unwrap();
+        assert_eq!(state_id, requested);
+        assert!(matches!(eth_api.state_at_block_id(state_id).await,
+            Err(EthApiError::HeaderNotFound(id)) if id.as_block_hash() == Some(unconfirmed_hash)
+        ));
+
+        let result = EthCall::simulate_v1(
+            &eth_api,
+            SimulatePayload { block_state_calls: vec![SimBlock::default()], ..Default::default() },
+            Some(requested),
+        )
+        .await;
+        assert!(matches!(result,
+            Err(EthApiError::HeaderNotFound(id)) if id.as_block_hash() == Some(unconfirmed_hash)
+        ));
+        let result = EthCall::call_many(
+            &eth_api,
+            vec![Bundle {
+                transactions: vec![TransactionRequest::default()],
+                block_override: None,
+            }],
+            Some(StateContext { block_number: Some(requested), transaction_index: None }),
+            None,
+        )
+        .await;
+        assert!(matches!(result,
+            Err(EthApiError::HeaderNotFound(id)) if id.as_block_hash() == Some(unconfirmed_hash)
+        ));
+    }
+
+    #[tokio::test]
+    async fn internal_eth_call_uses_execution_state_when_rpc_view_is_closed() {
+        let factory = create_test_provider_factory();
+        let address = Address::repeat_byte(0x11);
+        // Return this contract's balance to exercise an actual EVM state read.
+        let code =
+            Bytes::from_static(&[0x30, 0x31, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3]);
+        let code_hash = keccak256(&code);
+        let genesis =
+            SealedHeader::seal_slow(Header { gas_limit: 30_000_000, ..Default::default() });
+        {
+            let mut write = factory.db_ref().consistent_write();
+            let provider = factory.provider_rw().unwrap();
+            let tx = provider.tx_ref();
+            tx.put::<tables::Headers>(0, genesis.header().clone()).unwrap();
+            tx.put::<tables::HeaderNumbers>(genesis.hash(), 0).unwrap();
+            tx.put::<tables::CanonicalHeaders>(0, genesis.hash()).unwrap();
+            tx.put::<tables::BlockBodyIndices>(0, StoredBlockBodyIndices::default()).unwrap();
+            tx.put::<tables::PlainAccountState>(
+                address,
+                Account {
+                    balance: U256::from(1),
+                    bytecode_hash: Some(code_hash),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            tx.put::<tables::Bytecodes>(code_hash, Bytecode::new_raw(code)).unwrap();
+            tx.put::<tables::AccountsHistory>(
+                ShardedKey::new(address, u64::MAX),
+                BlockNumberList::new([0]).unwrap(),
+            )
+            .unwrap();
+            for stage in
+                ["Execution", "AccountHashing", "IndexAccountHistory", "MerkleExecute", "Finish"]
+            {
+                tx.put::<tables::StageCheckpoints>(stage.to_string(), Default::default()).unwrap();
+            }
+            provider.commit().unwrap();
+            factory.publish_rpc_read_view(genesis.num_hash()).unwrap();
+            write.complete();
+        }
+        {
+            let mut write = factory.db_ref().consistent_write();
+            let provider = factory.provider_rw().unwrap();
+            provider
+                .tx_ref()
+                .put::<tables::PlainAccountState>(
+                    address,
+                    Account {
+                        balance: U256::from(2),
+                        bytecode_hash: Some(code_hash),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            provider.commit().unwrap();
+            write.complete();
+        }
+        let node_provider = BlockchainProvider::with_latest(factory.clone(), genesis).unwrap();
+        let eth_api: FakeEthApi<_> = EthApiBuilder::new(
+            node_provider.clone(),
+            testing_pool(),
+            NoopNetwork::default(),
+            EthEvmConfig::new(node_provider.chain_spec()),
+        )
+        .provider(node_provider.rpc_provider())
+        .build();
+        let internal_api = eth_api.with_execution_provider().clone();
+        let request = TransactionRequest {
+            to: Some(TxKind::Call(address)),
+            gas: Some(100_000),
+            ..Default::default()
+        };
+        assert_eq!(
+            EthCall::call(&eth_api, request.clone(), None, EvmOverrides::new(None, None))
+                .await
+                .unwrap(),
+            Bytes::copy_from_slice(&U256::from(1).to_be_bytes::<32>())
+        );
+        assert_eq!(
+            EthCall::call(&internal_api, request.clone(), None, EvmOverrides::new(None, None))
+                .await
+                .unwrap(),
+            Bytes::copy_from_slice(&U256::from(2).to_be_bytes::<32>())
+        );
+
+        let maintenance = factory.db_ref().rpc_maintenance(false).unwrap();
+        assert!(factory.rpc_provider().provider().is_err());
+        assert!(EthCall::call(&eth_api, request.clone(), None, EvmOverrides::new(None, None))
+            .await
+            .is_err());
+        assert_eq!(
+            EthCall::call(&internal_api, request, None, EvmOverrides::new(None, None))
+                .await
+                .unwrap(),
+            Bytes::copy_from_slice(&U256::from(2).to_be_bytes::<32>())
+        );
+        drop(maintenance);
     }
 
     // Function to prepare the EthApi with mock data

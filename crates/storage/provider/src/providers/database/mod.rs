@@ -10,15 +10,15 @@ use crate::{
     PruneCheckpointReader, StageCheckpointReader, StateProviderBox, StaticFileProviderFactory,
     TransactionVariant, TransactionsProvider,
 };
-use alloy_consensus::transaction::TransactionMeta;
-use alloy_eips::BlockHashOrNumber;
+use alloy_consensus::{transaction::TransactionMeta, BlockHeader};
+use alloy_eips::{BlockHashOrNumber, BlockNumHash};
 use alloy_primitives::{Address, BlockHash, BlockNumber, TxHash, TxNumber, B256, U256};
 use core::fmt;
 use parking_lot::RwLock;
 use reth_chainspec::ChainInfo;
 use reth_db::{init_db, DatabaseArguments, DatabaseEnv};
 use reth_db_api::{
-    database::Database,
+    database::{Database, RpcReadLease, RpcReadViewBounds},
     models::{GravityStorageSettings, StoredBlockBodyIndices},
     tables,
     transaction::DbTx,
@@ -76,6 +76,8 @@ pub struct ProviderFactory<N: NodeTypesWithDB> {
     storage: Arc<N::Storage>,
     /// Cached storage layout settings, loaded from the metadata table at construction.
     storage_settings: Arc<RwLock<GravityStorageSettings>>,
+    /// This instance reads the last fully published view instead of waiting for current writes.
+    rpc_reads: bool,
 }
 
 impl<N: NodeTypes> ProviderFactory<NodeTypesWithDBAdapter<N, Arc<DatabaseEnv>>> {
@@ -120,6 +122,7 @@ impl<N: NodeTypesWithDB> ProviderFactory<N> {
             prune_modes: PruneModes::none(),
             storage: Default::default(),
             storage_settings,
+            rpc_reads: false,
         }
     }
 
@@ -165,6 +168,7 @@ impl<N: NodeTypesWithDB<DB = Arc<DatabaseEnv>>> ProviderFactory<N> {
             prune_modes: PruneModes::none(),
             storage: Default::default(),
             storage_settings,
+            rpc_reads: false,
         })
     }
 }
@@ -178,14 +182,92 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
     /// data.
     #[track_caller]
     pub fn provider(&self) -> ProviderResult<DatabaseProviderRO<N::DB, N>> {
+        let lease = self.rpc_read_lease()?;
+        self.provider_with_rpc_lease(lease)
+    }
+
+    pub(crate) const fn uses_rpc_reads(&self) -> bool {
+        self.rpc_reads
+    }
+
+    pub(crate) fn rpc_read_lease(&self) -> ProviderResult<Option<Arc<dyn RpcReadLease>>> {
+        if self.rpc_reads {
+            Ok(self.db.rpc_read_lease()?)
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub(crate) fn provider_with_rpc_lease(
+        &self,
+        lease: Option<Arc<dyn RpcReadLease>>,
+    ) -> ProviderResult<DatabaseProviderRO<N::DB, N>> {
         Ok(DatabaseProvider::new(
-            self.db.tx()?,
+            if self.rpc_reads { self.db.tx_rpc(lease)? } else { self.db.tx()? },
             self.chain_spec.clone(),
             self.static_file_provider.clone(),
             self.prune_modes.clone(),
             self.storage.clone(),
             self.storage_settings.clone(),
         ))
+    }
+
+    /// Publishes a complete block while the caller holds the coordinated write range.
+    /// Reads use a RW provider here to avoid recursively acquiring the snapshot barrier.
+    /// Publication-only failures close RPC admission; they cannot fail a completed storage write.
+    pub fn publish_rpc_read_view(&self, block: BlockNumHash) -> ProviderResult<()> {
+        if let Err(error) = self.try_publish_rpc_read_view(block) {
+            self.db.rpc_publication_failed();
+            tracing::warn!(target: "provider::rpc", block = block.number, %error,
+                "RPC storage publication failed; execution storage remains available");
+        }
+        Ok(())
+    }
+
+    fn try_publish_rpc_read_view(&self, block: BlockNumHash) -> ProviderResult<()> {
+        let provider = self.provider_rw()?;
+        for stage in [
+            StageId::Execution,
+            StageId::AccountHashing,
+            StageId::IndexAccountHistory,
+            StageId::MerkleExecute,
+        ] {
+            if provider.get_stage_checkpoint(stage)?.unwrap_or_default().block_number !=
+                block.number
+            {
+                return Err(ProviderError::HeaderNotFound(block.number.into()));
+            }
+        }
+        if provider.block_hash(block.number)? != Some(block.hash) {
+            return Err(ProviderError::BlockHashNotFound(block.hash));
+        }
+        let indices = provider
+            .block_body_indices(block.number)?
+            .ok_or(ProviderError::BlockBodyIndicesNotFound(block.number))?;
+        // Legacy merged commits could persist a trie shard before recording the group tail.
+        // The replay floor protects state/history; this startup-only traversal also verifies
+        // reachable trie data rather than trusting cached hashes in parent nodes.
+        let verified = if self.db.rpc_read_view_requires_validation(block.number) {
+            let header = provider
+                .header_by_number(block.number)?
+                .ok_or(ProviderError::HeaderNotFound(block.number.into()))?;
+            reth_trie_db::validate_storage_trie(provider.tx_ref(), header.state_root())?
+        } else {
+            true
+        };
+        if !verified {
+            tracing::warn!(target: "provider::rpc", block = block.number,
+                "RPC storage view remains closed until trie replay is complete");
+        }
+        self.db.publish_rpc_view(
+            RpcReadViewBounds {
+                block_number: block.number,
+                block_hash: block.hash,
+                next_tx_num: indices.next_tx_num(),
+            },
+            verified,
+        )?;
+        Ok(())
     }
 
     /// Returns a provider with a created `DbTxMut` inside, which allows fetching and updating
@@ -244,11 +326,20 @@ impl<N: ProviderNodeTypes> DatabaseProviderFactory for ProviderFactory<N> {
     type Provider = DatabaseProvider<<N::DB as Database>::TX, N>;
     type ProviderRW = DatabaseProvider<<N::DB as Database>::TXMut, N>;
 
+    fn rpc_provider(&self) -> Self {
+        let mut provider = self.clone();
+        provider.rpc_reads = true;
+        provider
+    }
+
     fn database_provider_ro(&self) -> ProviderResult<Self::Provider> {
         self.provider()
     }
 
     fn database_provider_live_ro(&self) -> ProviderResult<Self::Provider> {
+        if self.rpc_reads {
+            return self.provider();
+        }
         Ok(DatabaseProvider::new(
             self.db.tx_live()?,
             self.chain_spec.clone(),
@@ -297,6 +388,9 @@ impl<N: ProviderNodeTypes> HeaderProvider for ProviderFactory<N> {
     }
 
     fn header_by_number(&self, num: BlockNumber) -> ProviderResult<Option<Self::Header>> {
+        if self.rpc_reads {
+            return self.provider()?.header_by_number(num);
+        }
         self.static_file_provider.get_with_static_file_or_database(
             StaticFileSegment::Headers,
             num,
@@ -317,6 +411,9 @@ impl<N: ProviderNodeTypes> HeaderProvider for ProviderFactory<N> {
         &self,
         range: impl RangeBounds<BlockNumber>,
     ) -> ProviderResult<Vec<Self::Header>> {
+        if self.rpc_reads {
+            return self.provider()?.headers_range(range);
+        }
         self.static_file_provider.get_range_with_static_file_or_database(
             StaticFileSegment::Headers,
             to_range(range),
@@ -330,6 +427,9 @@ impl<N: ProviderNodeTypes> HeaderProvider for ProviderFactory<N> {
         &self,
         number: BlockNumber,
     ) -> ProviderResult<Option<SealedHeader<Self::Header>>> {
+        if self.rpc_reads {
+            return self.provider()?.sealed_header(number);
+        }
         self.static_file_provider.get_with_static_file_or_database(
             StaticFileSegment::Headers,
             number,
@@ -350,6 +450,9 @@ impl<N: ProviderNodeTypes> HeaderProvider for ProviderFactory<N> {
         range: impl RangeBounds<BlockNumber>,
         predicate: impl FnMut(&SealedHeader<Self::Header>) -> bool,
     ) -> ProviderResult<Vec<SealedHeader<Self::Header>>> {
+        if self.rpc_reads {
+            return self.provider()?.sealed_headers_while(range, predicate);
+        }
         self.static_file_provider.get_range_with_static_file_or_database(
             StaticFileSegment::Headers,
             to_range(range),
@@ -362,6 +465,9 @@ impl<N: ProviderNodeTypes> HeaderProvider for ProviderFactory<N> {
 
 impl<N: ProviderNodeTypes> BlockHashReader for ProviderFactory<N> {
     fn block_hash(&self, number: u64) -> ProviderResult<Option<B256>> {
+        if self.rpc_reads {
+            return self.provider()?.block_hash(number);
+        }
         self.static_file_provider.get_with_static_file_or_database(
             StaticFileSegment::Headers,
             number,
@@ -375,6 +481,9 @@ impl<N: ProviderNodeTypes> BlockHashReader for ProviderFactory<N> {
         start: BlockNumber,
         end: BlockNumber,
     ) -> ProviderResult<Vec<B256>> {
+        if self.rpc_reads {
+            return self.provider()?.canonical_hashes_range(start, end);
+        }
         self.static_file_provider.get_range_with_static_file_or_database(
             StaticFileSegment::Headers,
             start..end,
@@ -481,6 +590,9 @@ impl<N: ProviderNodeTypes> TransactionsProvider for ProviderFactory<N> {
     }
 
     fn transaction_by_id(&self, id: TxNumber) -> ProviderResult<Option<Self::Transaction>> {
+        if self.rpc_reads {
+            return self.provider()?.transaction_by_id(id);
+        }
         self.static_file_provider.get_with_static_file_or_database(
             StaticFileSegment::Transactions,
             id,
@@ -493,6 +605,9 @@ impl<N: ProviderNodeTypes> TransactionsProvider for ProviderFactory<N> {
         &self,
         id: TxNumber,
     ) -> ProviderResult<Option<Self::Transaction>> {
+        if self.rpc_reads {
+            return self.provider()?.transaction_by_id_unhashed(id);
+        }
         self.static_file_provider.get_with_static_file_or_database(
             StaticFileSegment::Transactions,
             id,
@@ -552,6 +667,9 @@ impl<N: ProviderNodeTypes> TransactionsProvider for ProviderFactory<N> {
 impl<N: ProviderNodeTypes> ReceiptProvider for ProviderFactory<N> {
     type Receipt = ReceiptTy<N>;
     fn receipt(&self, id: TxNumber) -> ProviderResult<Option<Self::Receipt>> {
+        if self.rpc_reads {
+            return self.provider()?.receipt(id);
+        }
         self.static_file_provider.get_with_static_file_or_database(
             StaticFileSegment::Receipts,
             id,
@@ -575,6 +693,9 @@ impl<N: ProviderNodeTypes> ReceiptProvider for ProviderFactory<N> {
         &self,
         range: impl RangeBounds<TxNumber>,
     ) -> ProviderResult<Vec<Self::Receipt>> {
+        if self.rpc_reads {
+            return self.provider()?.receipts_by_tx_range(range);
+        }
         self.static_file_provider.get_range_with_static_file_or_database(
             StaticFileSegment::Receipts,
             to_range(range),
@@ -660,6 +781,7 @@ where
             prune_modes,
             storage,
             storage_settings: _,
+            rpc_reads: _,
         } = self;
         f.debug_struct("ProviderFactory")
             .field("db", &db)
@@ -680,6 +802,7 @@ impl<N: NodeTypesWithDB> Clone for ProviderFactory<N> {
             prune_modes: self.prune_modes.clone(),
             storage: self.storage.clone(),
             storage_settings: self.storage_settings.clone(),
+            rpc_reads: self.rpc_reads,
         }
     }
 }

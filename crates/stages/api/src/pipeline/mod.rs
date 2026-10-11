@@ -2,15 +2,17 @@ mod ctrl;
 mod event;
 pub use crate::pipeline::ctrl::ControlFlow;
 use crate::{PipelineTarget, StageCheckpoint, StageId};
+use alloy_eips::BlockNumHash;
 use alloy_primitives::{BlockNumber, B256};
 pub use event::*;
 use futures_util::Future;
 use reth_db_api::{database::Database, transaction::DbTx};
 use reth_primitives_traits::constants::BEACON_CONSENSUS_REORG_UNWIND_DEPTH;
 use reth_provider::{
-    providers::ProviderNodeTypes, writer::UnifiedStorageWriter, BlockHashReader, BlockNumReader,
-    ChainStateBlockReader, ChainStateBlockWriter, DatabaseProviderFactory, ProviderFactory,
-    PruneCheckpointReader, StageCheckpointReader, StageCheckpointWriter,
+    providers::ProviderNodeTypes, writer::UnifiedStorageWriter, BlockBodyIndicesProvider,
+    BlockHashReader, BlockNumReader, ChainStateBlockReader, ChainStateBlockWriter,
+    DatabaseProviderFactory, ProviderFactory, PruneCheckpointReader, StageCheckpointReader,
+    StageCheckpointWriter,
 };
 use reth_prune::PrunerBuilder;
 use reth_static_file::StaticFileProducer;
@@ -162,11 +164,20 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                 match target {
                     PipelineTarget::Sync(tip) => self.set_tip(tip),
                     PipelineTarget::Unwind(target) => {
-                        if let Err(err) = self.move_to_static_files() {
+                        let db = self.provider_factory.db_ref().clone();
+                        let mut rpc_maintenance = db
+                            .rpc_maintenance(true)
+                            .expect("blocking RPC maintenance always acquires a guard");
+                        if let Err(err) = self.move_to_static_files_inner() {
                             return (self, Err(err.into()))
                         }
-                        if let Err(err) = self.unwind(target, None) {
+                        if let Err(err) = self.unwind_inner(target, None) {
                             return (self, Err(err))
+                        }
+                        match self.publish_complete_rpc_read_view() {
+                            Ok(true) => rpc_maintenance.complete(),
+                            Ok(false) => {}
+                            Err(err) => return (self, Err(err.into())),
                         }
                         self.progress.update(target);
 
@@ -225,7 +236,10 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
     /// the pipeline (for example the `Finish` stage). Or [`ControlFlow::Unwind`] of the stage
     /// that caused the unwind.
     pub async fn run_loop(&mut self) -> Result<ControlFlow, PipelineError> {
-        self.move_to_static_files()?;
+        let db = self.provider_factory.db_ref().clone();
+        let mut rpc_maintenance =
+            db.rpc_maintenance(true).expect("blocking RPC maintenance always acquires a guard");
+        self.move_to_static_files_inner()?;
 
         let mut previous_stage = None;
         for stage_index in 0..self.stages.len() {
@@ -245,7 +259,10 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                 }
                 ControlFlow::Continue { block_number } => self.progress.update(block_number),
                 ControlFlow::Unwind { target, bad_block } => {
-                    self.unwind(target, Some(bad_block.block.number))?;
+                    self.unwind_inner(target, Some(bad_block.block.number))?;
+                    if self.publish_complete_rpc_read_view()? {
+                        rpc_maintenance.complete();
+                    }
                     return Ok(ControlFlow::Unwind { target, bad_block })
                 }
             }
@@ -259,6 +276,9 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
             );
         }
 
+        if self.publish_complete_rpc_read_view()? {
+            rpc_maintenance.complete();
+        }
         Ok(self.progress.next_ctrl())
     }
 
@@ -276,6 +296,17 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
     /// CAUTION: This method locks the static file producer Mutex, hence can block the thread if the
     /// lock is occupied.
     pub fn move_to_static_files(&self) -> RethResult<()> {
+        let db = self.provider_factory.db_ref().clone();
+        let mut rpc_maintenance =
+            db.rpc_maintenance(true).expect("blocking RPC maintenance always acquires a guard");
+        self.move_to_static_files_inner()?;
+        if self.publish_complete_rpc_read_view()? {
+            rpc_maintenance.complete();
+        }
+        Ok(())
+    }
+
+    fn move_to_static_files_inner(&self) -> RethResult<()> {
         // Copies data from database to static files
         let lowest_static_file_height =
             self.static_file_producer.lock().copy_to_static_files()?.min_block_num();
@@ -303,6 +334,21 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
     ///
     /// If the unwind is due to a bad block the number of that block should be specified.
     pub fn unwind(
+        &mut self,
+        to: BlockNumber,
+        bad_block: Option<BlockNumber>,
+    ) -> Result<(), PipelineError> {
+        let db = self.provider_factory.db_ref().clone();
+        let mut rpc_maintenance =
+            db.rpc_maintenance(true).expect("blocking RPC maintenance always acquires a guard");
+        self.unwind_inner(to, bad_block)?;
+        if self.publish_complete_rpc_read_view()? {
+            rpc_maintenance.complete();
+        }
+        Ok(())
+    }
+
+    fn unwind_inner(
         &mut self,
         to: BlockNumber,
         bad_block: Option<BlockNumber>,
@@ -437,6 +483,55 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
         }
 
         Ok(())
+    }
+
+    /// A stage commit is not a complete RPC view. Keep readers closed until all of the state
+    /// stages agree; a pipeline containing only download or custom stages may not reach one.
+    fn publish_complete_rpc_read_view(&self) -> Result<bool, reth_errors::ProviderError> {
+        let db = self.provider_factory.db_ref().clone();
+        let mut write_guard = db.consistent_write();
+        let publication = (|| {
+            let provider = self.provider_factory.database_provider_rw()?;
+            let Some(execution) = provider.get_stage_checkpoint(StageId::Execution)? else {
+                return Ok(false)
+            };
+            for stage in [
+                StageId::AccountHashing,
+                StageId::StorageHashing,
+                StageId::IndexAccountHistory,
+                StageId::IndexStorageHistory,
+                StageId::MerkleExecute,
+                StageId::Finish,
+            ] {
+                if provider.get_stage_checkpoint(stage)?.map(|checkpoint| checkpoint.block_number) !=
+                    Some(execution.block_number)
+                {
+                    return Ok(false)
+                }
+            }
+            let Some(hash) = provider.block_hash(execution.block_number)? else { return Ok(false) };
+            if provider.block_body_indices(execution.block_number)?.is_none() {
+                return Ok(false)
+            }
+            drop(provider);
+            self.provider_factory
+                .publish_rpc_read_view(BlockNumHash { number: execution.block_number, hash })?;
+            Ok::<_, reth_errors::ProviderError>(true)
+        })();
+        // The pipeline's storage work has already succeeded. Auxiliary reads for RPC admission
+        // must not mark that work interrupted or stop the original pipeline.
+        write_guard.complete();
+        match publication {
+            Ok(complete) => Ok(complete),
+            Err(error) => {
+                db.rpc_publication_failed();
+                tracing::warn!(target: "sync::pipeline", %error,
+                    "RPC storage publication failed; pipeline storage remains available");
+                // The replacement decision completed with RPC closed. Let the surrounding
+                // maintenance guard finish without inventing an interrupted storage write.
+                Ok(true)
+            }
+        }
     }
 
     async fn execute_stage_to_completion(
